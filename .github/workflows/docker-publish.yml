@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - next
+      # Fork deployment branch (v0.17.0 + the open fixes); has no release tag, so it is published as sha-<commit> only
+      - sabai
 
 jobs:
   # Prepare metadata and tags for all builds
