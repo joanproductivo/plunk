@@ -17,7 +17,13 @@ import {
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
-import type {BulkContactActionSelector, ContactSubscriptionStatus, CursorPaginatedResponse} from '@plunk/types';
+import type {
+  BulkContactActionSelector,
+  ContactImportResult,
+  ContactSubscriptionStatus,
+  CursorPaginatedResponse,
+} from '@plunk/types';
+import {SEGMENT_IMPORT_ERROR_ROW} from '@plunk/types';
 import {
   getCoreRowModel,
   useReactTable,
@@ -27,6 +33,7 @@ import {
   type VisibilityState,
 } from '@tanstack/react-table';
 import {DashboardLayout} from '../../components/DashboardLayout';
+import {ExportContactsButton} from '../../components/ExportContactsButton';
 import {
   BulkActionBar,
   DataTable,
@@ -272,19 +279,25 @@ export default function ContactsPage() {
     ? Math.max(0, totalCount - excludedContacts.size)
     : selectedContacts.size;
 
+  // The active list filters, as the API's selector takes them.
+  const listFilter = useMemo(
+    () => ({...(search ? {search} : {}), ...(statusFilter !== 'ALL' ? {status: statusFilter} : {})}),
+    [search, statusFilter],
+  );
+
   // What a bulk action targets. "Select all matching" mirrors the active list filters so it
   // reaches exactly the rows the user is looking at, minus the ones they unticked.
   const bulkSelector = useMemo<BulkContactActionSelector>(
     () =>
       selectAllMatching
-        ? {
-            mode: 'query',
-            filter: {...(search ? {search} : {}), ...(statusFilter !== 'ALL' ? {status: statusFilter} : {})},
-            excludeIds: Array.from(excludedContacts),
-          }
+        ? {mode: 'query', filter: listFilter, excludeIds: Array.from(excludedContacts)}
         : {mode: 'ids', contactIds: Array.from(selectedContacts)},
-    [selectAllMatching, search, statusFilter, excludedContacts, selectedContacts],
+    [selectAllMatching, listFilter, excludedContacts, selectedContacts],
   );
+
+  // The export takes the selection when there is one, and the whole filtered list otherwise.
+  const exportSelector: BulkContactActionSelector =
+    effectiveSelectionCount > 0 ? bulkSelector : {mode: 'query', filter: listFilter};
 
   const handleBulkAction = (operation: 'subscribe' | 'unsubscribe' | 'delete') => {
     setBulkOperation(operation);
@@ -481,6 +494,7 @@ export default function ContactsPage() {
                 <span className="hidden sm:inline">Import CSV</span>
                 <span className="sm:hidden">Import</span>
               </Button>
+              <ExportContactsButton selector={exportSelector} selectionCount={effectiveSelectionCount} />
               <Button onClick={() => setShowCreateDialog(true)} className="flex-1 sm:flex-none">
                 <Plus className="h-4 w-4" />
                 <span className="hidden sm:inline">Add contact</span>
@@ -869,22 +883,13 @@ interface ImportContactsDialogProps {
   onSuccess: () => void;
 }
 
-interface ImportResult {
-  totalRows: number;
-  successCount: number;
-  createdCount: number;
-  updatedCount: number;
-  failureCount: number;
-  errors: Array<{row: number; email: string; error: string}>;
-}
-
 function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDialogProps) {
   const [file, setFile] = useState<File | null>(null);
   const [, setJobId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<'idle' | 'uploading' | 'processing' | 'completed' | 'failed'>('idle');
-  const [result, setResult] = useState<ImportResult | null>(null);
+  const [result, setResult] = useState<ContactImportResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -948,7 +953,7 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
         id: string;
         state: string;
         progress: number;
-        result: ImportResult | null;
+        result: ContactImportResult | null;
         failedReason?: string;
       }>('GET', `/contacts/import/${jobId}`);
 
@@ -964,11 +969,14 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
 
         // Show success message
         if (response.result) {
-          const {createdCount, updatedCount, failureCount} = response.result;
+          const {createdCount, updatedCount, failureCount, segmentsCreated, errors} = response.result;
+          const segmentIssues = errors.filter(error => error.row === SEGMENT_IMPORT_ERROR_ROW).length;
           const parts = [];
           if (createdCount > 0) parts.push(`${createdCount} created`);
           if (updatedCount > 0) parts.push(`${updatedCount} updated`);
           if (failureCount > 0) parts.push(`${failureCount} failed`);
+          if (segmentsCreated?.length) parts.push(`${segmentsCreated.length} segments created`);
+          if (segmentIssues > 0) parts.push(`${segmentIssues} segment issues`);
 
           toast.success(`Import completed: ${parts.join(', ')}`);
         }
@@ -1054,6 +1062,11 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
             {/* Instructions */}
             <div className="text-sm text-neutral-500 space-y-1">
               <p>Required column: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">email</code>. Optional: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">subscribed</code> (true/false) and any custom fields. Max 5MB.</p>
+              <p>
+                A <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">segments</code> column
+                adds contacts to the static segments it names (separated by ;), creating missing ones; nobody is removed
+                from a segment. Exported files import back as they are: status, dates and dynamic segments are skipped.
+              </p>
             </div>
 
             {/* File Upload */}
@@ -1114,6 +1127,12 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
                     )}
                   </span>
                 </div>
+                {(!!result.segmentAssignments || !!result.segmentsCreated?.length) && (
+                  <p className="text-sm text-neutral-600">
+                    <span className="text-neutral-900">{result.segmentAssignments ?? 0}</span> added to segments
+                    {!!result.segmentsCreated?.length && <> · created {result.segmentsCreated.join(', ')}</>}
+                  </p>
+                )}
 
                 {/* Error Details */}
                 {result.errors && result.errors.length > 0 && (
@@ -1121,8 +1140,14 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
                     <div className="space-y-0 text-xs text-neutral-600">
                       {result.errors.slice(0, 10).map((error, idx) => (
                         <div key={idx} className="flex gap-3 px-3 py-2 border-b border-neutral-100 last:border-0">
-                          <span className="font-mono text-neutral-400 flex-shrink-0">Row {error.row}</span>
-                          <span className="text-red-600">{error.email || 'N/A'} — {error.error}</span>
+                          <span className="font-mono text-neutral-400 flex-shrink-0">
+                            {error.row === SEGMENT_IMPORT_ERROR_ROW ? 'Segment' : `Row ${error.row}`}
+                          </span>
+                          <span className="text-red-600">
+                            {error.row === SEGMENT_IMPORT_ERROR_ROW
+                              ? error.error
+                              : `${error.email || 'N/A'} — ${error.error}`}
+                          </span>
                         </div>
                       ))}
                       {result.errors.length > 10 && (

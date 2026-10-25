@@ -1,3 +1,6 @@
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
+
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
@@ -8,6 +11,7 @@ import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import {contactWriteRateLimit} from '../middleware/rateLimit.js';
 import {HttpException} from '../exceptions/index.js';
+import {ContactExportService} from '../services/ContactExportService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -393,7 +397,7 @@ export class Contacts {
    * Import contacts from CSV file
    */
   @Post('import')
-  @Middleware([requireAuth, upload.single('file')])
+  @Middleware([requireAuth, requireEmailVerified, upload.single('file')])
   @CatchAsync
   public async importCsv(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
@@ -419,6 +423,48 @@ export class Contacts {
       return res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to queue import',
       });
+    }
+  }
+
+  /**
+   * POST /contacts/export
+   * Stream the selected contacts as CSV. Takes the same selector as the bulk actions: explicit
+   * ids, or "all matching" the list filters minus unticked rows.
+   */
+  @Post('export')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async exportCsv(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    const parsed = ContactSchemas.bulkAction.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpException(400, parsed.error.errors[0]?.message ?? 'Invalid export selector');
+    }
+
+    const selector: BulkContactActionSelector = parsed.data;
+
+    // Anything that fails here still gets a JSON error: no CSV byte has been sent yet.
+    const contactExport = await ContactExportService.prepare(auth.projectId!, selector);
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+    res.setHeader('Cache-Control', 'no-store');
+    // The image's nginx buffers proxied responses by default; stream straight through instead.
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    try {
+      // pipeline handles backpressure, and closes the generator if the client goes away.
+      await pipeline(Readable.from(contactExport.lines()), res);
+      signale.info(`[CONTACTS] Exported ${contactExport.rows} contacts`, {
+        projectId: auth.projectId,
+        mode: selector.mode,
+      });
+    } catch (error) {
+      // The CSV has already started, so there is no JSON error to send: pipeline has destroyed
+      // the response, which the client sees as a failed download rather than a short file.
+      signale.error(`[CONTACTS] Export stopped after ${contactExport.rows} contacts:`, error);
     }
   }
 

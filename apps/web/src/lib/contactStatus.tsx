@@ -1,25 +1,8 @@
 import type {Contact} from '@plunk/db';
-import type {ContactSubscriptionStatus} from '@plunk/types';
+import {contactStatus, type ContactSubscriptionStatus} from '@plunk/types';
 import {Badge} from '@plunk/ui';
 import {Clock, MailCheck, MailX} from 'lucide-react';
 import React from 'react';
-
-/**
- * How the dashboard reads a contact's subscription state.
- *
- * `snoozed` is derived rather than stored: a snooze is `subscribed = false` plus a date, which
- * is what lets every send path suppress a snoozed contact through the `subscribed` filter it
- * already has. The cost of that is exactly this -- the two "not subscribed" states look
- * identical until you check the date, so every surface that reports status has to go through
- * here rather than branching on the boolean.
- */
-export function contactStatus(contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>): ContactSubscriptionStatus {
-  if (contact.subscribed) {
-    return 'subscribed';
-  }
-
-  return contact.snoozedUntil ? 'snoozed' : 'unsubscribed';
-}
 
 /**
  * Absolute date for a snooze end, in the operator's locale.
