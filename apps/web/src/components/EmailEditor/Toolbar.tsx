@@ -16,6 +16,7 @@ import {
   ListOrdered,
   Palette,
   Quote,
+  RectangleHorizontal,
   Redo,
   Strikethrough,
   Undo,
@@ -28,10 +29,12 @@ interface ToolbarProps {
   editor: Editor | null;
   onInsertVariable: () => void;
   onInsertImage: () => void;
+  /** Inserts a button, or edits the selected one. */
+  onButton: () => void;
   canUploadImages: boolean;
 }
 
-export function Toolbar({editor, onInsertVariable, onInsertImage, canUploadImages}: ToolbarProps) {
+export function Toolbar({editor, onInsertVariable, onInsertImage, onButton, canUploadImages}: ToolbarProps) {
   const [showLinkInput, setShowLinkInput] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [showColorPicker, setShowColorPicker] = useState(false);
@@ -551,7 +554,7 @@ export function Toolbar({editor, onInsertVariable, onInsertImage, canUploadImage
         )}
       </div>
 
-      {/* Image */}
+      {/* Image and button */}
       <div className="flex gap-0.5 pr-2 border-r border-neutral-200">
         <Button
           type="button"
@@ -565,6 +568,18 @@ export function Toolbar({editor, onInsertVariable, onInsertImage, canUploadImage
         >
           {/* eslint-disable-next-line jsx-a11y/alt-text */}
           <Image className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onMouseDown={e => e.preventDefault()}
+          onClick={onButton}
+          data-active={editor.isActive('button')}
+          className="h-8 w-8 data-[active=true]:bg-neutral-200"
+          title={editor.isActive('button') ? 'Edit button' : 'Insert button'}
+        >
+          <RectangleHorizontal className="h-4 w-4" />
         </Button>
       </div>
 

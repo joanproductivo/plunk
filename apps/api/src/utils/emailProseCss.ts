@@ -1,3 +1,7 @@
+/** The email's own font, which buttons without a font of their own also get when sent. */
+export const EMAIL_FONT_FAMILY =
+  "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+
 /**
  * Typography for visual editor emails. Mirrors the stylesheet in apps/web/src/lib/emailStyles.ts,
  * which the preview keeps in a <style> block. Sending moves it into style attributes instead,
@@ -13,7 +17,7 @@
 export const EMAIL_PROSE_CSS = `body {
   margin: 0;
   padding: 16px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: ${EMAIL_FONT_FAMILY};
   line-height: 1.5;
   color: #111827;
 }
@@ -22,7 +26,7 @@ export const EMAIL_PROSE_CSS = `body {
 .prose {
   color: #374151;
   max-width: 600px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: ${EMAIL_FONT_FAMILY};
 }
 .prose [class~="lead"] {
   color: #4b5563;

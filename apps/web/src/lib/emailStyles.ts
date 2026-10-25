@@ -1,9 +1,26 @@
+// Whether an `a.email-button` holds markup (another tag before its closing </a>). A linear scan:
+// the body may carry contact data, so no regex that can backtrack over attacker-sized input.
+function hasRichButton(html: string): boolean {
+  const links = html.split(/<a\b/i);
+  for (let i = 1; i < links.length; i++) {
+    const link = links[i]!;
+    const tagEnd = link.indexOf('>');
+    if (tagEnd < 0) return false;
+    if (!/\bclass\s*=\s*["'][^"']*\bemail-button\b/i.test(link.slice(0, tagEnd))) continue;
+
+    const content = link.slice(tagEnd + 1);
+    const next = content.search(/<[a-z!/]/i);
+    if (next >= 0 && !/^<\/a>/i.test(content.slice(next))) return true;
+  }
+  return false;
+}
+
 // Detects if HTML contains custom patterns that indicate it was written in the HTML editor
 // rather than the visual editor. Custom HTML should render as-is without prose wrapper.
 //
 // The TipTap editor in EmailEditor.tsx loads: StarterKit (paragraphs, headings, lists,
 // blockquote, code, hr, bold, italic, strike, etc.), TextAlign, Color, TextStyle, Link,
-// ResizableImage, and VariableMention. Of these, TextStyle + Color + Link natively
+// ResizableImage, EmailButton, and VariableMention. Of these, TextStyle + Color + Link natively
 // round-trip <span style="color: ..."> / <a style="color: ..."> markup that TipTap itself
 // generates when you change text color or style a link. We must therefore PERMIT what
 // TipTap can represent and REJECT only what it can't.
@@ -26,7 +43,10 @@ export const detectCustomHtmlPatterns = (html: string): boolean => {
       'selected',
       'resize-handle',
     ];
-    const hasDisallowedClass = classes.some(cls => !allowedPrefixes.some(prefix => cls.startsWith(prefix)));
+    // The editor's button, matched exactly so that look-alikes such as `email-button-primary` stay custom
+    const hasDisallowedClass = classes.some(
+      cls => cls !== 'email-button' && !allowedPrefixes.some(prefix => cls.startsWith(prefix)),
+    );
     if (hasDisallowedClass) {
       hasCustomClasses = true;
       break;
@@ -52,7 +72,14 @@ export const detectCustomHtmlPatterns = (html: string): boolean => {
   const hasMediaQueries = /@media/i.test(html);
   const hasStyleTags = /<style[^>]*>/i.test(html);
 
-  return hasCustomClasses || hasCustomAttributes || hasCustomElements || hasMediaQueries || hasStyleTags;
+  return (
+    hasCustomClasses ||
+    hasCustomAttributes ||
+    hasCustomElements ||
+    hasMediaQueries ||
+    hasStyleTags ||
+    hasRichButton(html)
+  );
 };
 
 export const wrapEmailWithStyles = (htmlBody: string): string => {

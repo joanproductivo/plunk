@@ -1,9 +1,15 @@
+import {buttonStyle, BUTTON_DEFAULTS, readButtonStyle} from '@plunk/shared';
 import {load} from 'cheerio/slim';
 import signale from 'signale';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {renderBody} from '../emailBody.js';
 import {htmlToPlainText} from '../mime.js';
+
+vi.mock('@plunk/shared', async importOriginal => {
+  const actual = await importOriginal<typeof import('@plunk/shared')>();
+  return {...actual, readButtonStyle: vi.fn(actual.readButtonStyle)};
+});
 
 vi.mock('cheerio/slim', async importOriginal => {
   const actual = await importOriginal<typeof import('cheerio/slim')>();
@@ -98,7 +104,122 @@ describe('renderBody', () => {
     });
   });
 
+  describe('editor buttons', () => {
+    const button = (style = buttonStyle(BUTTON_DEFAULTS), href = 'https://example.com', label = 'Shop now') =>
+      `<a class="email-button" href="${href}" style="${style}">${label}</a>`;
+
+    it('keeps the button in its aligned paragraph and adds the Outlook spacers inside the link', () => {
+      const html = renderBody(`<p style="text-align: center;">${button()}</p>`);
+
+      expect(html).not.toContain('<table');
+      expect(html).toMatch(/<p style="[^"]*text-align: center;"><a class="email-button"/);
+      // Medium size: 20px either side as 2 hair spaces at 500%, 12px top and bottom as 18pt
+      expect(html).toContain(
+        '<!--[if mso]><i style="mso-font-width:500%;mso-text-raise:18" hidden>&#8202;&#8202;</i><![endif]-->',
+      );
+      expect(html).toContain(
+        '<span style="max-width: 100%; display: inline-block; line-height: 120%; mso-text-raise: 9px">Shop now</span>',
+      );
+      expect(html).toContain(
+        '<!--[if mso]><i style="mso-font-width:500%" hidden>&#8202;&#8202;&#8203;</i><![endif]-->',
+      );
+    });
+
+    it('keeps its own colours and padding over the prose link styles, and adds the email font', () => {
+      const style = styleOf(renderBody(`<p>${button()}</p>`), 'a');
+
+      expect(style).toMatch(/color: #ffffff;.*font-family: ui-sans-serif/);
+      expect(style).toContain('padding: 12px 20px');
+      expect(style).toContain('text-decoration: none');
+      expect(style).toContain('mso-padding-alt: 0px');
+    });
+
+    it('keeps a font of its own without adding the email one', () => {
+      const style = styleOf(renderBody(`<p>${button(buttonStyle({...BUTTON_DEFAULTS, font: 'book-serif'}))}</p>`), 'a');
+
+      expect(style).toContain('Iowan Old Style');
+      expect(style).not.toContain('ui-sans-serif');
+    });
+
+    it('leaves a button sharing its paragraph with text where it is', () => {
+      const html = renderBody(`<p>Hi ${button()} there</p>`);
+
+      expect(html).toMatch(/<p style="[^"]*">Hi <a class="email-button"[^>]*><!--\[if mso\]>/);
+      expect(html).toContain('</a> there</p>');
+    });
+
+    it('drops a link a button may not have, and leaves that button without spacers', () => {
+      const html = renderBody(`<p>${button(undefined, 'javascript:alert(1)')}</p>`);
+
+      expect(html).not.toContain('javascript');
+      expect(html).not.toContain('[if mso]');
+    });
+
+    it('still sends the inlined email when adding the spacers fails', () => {
+      vi.mocked(readButtonStyle).mockImplementationOnce(() => {
+        throw new Error('broken style');
+      });
+      const warn = vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
+
+      const html = renderBody(`<h1>Hi</h1><p>${button()}</p>`);
+
+      expect(html).not.toContain('<style');
+      expect(styleOf(html, 'h1')).toContain('font-weight: 800');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Outlook padding'), expect.any(Error));
+    });
+
+    it('keeps the font and colours of a button as Chromium saves it, with rgb() and &quot;', () => {
+      const saved =
+        '<p><a class="email-button" href="https://example.com" style="display: inline-block; padding: 16px 32px; background-color: rgb(225, 29, 72); color: rgb(255, 255, 255); text-decoration: none; font-weight: 600; line-height: 1.2; border-radius: 999px; font-family: &quot;Iowan Old Style&quot;, &quot;Palatino Linotype&quot;, &quot;URW Palladio L&quot;, P052, serif;">Go</a></p>';
+
+      const style = styleOf(renderBody(saved), 'a');
+
+      expect(style).toContain("font-family: 'Iowan Old Style', 'Palatino Linotype', 'URW Palladio L', P052, serif");
+      expect(style).not.toContain('undefined');
+      expect(style).not.toContain('ui-sans-serif');
+      expect(style).toContain('background-color: rgb(225, 29, 72)');
+    });
+
+    it('keeps a font written by hand rather than adding the email one', () => {
+      const style = styleOf(
+        renderBody(`<p>${button(`${buttonStyle(BUTTON_DEFAULTS)} font-family: Georgia;`)}</p>`),
+        'a',
+      );
+
+      expect(style).toContain('font-family: Georgia');
+      expect(style).not.toContain('ui-sans-serif');
+    });
+
+    it('treats a < in a label (from contact data, say) as text, not markup', () => {
+      const html = renderBody(`<p>${button(undefined, undefined, 'I &lt;3 this')}</p><p>Ana <3</p>`);
+
+      expect(html.startsWith('<!DOCTYPE html>')).toBe(true);
+      expect(html).toContain('[if mso]');
+    });
+
+    it('reads as label and link in the plain-text part', () => {
+      expect(htmlToPlainText(renderBody(`<p>${button()}</p>`))).toBe('Shop now [https://example.com]');
+    });
+  });
+
   describe('custom HTML', () => {
+    it('sends look-alike buttons and buttons with markup inside as they are', () => {
+      const lookAlike = '<p><a class="email-button-primary" href="https://a.com">Go</a></p>';
+      const rich = '<p><a class="email-button" href="https://a.com"><strong>Go</strong></a></p>';
+
+      expect(renderBody(lookAlike)).toBe(lookAlike);
+      expect(renderBody(rich)).toBe(rich);
+    });
+
+    it('checks for buttons in linear time, as the body may hold contact data', () => {
+      const hostile = `<p>${'<a class="email-button" '.repeat(4000)}</p>`;
+
+      const start = performance.now();
+      renderBody(hostile);
+
+      expect(performance.now() - start).toBeLessThan(500);
+    });
+
     it('is sent as-is', () => {
       const custom = '<table><tr><td style="color: red">Hi</td></tr></table>';
 
