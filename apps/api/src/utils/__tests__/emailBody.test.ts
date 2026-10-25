@@ -45,6 +45,14 @@ describe('renderBody', () => {
       expect(html).not.toContain('box-sizing');
     });
 
+    it('draws the quote bar and leaves out the quote marks, which cannot be inlined', () => {
+      const style = styleOf(renderBody('<blockquote><p>Quote</p></blockquote>'), 'blockquote');
+
+      expect(style).toContain('font-style: italic');
+      expect(style).toContain('border-left-style: solid');
+      expect(style).not.toContain('quotes');
+    });
+
     it('keeps existing inline styles over the stylesheet, so centred images stay centred', () => {
       const html = renderBody(
         '<p style="text-align: center;"><img src="https://example.com/a.png" width="200" class="email-image" style="display: block; margin-left: auto; margin-right: auto;"></p>',

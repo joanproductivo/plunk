@@ -6,6 +6,9 @@
  *
  * The preview's `* { box-sizing }` reset is left out: inlined, it lands on every element and adds
  * about a fifth to the size, which brings long emails closer to Gmail's 102 KB clipping.
+ *
+ * The blockquote's `quotes` is left out too: it only feeds ::before/::after content, which
+ * cannot be inlined, and its escaped value is the kind some clients' sanitisers reject.
  */
 export const EMAIL_PROSE_CSS = `body {
   margin: 0;
@@ -83,8 +86,8 @@ export const EMAIL_PROSE_CSS = `body {
   font-style: italic;
   color: #111827;
   border-left-width: 0.25rem;
+  border-left-style: solid;
   border-left-color: #e5e7eb;
-  quotes: "\\201C""\\201D""\\2018""\\2019";
   margin-top: 1.6em;
   margin-bottom: 1.6em;
   padding-left: 1em;
