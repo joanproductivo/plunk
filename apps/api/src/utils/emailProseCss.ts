@@ -90,6 +90,8 @@ export const EMAIL_PROSE_CSS = `body {
   border-left-color: #e5e7eb;
   margin-top: 1.6em;
   margin-bottom: 1.6em;
+  margin-left: 40px;
+  margin-right: 40px;
   padding-left: 1em;
 }
 .prose h1 {
