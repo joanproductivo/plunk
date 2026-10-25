@@ -126,6 +126,11 @@ function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
       applyHeightAttributes: false,
       applyAttributesTableElements: false,
     });
+    // Apple Mail styles <blockquote> as quoted reply text and overrides its margins, even inline,
+    // so a quote from the editor goes out as a <div> with the same styles
+    $('blockquote').each((_, element) => {
+      element.tagName = 'div';
+    });
     return $.html();
   } catch (error) {
     warnAtMostEveryMinute(
