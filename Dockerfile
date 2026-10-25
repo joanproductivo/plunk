@@ -267,10 +267,6 @@ COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/static ./apps/web/.
 COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/url-manifest.txt ./apps/web/.next/standalone/apps/web/.next/url-manifest.txt
 COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/sitemap-manifest.txt ./apps/web/.next/standalone/apps/web/.next/sitemap-manifest.txt
 
-# Copy full .next directories for the entrypoint script (URL replacement via find command)
-# These are much smaller than node_modules and needed for runtime URL replacement
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next ./apps/web/.next
-
 # ============================================
 # Copy runtime configuration
 # ============================================
