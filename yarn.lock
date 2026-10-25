@@ -6480,43 +6480,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@tiptap/extension-table-cell@npm:^3.31.2":
-  version: 3.31.2
-  resolution: "@tiptap/extension-table-cell@npm:3.31.2"
-  peerDependencies:
-    "@tiptap/extension-table": 3.31.2
-  checksum: 10c0/8f4eb9417184408ecadae9d40780bffedc8230819ebebcaa2b460f9e8c8286dff39d36c3e75c2cfa15b1a460ff0decd6ff9b8ff57ace9ec4edd1196ee2db3409
-  languageName: node
-  linkType: hard
-
-"@tiptap/extension-table-header@npm:^3.31.2":
-  version: 3.31.2
-  resolution: "@tiptap/extension-table-header@npm:3.31.2"
-  peerDependencies:
-    "@tiptap/extension-table": 3.31.2
-  checksum: 10c0/e30a54ef385b3f23a3ee14b6503d9009f9716b10f6014e9a9b9b7878a4b6dd28c12a8057d717148d21cb2093033c92ad0ca1549d96732f5713d242eff8667fbe
-  languageName: node
-  linkType: hard
-
-"@tiptap/extension-table-row@npm:^3.31.2":
-  version: 3.31.2
-  resolution: "@tiptap/extension-table-row@npm:3.31.2"
-  peerDependencies:
-    "@tiptap/extension-table": 3.31.2
-  checksum: 10c0/8b0fbbb6b8bc15cbc20e5ab1afc2bcb42577c2a0b1ab3c2dd7ef04b348d294c5f60309ec537966c0540a8c1a4bdc1ab987a25c861660482197728735e184d17c
-  languageName: node
-  linkType: hard
-
-"@tiptap/extension-table@npm:^3.31.2":
-  version: 3.31.2
-  resolution: "@tiptap/extension-table@npm:3.31.2"
-  peerDependencies:
-    "@tiptap/core": 3.31.2
-    "@tiptap/pm": 3.31.2
-  checksum: 10c0/892d68d20bb4f81ab6ae42aa263cf410085b1ab6d93d3e95f0c9c71b4c5dad780f686b86f356330cd9fe1f0daf2c0bf3a76dc8d669260fc4875f9eb163d67815
-  languageName: node
-  linkType: hard
-
 "@tiptap/extension-text-align@npm:^3.31.2":
   version: 3.31.2
   resolution: "@tiptap/extension-text-align@npm:3.31.2"
@@ -19816,14 +19779,9 @@ __metadata:
     "@tanstack/react-table": "npm:^8.21.3"
     "@tiptap/core": "npm:^3.31.2"
     "@tiptap/extension-color": "npm:^3.31.2"
-    "@tiptap/extension-image": "npm:^3.31.2"
     "@tiptap/extension-link": "npm:^3.31.2"
     "@tiptap/extension-mention": "npm:^3.31.2"
     "@tiptap/extension-placeholder": "npm:^3.31.2"
-    "@tiptap/extension-table": "npm:^3.31.2"
-    "@tiptap/extension-table-cell": "npm:^3.31.2"
-    "@tiptap/extension-table-header": "npm:^3.31.2"
-    "@tiptap/extension-table-row": "npm:^3.31.2"
     "@tiptap/extension-text-align": "npm:^3.31.2"
     "@tiptap/extension-text-style": "npm:^3.31.2"
     "@tiptap/pm": "npm:^3.31.2"
@@ -19841,7 +19799,6 @@ __metadata:
     dayjs: "npm:^1.11.19"
     dompurify: "npm:^3.4.16"
     framer-motion: "npm:^12.23.24"
-    juice: "npm:^11.0.3"
     lucide-react: "npm:^0.553.0"
     next: "npm:^16.3.8"
     next-seo: "npm:^6.6.0"
