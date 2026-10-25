@@ -1,9 +1,9 @@
-import {splitPreheader} from '@plunk/shared';
-import {load} from 'cheerio/slim';
+import {BUTTON_PADDING, isSafeButtonHref, readButtonStyle, splitPreheader} from '@plunk/shared';
+import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
 
-import {EMAIL_PROSE_CSS} from './emailProseCss.js';
+import {EMAIL_FONT_FAMILY, EMAIL_PROSE_CSS} from './emailProseCss.js';
 
 // juice's main entry pulls in full cheerio (parse5, undici) and web-resource-inliner, ~28 MB of
 // resident memory per process. Its inliner core on cheerio's htmlparser2 build costs ~2 MB.
@@ -120,6 +120,48 @@ function detectCustomHtmlPatterns(html: string): boolean {
   );
 }
 
+// Outlook's mso-* properties take points.
+const pt = (px: number) => (px * 3) / 4;
+
+// Hair spaces scaled with mso-font-width, which cannot exceed 500%: how wide and how many to fill `px`.
+function hairSpaces(px: number): [percent: number, count: number] {
+  let count = 1;
+  while (px / count / 2 > 5) count++;
+  return [(px / count / 2) * 100, count];
+}
+
+/**
+ * Editor buttons as Outlook for Windows can render them. Its Word engine ignores padding and
+ * inline-block on links, so, as react-email's Button does (MIT), invisible Outlook-only spacers
+ * either side of the label stand in for the horizontal padding and mso-text-raise for the
+ * vertical one; every other client keeps the link's own padding. The font goes inline too, as
+ * Word does not always inherit it. A button whose link is not one a button may have loses it.
+ */
+function addOutlookButtonPadding($: CheerioAPI): void {
+  $('a.email-button').each((_, element) => {
+    const link = $(element);
+    if (!isSafeButtonHref(link.attr('href'))) {
+      link.removeAttr('href');
+      return;
+    }
+
+    const button = readButtonStyle(link.attr('style'));
+    const [vertical, horizontal] = BUTTON_PADDING[button.size];
+    const [width, count] = hairSpaces(horizontal);
+    const spaces = '&#8202;'.repeat(count);
+    const style = (link.attr('style') ?? '').trim().replace(/;$/, '');
+    // Unless the button carries a font of its own
+    const font = /(^|;)\s*font-family\s*:/i.test(style) ? '' : `; font-family: ${EMAIL_FONT_FAMILY}`;
+
+    link.attr('style', `${style}${font}; max-width: 100%; mso-padding-alt: 0px`);
+    link.html(
+      `<!--[if mso]><i style="mso-font-width:${width}%;mso-text-raise:${pt(vertical * 2)}" hidden>${spaces}</i><![endif]-->` +
+        `<span style="max-width: 100%; display: inline-block; line-height: 120%; mso-text-raise: ${pt(vertical)}px">${link.html()}</span>` +
+        `<!--[if mso]><i style="mso-font-width:${width}%" hidden>${spaces}&#8203;</i><![endif]-->`,
+    );
+  });
+}
+
 /** A full email document around visual editor content. `styleBlock` is only used as a fallback. */
 function emailDocument(htmlBody: string, styleBlock?: string): string {
   return `<!DOCTYPE html>
@@ -146,6 +188,11 @@ function emailDocument(htmlBody: string, styleBlock?: string): string {
 function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
   try {
     const $ = load(emailDocument(htmlBody), {xml: {xmlMode: false, decodeEntities: false}});
+    // Browsers serialise quoted font names in a style attribute as &quot;, which juice, reading
+    // the text undecoded, would take for the end of a declaration
+    $('[style]').each((_, element) => {
+      element.attribs.style = element.attribs.style!.replace(/&quot;/g, "'");
+    });
     juice.inlineDocument($, EMAIL_PROSE_CSS, {
       applyWidthAttributes: false,
       applyHeightAttributes: false,
@@ -156,6 +203,16 @@ function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
     $('blockquote').each((_, element) => {
       element.tagName = 'div';
     });
+    try {
+      addOutlookButtonPadding($);
+    } catch (error) {
+      // Buttons without the spacers still render as buttons everywhere but Outlook for Windows
+      warnAtMostEveryMinute(
+        'button',
+        `[EMAIL] Failed to add Outlook padding to buttons${emailId ? ` of email ${emailId}` : ''}:`,
+        error,
+      );
+    }
     return $.html();
   } catch (error) {
     warnAtMostEveryMinute(
