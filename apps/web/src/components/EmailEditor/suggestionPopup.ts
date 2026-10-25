@@ -1,5 +1,7 @@
 import tippy, {Instance as TippyInstance, sticky} from 'tippy.js';
 import type {SuggestionProps} from '@tiptap/suggestion';
+// Field names come from contact data keys, which are user-supplied, so rows are escaped
+import {escapeHtml} from '@plunk/shared';
 
 /**
  * The part of a suggestion list the popup needs to drive. Both the `{{` variable list
@@ -24,15 +26,6 @@ export interface SuggestionRow {
   syntax: string;
   /** Optional qualifier: a field's type, or how many contacts actually have it. */
   meta?: string;
-}
-
-/** Field names come from contact data keys, which are user-supplied. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 /**

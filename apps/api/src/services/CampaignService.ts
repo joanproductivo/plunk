@@ -16,6 +16,7 @@ import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
+import {renderBody} from '../utils/emailBody.js';
 import type {ListSort} from '../utils/listSort.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
 
@@ -1445,7 +1446,7 @@ export class CampaignService {
     }
 
     // Mirror the production classification so the test send carries the same
-    // headers real recipients would get. Test emails use the raw body without the
+    // headers real recipients would get. Test emails use the rendered body without the
     // unsubscribe footer, so there is no unsubscribe URL to advertise. A
     // transactional campaign resolves to a TRANSACTIONAL source upstream, so map it
     // here too.
@@ -1455,7 +1456,7 @@ export class CampaignService {
       campaignType: campaign.type,
     });
 
-    // Prepare the email content (no variable replacement for test emails)
+    // Styled like a real send, but without variable replacement: there is no contact to render for
     await sendRawEmail({
       from: {
         name: campaign.fromName || project.name || 'Plunk',
@@ -1464,7 +1465,7 @@ export class CampaignService {
       to: [testEmail],
       content: {
         subject: `[TEST] ${campaign.subject}`,
-        html: campaign.body,
+        html: renderBody(campaign.body),
       },
       reply: campaign.replyTo || undefined,
       headers: buildEmailHeaders({

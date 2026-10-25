@@ -4,6 +4,9 @@ import {renderEngine, SCOPE_ALIAS, validationEngine} from './engine.js';
 import {renderLegacyTemplate} from './legacy.js';
 import {preprocessTemplate} from './preprocess.js';
 
+export {escapeHtml} from './html.js';
+export {preheaderToText, splitPreheader, textToPreheader, withPreheader} from './preheader.js';
+
 /** A template parsed once and ready to be rendered against many recipients. */
 export interface CompiledTemplate {
   /** The original, unpreprocessed template string. */
