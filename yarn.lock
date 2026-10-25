@@ -8214,6 +8214,7 @@ __metadata:
     bcrypt: "npm:^6.0.0"
     body-parser: "npm:^2.3.0"
     bullmq: "npm:^5.63.2"
+    cheerio: "npm:1.0.0"
     concurrently: "npm:^9.2.1"
     cookie-parser: "npm:^1.4.7"
     cors: "npm:^2.8.5"
@@ -8225,6 +8226,7 @@ __metadata:
     html-to-text: "npm:^10.0.1"
     ioredis: "npm:^5.8.2"
     jsonwebtoken: "npm:^9.0.2"
+    juice: "npm:11.0.3"
     mailchecker: "npm:^6.0.19"
     mailparser: "npm:^3.9.8"
     morgan: "npm:^1.12.1"
@@ -13291,7 +13293,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"juice@npm:^11.0.3":
+"juice@npm:11.0.3, juice@npm:^11.0.3":
   version: 11.0.3
   resolution: "juice@npm:11.0.3"
   dependencies:

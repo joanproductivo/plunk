@@ -80,6 +80,7 @@ export const wrapEmailWithStyles = (htmlBody: string): string => {
     .prose {
       color: #374151;
       max-width: 600px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
     .prose [class~="lead"] {
       color: #4b5563;
