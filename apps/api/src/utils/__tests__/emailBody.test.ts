@@ -3,6 +3,7 @@ import signale from 'signale';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {renderBody} from '../emailBody.js';
+import {htmlToPlainText} from '../mime.js';
 
 vi.mock('cheerio/slim', async importOriginal => {
   const actual = await importOriginal<typeof import('cheerio/slim')>();
@@ -87,6 +88,44 @@ describe('renderBody', () => {
       const custom = '<table><tr><td style="color: red">Hi</td></tr></table>';
 
       expect(renderBody(custom)).toBe(custom);
+    });
+  });
+
+  describe('preheader', () => {
+    const preheader = '<!--plunk:preheader:Hello &amp; welcome-->';
+
+    it('goes right after <body> in a visual editor email, as stored', () => {
+      const html = renderBody(`${preheader}<p>Body</p>`);
+
+      expect(html).not.toContain('plunk:preheader');
+      expect(html).toMatch(/<body[^>]*><div data-plunk-preheader style="display:none;[^"]*">Hello &amp; welcome<span/);
+    });
+
+    it('goes after <body> in custom HTML too', () => {
+      const html = renderBody(
+        `${preheader}<html><head></head><body class="x"><table><tr><td>Hi</td></tr></table></body></html>`,
+      );
+
+      expect(html).toMatch(/^<html><head><\/head><body class="x"><div data-plunk-preheader/);
+    });
+
+    it('keeps the doctype first in a document without a <body> tag', () => {
+      const html = renderBody(`${preheader}<!DOCTYPE html><html><head><title>x</title></head><table></table></html>`);
+
+      expect(html.startsWith('<!DOCTYPE html>')).toBe(true);
+      expect(html).toContain('</head><div data-plunk-preheader');
+    });
+
+    it('goes first in a custom fragment', () => {
+      expect(renderBody(`${preheader}<table></table>`).startsWith('<div data-plunk-preheader')).toBe(true);
+    });
+
+    it('stays in the plain-text part without its invisible filler', () => {
+      const text = htmlToPlainText(renderBody(`${preheader}<p>Body</p>`));
+
+      expect(text.startsWith('Hello & welcome')).toBe(true);
+      expect(text).not.toContain('\u200c');
+      expect(text).toContain('Body');
     });
   });
 

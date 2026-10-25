@@ -124,3 +124,9 @@ describe('detectCustomHtmlPatterns', () => {
     });
   });
 });
+
+describe('detectCustomHtmlPatterns with a preview text', () => {
+  it('still treats visual editor content with a preheader as visual', () => {
+    expect(detectCustomHtmlPatterns('<!--plunk:preheader:Hello &amp; welcome--><p>Hello</p>')).toBe(false);
+  });
+});

@@ -13,11 +13,12 @@ import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
 import {HtmlEditor} from './HtmlEditor';
+import {PreheaderField} from './PreheaderField';
 import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks/useContacts';
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {renderTemplate} from '@plunk/shared';
+import {renderTemplate, splitPreheader, withPreheader} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -60,11 +61,17 @@ const commonVariables = [
 ];
 
 export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
+  // The preview text travels with the body; the editors below only ever see the body
+  const {preheader, body} = splitPreheader(value);
+  const preheaderRef = useRef(preheader);
+  preheaderRef.current = preheader;
+  const emitChange = (html: string) => onChange(withPreheader(preheaderRef.current, html));
+
   // Detect if initial value has custom HTML and start in appropriate mode
-  const initialMode = detectCustomHtmlPatterns(value) ? 'html' : 'visual';
+  const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
 
   const [mode, setMode] = useState<'visual' | 'html'>(initialMode);
-  const [htmlContent, setHtmlContent] = useState(value);
+  const [htmlContent, setHtmlContent] = useState(body);
   const [showVariableDialog, setShowVariableDialog] = useState(false);
   const [showImageDialog, setShowImageDialog] = useState(false);
   const [showModeWarningDialog, setShowModeWarningDialog] = useState(false);
@@ -149,7 +156,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     ],
     // Only initialize with content if starting in visual mode
     // If starting in HTML mode (due to custom HTML), keep editor empty
-    content: initialMode === 'visual' ? value || '' : '',
+    content: initialMode === 'visual' ? body || '' : '',
     editorProps: {
       attributes: {
         class: 'prose prose-sm max-w-none focus:outline-none min-h-[400px] px-4 py-3 text-neutral-900',
@@ -157,7 +164,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     },
     onUpdate: ({editor}) => {
       const html = editor.getHTML();
-      onChange(html);
+      emitChange(html);
       setHtmlContent(html);
       // Trigger preview update
       setPreviewUpdateTrigger(prev => prev + 1);
@@ -166,16 +173,16 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
-    if (editor && value !== editor.getHTML() && value !== htmlContent) {
+    if (editor && body !== editor.getHTML() && body !== htmlContent) {
       // Only update editor if in visual mode or if value is simple HTML
-      const isCustomHtml = detectCustomHtmlPatterns(value);
+      const isCustomHtml = detectCustomHtmlPatterns(body);
 
       if (!isCustomHtml && mode === 'visual') {
-        editor.commands.setContent(value || '');
+        editor.commands.setContent(body || '');
       }
 
       // Always update htmlContent to stay in sync
-      setHtmlContent(value);
+      setHtmlContent(body);
 
       // If custom HTML is detected and we're in visual mode, switch to HTML mode
       if (isCustomHtml && mode === 'visual') {
@@ -210,7 +217,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     // Only switch if we have an editor and html content
     if (editor) {
       editor.commands.setContent(htmlContent || '');
-      onChange(htmlContent);
+      emitChange(htmlContent);
       setMode('visual');
     }
     setShowModeWarningDialog(false);
@@ -218,7 +225,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const handleHtmlChange = (newHtml: string) => {
     setHtmlContent(newHtml);
-    onChange(newHtml);
+    emitChange(newHtml);
   };
 
   const insertVariable = (varName: string, withDefault?: boolean) => {
@@ -410,6 +417,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           </Select>
         </div>
       </div>
+
+      <PreheaderField value={preheader} onChange={next => onChange(withPreheader(next, body))} />
 
       {/* Template syntax errors, reported as you type rather than on save */}
       {syntaxIssue && !suggestionOpen && (

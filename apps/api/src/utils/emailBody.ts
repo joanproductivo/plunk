@@ -1,3 +1,4 @@
+import {splitPreheader} from '@plunk/shared';
 import {load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
@@ -329,6 +330,14 @@ const EMAIL_PROSE_CSS = `body {
 const GMAIL_CLIP_WARNING_BYTES = 90_000;
 
 /**
+ * Hides the preheader in the body while clients show it as the inbox preview. The filler after
+ * it keeps clients from padding the preview with the start of the body.
+ */
+const PREHEADER_STYLE =
+  'display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:transparent;opacity:0';
+const PREHEADER_FILL = '&#847;&zwnj;&nbsp;'.repeat(60);
+
+/**
  * Detects if HTML contains custom patterns that indicate it was written in the HTML editor
  * rather than the visual editor. Mirrors the same logic in apps/web/src/lib/emailStyles.ts.
  *
@@ -420,13 +429,33 @@ function wrapWithEmailStyles(htmlBody: string): string {
   }
 }
 
+/** Places the (HTML-escaped) preheader at the top of the email body. */
+function insertPreheader(html: string, preheader: string): string {
+  if (!preheader) {
+    return html;
+  }
+
+  const block = `<div data-plunk-preheader style="${PREHEADER_STYLE}">${preheader}<span data-plunk-preheader-fill>${PREHEADER_FILL}</span></div>`;
+  // Right after <body>; in a document whose <body> is implicit, after <head> or <html> so the
+  // doctype stays first; in a fragment, at the very start.
+  const anchor = /<body\b[^>]*>/i.exec(html) ?? /<\/head>/i.exec(html) ?? /<html\b[^>]*>/i.exec(html);
+  if (!anchor) {
+    return `${block}${html}`;
+  }
+
+  const at = anchor.index + anchor[0].length;
+  return `${html.slice(0, at)}${block}${html.slice(at)}`;
+}
+
 /**
  * The HTML of an email body as it is sent, before any per-recipient footer. Visual editor
  * content is wrapped in a styled document; custom HTML (from the HTML editor) already carries its
- * own styles and is used as-is.
+ * own styles and is used as-is. Either way the preheader, if any, goes at the top.
  */
 export function renderBody(content: string): string {
-  const html = detectCustomHtmlPatterns(content) ? content : wrapWithEmailStyles(content);
+  const {preheader, body} = splitPreheader(content);
+  const wrapped = detectCustomHtmlPatterns(body) ? body : wrapWithEmailStyles(body);
+  const html = insertPreheader(wrapped, preheader);
 
   const bytes = Buffer.byteLength(html);
   if (bytes > GMAIL_CLIP_WARNING_BYTES) {

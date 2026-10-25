@@ -25,6 +25,9 @@ export function htmlToPlainText(html: string): string {
       // Tracking pixels and spacer images carry no meaning, and their alt text (when
       // they have any) is noise in a reading order.
       {selector: 'img', format: 'skip'},
+      // The invisible filler after the preheader only keeps inbox previews from running into
+      // the body; the preheader text itself stays, as it is part of the message.
+      {selector: 'span[data-plunk-preheader-fill]', format: 'skip'},
       // Plunk's editor emits table-based layout, not tabular data. Rendering those as
       // ASCII tables would turn a normal email into a wall of pipes and dashes.
       {selector: 'table', format: 'block'},
