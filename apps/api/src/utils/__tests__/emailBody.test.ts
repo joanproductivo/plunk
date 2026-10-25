@@ -45,11 +45,13 @@ describe('renderBody', () => {
       expect(html).not.toContain('box-sizing');
     });
 
-    it('draws the quote bar and leaves out the quote marks, which cannot be inlined', () => {
+    it('indents the quote and draws its bar, leaving out the quote marks, which cannot be inlined', () => {
       const style = styleOf(renderBody('<blockquote><p>Quote</p></blockquote>'), 'blockquote');
 
       expect(style).toContain('font-style: italic');
       expect(style).toContain('border-left-style: solid');
+      // Explicit, as Apple Mail drops the browser's default blockquote indent
+      expect(style).toContain('margin-left: 40px');
       expect(style).not.toContain('quotes');
     });
 

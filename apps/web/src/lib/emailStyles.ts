@@ -149,6 +149,8 @@ export const wrapEmailWithStyles = (htmlBody: string): string => {
       quotes: "\\201C""\\201D""\\2018""\\2019";
       margin-top: 1.6em;
       margin-bottom: 1.6em;
+      margin-left: 40px;
+      margin-right: 40px;
       padding-left: 1em;
     }
     .prose h1 {
