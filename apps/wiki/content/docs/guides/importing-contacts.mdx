@@ -8,7 +8,7 @@ Plunk supports bulk-importing contacts from a CSV file — useful for migrating 
 
 ## CSV format
 
-The CSV must have a header row. The only required column is `email`. Every other column becomes a custom field on the contact under `data.<columnname>`.
+The CSV must have a header row. The only required column is `email`. Every other column becomes a custom field on the contact under `data.<columnname>`, except the special and reserved columns listed below.
 
 Headers are lowercased on import, so a `firstName` column becomes the field `firstname`. Use lowercase names in your templates and segment filters, like `{{firstname}}`, or name the columns in lowercase to begin with.
 
@@ -37,7 +37,9 @@ In this example, every imported contact ends up with `data.firstname`, `data.pla
 - **File size**: up to 5 MB per upload. For larger lists, split the file and run multiple imports.
 - **Encoding**: UTF-8. Non-UTF-8 files may produce garbled custom field values.
 - **Email column**: must be present and valid. Rows with missing or invalid emails are reported back as errors.
-- **Reserved column names**: `id`, `createdAt`, `updatedAt`, and the auto-generated URL variables (`unsubscribeUrl`, etc.) are silently filtered out. Don't include them as columns.
+- **Reserved column names**: `id`, `createdAt`, `updatedAt`, `status`, `dynamicSegments` and the auto-generated URL variables (`unsubscribeUrl`, etc.) are silently filtered out. Don't use them for custom fields. This is what lets a file from **Export CSV** be imported back as it is.
+- **Segments**: an optional `segments` column adds each contact to the static segments it names, separated by `;` (`Club; VIP`). Names match regardless of case and surrounding spaces, and a name no segment has yet creates a static segment (up to 25 per import). The import only adds: a blank cell never removes anyone from a segment. Names of dynamic segments, or names shared by several static segments, are reported in the import summary and not assigned.
+- **Snoozed contacts**: a row exported with `status` `snoozed` and `subscribed` `false` keeps the contact snoozed instead of unsubscribing it.
 - **Subscription status**: an optional `subscribed` column sets whether each contact can receive marketing email. `true`, `1` and `yes` subscribe the contact; any other value, such as `false` or `no`, unsubscribes it. Leave the cell empty, or omit the column, to keep an existing contact's status unchanged. New contacts without a value are created subscribed.
 - **Date columns**: use ISO 8601 (`2026-05-06T12:00:00Z`) so they're typed as dates and become usable with `within` / `olderThan` segment operators.
 - **Boolean columns**: `true`, `false`, `yes`, `no` (case-insensitive) are stored as booleans and get the boolean toggle in segment filters.
@@ -101,7 +103,7 @@ Poll every few seconds until `status` is `completed` or `failed`. The response i
 }
 ```
 
-`imported` counts new contacts created. `updated` counts existing contacts whose `data` was patched. `errors` lists per-row issues with row number and reason so you can fix and re-upload.
+`imported` counts new contacts created. `updated` counts existing contacts whose `data` was patched. `errors` lists per-row issues with row number and reason so you can fix and re-upload. When the file has a `segments` column, `segmentsCreated` lists the static segments the import created, `segmentAssignments` counts contacts added to segments, and segment names that could not be assigned appear in `errors` with row `0`.
 
 </Tab>
 

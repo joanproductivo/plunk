@@ -11,6 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
+import {contactStatus} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -21,7 +22,7 @@ import {DashboardLayout} from '../../components/DashboardLayout';
 import {KeyValueEditor} from '../../components/KeyValueEditor';
 import {ActivityFeed} from '../../components/ActivityFeed';
 import {network} from '../../lib/network';
-import {contactStatus, formatSnoozedUntil} from '../../lib/contactStatus';
+import {formatSnoozedUntil} from '../../lib/contactStatus';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 import {ContactSchemas} from '@plunk/shared';

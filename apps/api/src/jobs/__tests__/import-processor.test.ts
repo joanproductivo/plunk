@@ -1,7 +1,7 @@
 import {beforeEach, describe, expect, it} from 'vitest';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {ContactService} from '../../services/ContactService.js';
-import {coerceCustomValue} from '../import-processor.js';
+import {coerceCustomValue, parseImportCsv, splitImportRecord} from '../import-processor.js';
 
 /**
  * Tests for Contact Import Processor - Subscription Status Preservation
@@ -326,5 +326,65 @@ describe('coerceCustomValue', () => {
     it('leaves empty string as empty string', () => {
       expect(coerceCustomValue('')).toBe('');
     });
+  });
+});
+
+describe('parseImportCsv', () => {
+  it('undoes the export formula escaping on headers too', () => {
+    expect(parseImportCsv("email,'=Key\r\nana@example.com,1\r\n")).toEqual([{'email': 'ana@example.com', '=key': '1'}]);
+  });
+
+  it('drops a UTF-8 byte order mark so the email column is still found', () => {
+    expect(parseImportCsv('\uFEFFEmail,Name\r\nana@example.com,Ana\r\n')).toEqual([
+      {email: 'ana@example.com', name: 'Ana'},
+    ]);
+  });
+});
+
+describe('splitImportRecord', () => {
+  it('skips the read-only columns the export writes, but keeps segments apart', () => {
+    const split = splitImportRecord({
+      email: ' ana@example.com ',
+      subscribed: 'true',
+      status: 'subscribed',
+      createdat: '2026-10-25T10:00:00.000Z',
+      updatedat: '2026-10-25T10:00:00.000Z',
+      segments: 'Club; VIP',
+      dynamicsegments: 'Engaged',
+      plan: 'pro',
+    });
+
+    expect(split).toEqual({
+      email: 'ana@example.com',
+      subscribed: true,
+      keepSnooze: false,
+      data: {plan: 'pro'},
+      segments: 'Club; VIP',
+    });
+  });
+
+  it('undoes the export formula escaping on every cell', () => {
+    const split = splitImportRecord({email: 'ana@example.com', formula: "'=1+1", handle: "'@ana", note: "it's"});
+
+    expect(split.data).toEqual({formula: '=1+1', handle: '@ana', note: "it's"});
+  });
+
+  it('flags an unchanged exported snooze so it is not turned into an unsubscribe', () => {
+    const snoozed = splitImportRecord({email: 'a@example.com', subscribed: 'false', status: 'snoozed'});
+    expect(snoozed).toMatchObject({subscribed: false, keepSnooze: true});
+
+    // Edited to subscribed=true, the row is a decision to resubscribe and is honoured.
+    expect(splitImportRecord({email: 'a@example.com', subscribed: 'true', status: 'snoozed'})).toMatchObject({
+      subscribed: true,
+      keepSnooze: false,
+    });
+    expect(splitImportRecord({email: 'a@example.com', subscribed: 'false', status: 'unsubscribed'})).toMatchObject({
+      subscribed: false,
+      keepSnooze: false,
+    });
+  });
+
+  it('writes no custom data when only reserved columns are present', () => {
+    expect(splitImportRecord({email: 'a@example.com', status: 'subscribed'}).data).toBeUndefined();
   });
 });

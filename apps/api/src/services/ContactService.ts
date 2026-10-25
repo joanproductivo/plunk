@@ -807,6 +807,27 @@ export class ContactService {
   }
 
   /**
+   * Distinct custom field keys in a project's contact `data`. Contacts without custom data hold
+   * a JSON `null` (see `upsert`), which `jsonb_object_keys` rejects, hence the object guard.
+   */
+  private static customFieldKeysSql(projectId: string): Prisma.Sql {
+    return Prisma.sql`
+      SELECT DISTINCT jsonb_object_keys(data) AS key
+      FROM contacts
+      WHERE
+        "projectId" = ${projectId}
+        AND data IS NOT NULL
+        AND jsonb_typeof(data) = 'object'
+    `;
+  }
+
+  /** Custom field keys used by any contact in the project, sorted. */
+  public static async getCustomFieldKeys(projectId: string): Promise<string[]> {
+    const rows = await prisma.$queryRaw<{key: string}[]>(this.customFieldKeysSql(projectId));
+    return rows.map(row => row.key).sort((a, b) => a.localeCompare(b));
+  }
+
+  /**
    * Get all available contact fields for a project
    * Returns both standard fields and custom fields from the data JSON column
    * Now includes type information inferred from actual data
@@ -836,12 +857,7 @@ export class ContactService {
       Array<{key: string; sample_value: string; json_type: string; contact_count: bigint}>
     >`
       WITH field_keys AS (
-        SELECT DISTINCT jsonb_object_keys(data) as key
-        FROM contacts
-        WHERE
-          "projectId" = ${projectId}
-          AND data IS NOT NULL
-          AND jsonb_typeof(data) = 'object'
+        ${this.customFieldKeysSql(projectId)}
       ),
       field_samples AS (
         SELECT
