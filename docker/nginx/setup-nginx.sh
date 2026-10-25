@@ -89,6 +89,13 @@ http {
 }
 EOF
 
+# Stop the container on an invalid configuration: under PM2 a broken nginx would just
+# keep restarting while the API and worker run unreachable behind it
+if ! nginx -t; then
+    echo "❌ ERROR: invalid nginx configuration (see above)"
+    exit 1
+fi
+
 echo "✅ Nginx configuration complete!"
 echo "   Config file: ${NGINX_CONF_D}/plunk.conf"
 echo "   API Domain: ${API_DOMAIN}"
