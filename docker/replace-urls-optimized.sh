@@ -89,20 +89,6 @@ replace_urls_in_app() {
     done
   fi
 
-  # Special handling for wiki: also replace URLs in openapi.local.json
-  if [ "$app" = "wiki" ]; then
-    local openapi_file="$app_dir/openapi.local.json"
-    if [ -f "$openapi_file" ]; then
-      echo "   🔄 Replacing URLs in openapi.local.json"
-      sed -e "s|$PLACEHOLDER_API|$API_URI|g" \
-          -e "s|$PLACEHOLDER_DASHBOARD|$DASHBOARD_URI|g" \
-          -e "s|$PLACEHOLDER_LANDING|$LANDING_URI|g" \
-          -e "s|$PLACEHOLDER_WIKI|$WIKI_URI|g" \
-          "$openapi_file" > "${openapi_file}.tmp" && mv "${openapi_file}.tmp" "$openapi_file"
-      echo "   ✅ Updated OpenAPI spec with runtime URLs"
-    fi
-  fi
-
   # Generate .env file for server-side Next.js standalone
   cat > "$app_dir/.env" << EOF
 # Runtime environment configuration
