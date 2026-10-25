@@ -61,9 +61,9 @@ echo "   USE_HTTPS=true"
 # Source the optimized URL replacement script
 . /app/docker/replace-urls-optimized.sh
 
-# Replace URLs in the web dashboard using optimized function
-# This uses pre-generated manifests from build time instead of scanning all files
-replace_urls_in_app "web" "/app/apps/web/.next/standalone/apps/web"
+# Replace URLs in the web dashboard's static export, which nginx serves directly
+# This uses a pre-generated manifest from build time instead of scanning all files
+replace_urls_in_app "web" "/app/apps/web"
 
 echo "📋 Starting services with PM2..."
 
@@ -107,24 +107,6 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: 'production',
-        API_URI: '${API_URI}',
-        DASHBOARD_URI: '${DASHBOARD_URI}',
-        LANDING_URI: '${LANDING_URI}',
-        WIKI_URI: '${WIKI_URI}'
-      }
-    },
-    {
-      name: 'web',
-      script: 'apps/web/server.js',
-      cwd: '/app/apps/web/.next/standalone',
-      instances: 1,
-      exec_mode: 'fork',
-      autorestart: true,
-      watch: false,
-      env: {
-        NODE_ENV: 'production',
-        PORT: 3000,
-        HOSTNAME: '0.0.0.0',
         API_URI: '${API_URI}',
         DASHBOARD_URI: '${DASHBOARD_URI}',
         LANDING_URI: '${LANDING_URI}',

@@ -20,11 +20,11 @@
         "NEXT_PUBLIC_WIKI_URI"
       ],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+      "outputs": [".next/**", "!.next/cache/**", "dist/**", "out/**"]
     },
     "sitemap": {
       "dependsOn": ["build"],
-      "outputs": ["public/robots.txt", "public/sitemap*.xml"]
+      "outputs": ["out/robots.txt", "out/sitemap*.xml"]
     },
     "deploy": {
       "dependsOn": ["build", "sitemap"],

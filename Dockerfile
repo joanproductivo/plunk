@@ -1,5 +1,6 @@
 # Multi-stage Dockerfile for Plunk
-# Creates a single image for self-hosting: API, worker and web dashboard behind nginx.
+# Creates a single image for self-hosting: API and worker behind nginx, which also serves the
+# web dashboard as a static export.
 # The landing page, the docs and the SMTP relay are not built or shipped.
 # Use SERVICE environment variable to specify which service to run
 
@@ -167,7 +168,7 @@ RUN --mount=type=cache,target=/app/.turbo,sharing=locked \
     NEXT_PUBLIC_WIKI_URI=${WIKI_URI} \
     yarn turbo build --filter=api
 
-# Step 3: Copy and build Web dashboard
+# Step 3: Copy and build Web dashboard (static export to apps/web/out)
 COPY apps/web ./apps/web
 RUN --mount=type=cache,target=/app/.turbo,sharing=locked \
     API_URI=${API_URI} \
@@ -181,16 +182,11 @@ RUN --mount=type=cache,target=/app/.turbo,sharing=locked \
     yarn turbo build --filter=web
 # Generate sitemap for web
 RUN NEXT_PUBLIC_DASHBOARD_URI=${DASHBOARD_URI} yarn workspace web sitemap
-# Generate URL replacement manifest for web (build-time optimization)
+# Check the export can be served by nginx and list the files with placeholder URLs
 RUN generate-url-manifest.sh web /app/apps/web
 
 # Copy any remaining root files (if needed)
 COPY . .
-
-# Ensure directories exist (create empty ones if build didn't generate them)
-RUN mkdir -p \
-    apps/web/public \
-    apps/web/.next/standalone
 
 # ============================================
 # Stage 3: Production Runtime
@@ -254,18 +250,12 @@ COPY --from=prod-deps --chown=plunk:nodejs /app/yarn.lock ./
 COPY --from=builder --chown=plunk:nodejs /app/apps/api/package.json ./apps/api/
 
 # ============================================
-# Copy the Next.js web dashboard with its standalone build
+# Copy the web dashboard as a static export
 # ============================================
-# Next.js standalone mode bundles all dependencies internally, so we don't need
-# to copy node_modules for it - it's completely self-contained
-
-# Web app - standalone build with static assets
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/standalone ./apps/web/.next/standalone
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/public ./apps/web/.next/standalone/apps/web/public
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/static ./apps/web/.next/standalone/apps/web/.next/static
-# Copy URL replacement manifests to standalone directory
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/url-manifest.txt ./apps/web/.next/standalone/apps/web/.next/url-manifest.txt
-COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/sitemap-manifest.txt ./apps/web/.next/standalone/apps/web/.next/sitemap-manifest.txt
+# nginx serves these files directly: no Node.js process runs for the dashboard.
+# The URL manifest stays next to the export, outside the directory nginx serves.
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/out ./apps/web/out
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/url-manifest.txt ./apps/web/url-manifest.txt
 
 # ============================================
 # Copy runtime configuration
