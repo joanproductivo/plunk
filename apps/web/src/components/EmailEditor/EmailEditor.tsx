@@ -11,6 +11,9 @@ import {LogicMention} from './LogicMention';
 import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
+import {EmailButton} from './EmailButton';
+import {ButtonDialog} from './ButtonDialog';
+import {useButtonDialog} from './useButtonDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
 import {PreheaderField} from './PreheaderField';
@@ -144,6 +147,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         },
       }),
       ResizableImage,
+      EmailButton,
       Variable,
       VariableMention,
       LogicMention,
@@ -167,6 +171,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       setPreviewUpdateTrigger(prev => prev + 1);
     },
   });
+
+  const {openButtonDialog, buttonDialogProps} = useButtonDialog(editor);
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -460,6 +466,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             editor={editor}
             onInsertVariable={() => setShowVariableDialog(true)}
             onInsertImage={() => setShowImageDialog(true)}
+            onButton={openButtonDialog}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
@@ -781,6 +788,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         confirmText="Switch anyway"
         variant="destructive"
       />
+
+      <ButtonDialog {...buttonDialogProps} />
 
       {/* Image insertion dialog */}
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>

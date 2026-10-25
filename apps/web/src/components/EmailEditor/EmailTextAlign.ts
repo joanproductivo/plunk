@@ -3,14 +3,14 @@ import {TextAlign} from '@tiptap/extension-text-align';
 import {parseBlockAlignment} from './blockAlignment';
 
 // Blocks aligned through the paragraph that wraps them (see blockAlignment), not their own style.
-const BLOCK_TYPES = ['image'];
+const BLOCK_TYPES = ['image', 'button'];
 
 /**
- * TextAlign as the email editor uses it. Images take part too (see ResizableImage), so the
- * alignment buttons and shortcuts align a selected block, or every block in a selection. A block
- * only keeps centre or right: left is how it renders anyway, so it is stored as no alignment, and
- * justify is not applied to it at all — otherwise justifying a selection would silently pull every
- * centred block in it back to the left.
+ * TextAlign as the email editor uses it. Images and buttons take part too (see ResizableImage
+ * and EmailButton), so the alignment buttons and shortcuts align a selected block, or every
+ * block in a selection. A block only keeps centre or right: left is how it renders anyway, so it
+ * is stored as no alignment, and justify is not applied to it at all — otherwise justifying a
+ * selection would silently pull every centred block in it back to the left.
  */
 export const EmailTextAlign = TextAlign.extend({
   addGlobalAttributes() {

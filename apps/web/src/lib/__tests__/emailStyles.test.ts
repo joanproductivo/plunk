@@ -130,3 +130,24 @@ describe('detectCustomHtmlPatterns with a preview text', () => {
     expect(detectCustomHtmlPatterns('<!--plunk:preheader:Hello &amp; welcome--><p>Hello</p>')).toBe(false);
   });
 });
+
+describe('detectCustomHtmlPatterns with editor buttons', () => {
+  const button = (inner: string, className = 'email-button') =>
+    `<p style="text-align: center;"><a class="${className}" href="{{unsubscribeUrl}}" style="display: inline-block; padding: 12px 20px; font-family: 'Helvetica Neue', Arial, sans-serif;">${inner}</a></p>`;
+
+  it('treats an editor button as visual editor content', () => {
+    expect(detectCustomHtmlPatterns(button('Shop now'))).toBe(false);
+  });
+
+  it('treats look-alike classes as custom, since only the editor button is matched', () => {
+    expect(detectCustomHtmlPatterns(button('Shop now', 'email-button-primary'))).toBe(true);
+  });
+
+  it('reads a < that is not a tag as text', () => {
+    expect(detectCustomHtmlPatterns(button('I <3 this'))).toBe(false);
+  });
+
+  it('treats a button with markup inside as custom, since the editor keeps plain labels only', () => {
+    expect(detectCustomHtmlPatterns(button('<strong>Shop</strong> now'))).toBe(true);
+  });
+});

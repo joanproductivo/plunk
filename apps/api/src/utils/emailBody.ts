@@ -41,12 +41,29 @@ const PREHEADER_STYLE =
   'display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:transparent;opacity:0';
 const PREHEADER_FILL = '&#847;&zwnj;&nbsp;'.repeat(60);
 
+// Whether an `a.email-button` holds markup (another tag before its closing </a>). A linear scan:
+// the body may carry contact data, so no regex that can backtrack over attacker-sized input.
+function hasRichButton(html: string): boolean {
+  const links = html.split(/<a\b/i);
+  for (let i = 1; i < links.length; i++) {
+    const link = links[i]!;
+    const tagEnd = link.indexOf('>');
+    if (tagEnd < 0) return false;
+    if (!/\bclass\s*=\s*["'][^"']*\bemail-button\b/i.test(link.slice(0, tagEnd))) continue;
+
+    const content = link.slice(tagEnd + 1);
+    const next = content.search(/<[a-z!/]/i);
+    if (next >= 0 && !/^<\/a>/i.test(content.slice(next))) return true;
+  }
+  return false;
+}
+
 /**
  * Detects if HTML contains custom patterns that indicate it was written in the HTML editor
  * rather than the visual editor. Mirrors the same logic in apps/web/src/lib/emailStyles.ts.
  *
  * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
- * ResizableImage + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
+ * ResizableImage + EmailButton + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
  * <a style="..."> markup. This detection therefore PERMITS span + inline styles and only
  * REJECTS markup TipTap cannot represent (tables, divs, forms, embeds, custom attrs,
  * <style> blocks, etc).
@@ -69,8 +86,9 @@ function detectCustomHtmlPatterns(html: string): boolean {
       'selected',
       'resize-handle',
     ];
+    // The editor's button, matched exactly so that look-alikes such as `email-button-primary` stay custom
     const hasDisallowedClass = classes.some(
-      (cls: string) => !allowedPrefixes.some((prefix: string) => cls.startsWith(prefix)),
+      (cls: string) => cls !== 'email-button' && !allowedPrefixes.some((prefix: string) => cls.startsWith(prefix)),
     );
     if (hasDisallowedClass) {
       hasCustomClasses = true;
@@ -92,7 +110,14 @@ function detectCustomHtmlPatterns(html: string): boolean {
   const hasMediaQueries = /@media/i.test(html);
   const hasStyleTags = /<style[^>]*>/i.test(html);
 
-  return hasCustomClasses || hasCustomAttributes || hasCustomElements || hasMediaQueries || hasStyleTags;
+  return (
+    hasCustomClasses ||
+    hasCustomAttributes ||
+    hasCustomElements ||
+    hasMediaQueries ||
+    hasStyleTags ||
+    hasRichButton(html)
+  );
 }
 
 /** A full email document around visual editor content. `styleBlock` is only used as a fallback. */
