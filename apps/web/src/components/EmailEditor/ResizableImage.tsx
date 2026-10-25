@@ -3,6 +3,8 @@ import {mergeAttributes, Node} from '@tiptap/core';
 import {NodeViewWrapper, type ReactNodeViewProps, ReactNodeViewRenderer} from '@tiptap/react';
 import {useEffect, useRef, useState} from 'react';
 
+import {blockAlignment, type BlockAlignment, isLoneChildParagraph} from './blockAlignment';
+
 interface ImageAttrs {
   src: string;
   alt?: string;
@@ -12,44 +14,14 @@ interface ImageAttrs {
   textAlign?: string | null;
 }
 
-type ImageAlignment = 'center' | 'right';
-
 // An aligned image is wrapped in <p style="text-align: …"> (see renderHTML). The inline
 // `display: block` and margins align it in clients that support them, with or without the
 // email wrapper's `.prose img` styles; classic Outlook for Windows ignores both on images and
 // aligns it through the paragraph's `text-align` instead.
-const ALIGNED_IMAGE_STYLES: Record<ImageAlignment, string> = {
+const ALIGNED_IMAGE_STYLES: Record<BlockAlignment, string> = {
   center: 'display: block; margin-left: auto; margin-right: auto',
   right: 'display: block; margin-left: auto; margin-right: 0',
 };
-
-// Only centre and right change how an image is laid out (see EmailTextAlign); anything else
-// renders left, as images always have.
-function imageAlignment(textAlign: unknown): ImageAlignment | null {
-  return textAlign === 'center' || textAlign === 'right' ? textAlign : null;
-}
-
-// Reads back what renderHTML writes: only the wrapping paragraph carries an image's alignment.
-// `text-align` anywhere else, the <img> itself included, never moved the image and still doesn't.
-export function parseImageAlignment(element: HTMLElement): ImageAlignment | null {
-  return element.matches('p') ? imageAlignment(element.style.textAlign) : null;
-}
-
-// How an aligned image is serialised: a paragraph holding that image and nothing else, so
-// claiming it can never drop text or Liquid tags. A non-breaking space counts as content (it is
-// often a deliberate spacer). A list item must open with a paragraph, so the paragraph it opens
-// with is left alone: claiming it would push the image, and the rest of the list, out of it.
-function isWrappedImage(element: HTMLElement): boolean {
-  if (element.parentElement?.tagName === 'LI' && !element.previousElementSibling) {
-    return false;
-  }
-
-  return (
-    element.childElementCount === 1 &&
-    element.firstElementChild!.matches('img[src]') &&
-    !/[^ \t\n\r\f]/.test(element.textContent ?? '')
-  );
-}
 
 // The attributes live on the <img>: the matched element itself, or the only child of the
 // paragraph matched by the second parse rule.
@@ -59,7 +31,7 @@ function imageElement(element: HTMLElement): Element {
 
 function ResizableImageComponent({node, updateAttributes, selected}: ReactNodeViewProps) {
   const attrs = node.attrs as ImageAttrs;
-  const alignment = imageAlignment(attrs.textAlign);
+  const alignment = blockAlignment(attrs.textAlign);
   const [isResizing, setIsResizing] = useState(false);
   const [resizeDirection, setResizeDirection] = useState<'se' | 'sw' | 'ne' | 'nw' | null>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -293,13 +265,13 @@ export const ResizableImage = Node.create({
       {
         tag: 'p',
         priority: 51,
-        getAttrs: element => (isWrappedImage(element) ? null : false),
+        getAttrs: element => (isLoneChildParagraph(element, 'img[src]') ? null : false),
       },
     ];
   },
 
   renderHTML({node, HTMLAttributes}) {
-    const alignment = imageAlignment(node.attrs.textAlign);
+    const alignment = blockAlignment(node.attrs.textAlign);
 
     if (!alignment) {
       return ['img', mergeAttributes(HTMLAttributes, {class: 'email-image'})];
