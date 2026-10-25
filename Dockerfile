@@ -206,7 +206,7 @@ RUN apk add --no-cache openssl curl nginx gettext
 # Install PM2 globally for process management
 # Use cache mount and specific version to prevent hangs
 RUN --mount=type=cache,target=/root/.npm \
-    npm install -g pm2@5.4.2 --prefer-offline --no-audit
+    npm install -g pm2@7.0.4 --prefer-offline --no-audit
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs
