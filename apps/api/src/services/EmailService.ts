@@ -340,7 +340,7 @@ export class EmailService {
      */
     sourceEmailId?: string;
   }): string {
-    let html = renderBody(content);
+    let html = renderBody(content, sourceEmailId);
 
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
@@ -414,9 +414,11 @@ export class EmailService {
     // Combine footer and badge
     const footerHtml = `${unsubscribeHtml}${badgeHtml}`;
 
-    // Insert before closing body tag if it exists, otherwise append
-    if (html.includes('</body>')) {
-      html = html.replace('</body>', `${footerHtml}</body>`);
+    // Insert before the last closing body tag if it exists, otherwise append. An earlier </body>
+    // can come from contact data inside the hidden preheader.
+    const bodyEnd = html.lastIndexOf('</body>');
+    if (bodyEnd !== -1) {
+      html = `${html.slice(0, bodyEnd)}${footerHtml}${html.slice(bodyEnd)}`;
     } else {
       html = `${html}${footerHtml}`;
     }

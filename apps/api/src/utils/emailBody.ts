@@ -3,331 +3,35 @@ import {load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
 
+import {EMAIL_PROSE_CSS} from './emailProseCss.js';
+
 // juice's main entry pulls in full cheerio (parse5, undici) and web-resource-inliner, ~28 MB of
 // resident memory per process. Its inliner core on cheerio's htmlparser2 build costs ~2 MB.
 const juice = makeJuiceClient({});
 
 /**
- * Typography for visual editor emails. Mirrors the stylesheet in apps/web/src/lib/emailStyles.ts,
- * which the preview keeps in a <style> block. Sending moves it into style attributes instead,
- * because several clients drop <style> (Gmail on the mobile web, Gmail apps with non-Google
- * accounts) or <body> (Outlook for Mac, Yahoo apps), hence the font on .prose as well as body.
- *
- * The preview's `* { box-sizing }` reset is left out: inlined, it lands on every element and adds
- * about a fifth to the size, which brings long emails closer to Gmail's 102 KB clipping.
+ * Gmail clips messages above 102 KB, hiding the rest, including the unsubscribe footer. Measured
+ * before the footer is added and before SES rewrites links for tracking, hence the margin.
  */
-const EMAIL_PROSE_CSS = `body {
-  margin: 0;
-  padding: 16px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  line-height: 1.5;
-  color: #111827;
-}
+const GMAIL_CLIP_WARNING_BYTES = 80_000;
 
-/* Tailwind Typography (prose) base styles */
-.prose {
-  color: #374151;
-  max-width: 600px;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-}
-.prose [class~="lead"] {
-  color: #4b5563;
-  font-size: 1.25em;
-  line-height: 1.6;
-  margin-top: 1.2em;
-  margin-bottom: 1.2em;
-}
-.prose a {
-  color: #3b82f6;
-  text-decoration: underline;
-  font-weight: 500;
-}
-.prose strong {
-  color: #111827;
-  font-weight: 600;
-}
-.prose ol, .prose ul {
-  margin-top: 1.25em;
-  margin-bottom: 1.25em;
-  padding-left: 1.625em;
-}
-.prose li {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
-}
-.prose ol > li {
-  padding-left: 0.375em;
-}
-.prose ul > li {
-  padding-left: 0.375em;
-}
-.prose > ul > li p {
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-}
-.prose > ul > li > *:first-child {
-  margin-top: 1.25em;
-}
-.prose > ul > li > *:last-child {
-  margin-bottom: 1.25em;
-}
-.prose > ol > li > *:first-child {
-  margin-top: 1.25em;
-}
-.prose > ol > li > *:last-child {
-  margin-bottom: 1.25em;
-}
-.prose ul ul, .prose ul ol, .prose ol ul, .prose ol ol {
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-}
-.prose hr {
-  border: none;
-  border-top: 1px solid #e5e7eb;
-  margin-top: 3em;
-  margin-bottom: 3em;
-}
-.prose blockquote {
-  font-weight: 500;
-  font-style: italic;
-  color: #111827;
-  border-left-width: 0.25rem;
-  border-left-color: #e5e7eb;
-  quotes: "\\201C""\\201D""\\2018""\\2019";
-  margin-top: 1.6em;
-  margin-bottom: 1.6em;
-  padding-left: 1em;
-}
-.prose h1 {
-  color: #111827;
-  font-weight: 800;
-  font-size: 2.25em;
-  margin-top: 0;
-  margin-bottom: 0.8888889em;
-  line-height: 1.1111111;
-}
-.prose h2 {
-  color: #111827;
-  font-weight: 700;
-  font-size: 1.5em;
-  margin-top: 2em;
-  margin-bottom: 1em;
-  line-height: 1.3333333;
-}
-.prose h3 {
-  color: #111827;
-  font-weight: 600;
-  font-size: 1.25em;
-  margin-top: 1.6em;
-  margin-bottom: 0.6em;
-  line-height: 1.6;
-}
-.prose h4 {
-  color: #111827;
-  font-weight: 600;
-  margin-top: 1.5em;
-  margin-bottom: 0.5em;
-  line-height: 1.5;
-}
-.prose img {
-  margin-top: 2em;
-  margin-bottom: 2em;
-}
-.prose figure {
-  margin-top: 2em;
-  margin-bottom: 2em;
-}
-.prose figure > * {
-  margin-top: 0;
-  margin-bottom: 0;
-}
-.prose code {
-  color: #111827;
-  font-weight: 600;
-  font-size: 0.875em;
-}
-.prose code::before {
-  content: "\`";
-}
-.prose code::after {
-  content: "\`";
-}
-.prose pre {
-  color: #e5e7eb;
-  background-color: #1f2937;
-  overflow-x: auto;
-  font-size: 0.875em;
-  line-height: 1.7142857;
-  margin-top: 1.7142857em;
-  margin-bottom: 1.7142857em;
-  border-radius: 0.375rem;
-  padding-top: 0.8571429em;
-  padding-right: 1.1428571em;
-  padding-bottom: 0.8571429em;
-  padding-left: 1.1428571em;
-}
-.prose pre code {
-  background-color: transparent;
-  border-width: 0;
-  border-radius: 0;
-  padding: 0;
-  font-weight: 400;
-  color: inherit;
-  font-size: inherit;
-  font-family: inherit;
-  line-height: inherit;
-}
-.prose pre code::before {
-  content: none;
-}
-.prose pre code::after {
-  content: none;
-}
-.prose table {
-  width: 100%;
-  table-layout: auto;
-  text-align: left;
-  margin-top: 2em;
-  margin-bottom: 2em;
-  font-size: 0.875em;
-  line-height: 1.7142857;
-  border-collapse: collapse;
-}
-.prose thead {
-  border-bottom-width: 1px;
-  border-bottom-color: #d1d5db;
-}
-.prose thead th {
-  color: #111827;
-  font-weight: 600;
-  vertical-align: bottom;
-  padding-right: 0.5714286em;
-  padding-bottom: 0.5714286em;
-  padding-left: 0.5714286em;
-}
-.prose tbody tr {
-  border-bottom-width: 1px;
-  border-bottom-color: #e5e7eb;
-}
-.prose tbody tr:last-child {
-  border-bottom-width: 0;
-}
-.prose tbody td {
-  vertical-align: top;
-  padding-top: 0.5714286em;
-  padding-right: 0.5714286em;
-  padding-bottom: 0.5714286em;
-  padding-left: 0.5714286em;
-}
-.prose p {
-  margin-top: 1.25em;
-  margin-bottom: 1.25em;
-}
+/** The same campaign renders once per recipient; one line a minute per kind of warning is enough. */
+const WARNING_INTERVAL_MS = 60_000;
+const lastWarnedAt = new Map<string, number>();
 
-/* prose-sm modifier */
-.prose-sm {
-  font-size: 0.875rem;
-  line-height: 1.7142857;
-}
-.prose-sm p {
-  margin-top: 1.1428571em;
-  margin-bottom: 1.1428571em;
-}
-.prose-sm h1 {
-  font-size: 2.1428571em;
-  margin-top: 0;
-  margin-bottom: 0.8em;
-  line-height: 1.2;
-}
-.prose-sm h2 {
-  font-size: 1.4285714em;
-  margin-top: 1.6em;
-  margin-bottom: 0.8em;
-  line-height: 1.4;
-}
-.prose-sm h3 {
-  font-size: 1.2857143em;
-  margin-top: 1.5555556em;
-  margin-bottom: 0.4444444em;
-  line-height: 1.5555556;
-}
-.prose-sm h4 {
-  margin-top: 1.4285714em;
-  margin-bottom: 0.5714286em;
-  line-height: 1.4285714;
-}
-.prose-sm img {
-  margin-top: 1.7142857em;
-  margin-bottom: 1.7142857em;
-}
-.prose-sm ol, .prose-sm ul {
-  margin-top: 1.1428571em;
-  margin-bottom: 1.1428571em;
-  padding-left: 1.5714286em;
-}
-.prose-sm li {
-  margin-top: 0.2857143em;
-  margin-bottom: 0.2857143em;
-}
+function warnAtMostEveryMinute(kind: string, message: string, error?: unknown): void {
+  const now = Date.now();
+  if (now - (lastWarnedAt.get(kind) ?? 0) < WARNING_INTERVAL_MS) {
+    return;
+  }
 
-/* max-w-none utility */
-.max-w-none {
-  max-width: none;
+  lastWarnedAt.set(kind, now);
+  if (error === undefined) {
+    signale.warn(message);
+  } else {
+    signale.warn(message, error);
+  }
 }
-
-/* Custom editor styles */
-.variable-highlight, .variable-placeholder, .variable-mention {
-  background-color: #dbeafe;
-  color: #1e40af;
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-family: 'Courier New', monospace;
-  font-size: 14px;
-  display: inline;
-}
-
-.prose table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 16px 0;
-}
-
-.prose th, .prose td {
-  border: 1px solid #e5e7eb;
-  padding: 8px 12px;
-  text-align: left;
-  min-width: 100px;
-}
-
-.prose th {
-  background-color: #f3f4f6;
-  font-weight: 600;
-}
-
-.prose img {
-  max-width: 100%;
-  height: auto;
-  display: block;
-  margin: 16px 0;
-}
-
-.prose .resizable-image-wrapper {
-  display: block;
-  margin: 16px 0;
-}
-
-.prose .resizable-image-container {
-  display: inline-block;
-  position: relative;
-  max-width: 100%;
-}
-
-.prose .resizable-image-container img {
-  margin: 0;
-}`;
-
-/** Gmail clips messages above 102 KB, hiding the rest, including the unsubscribe footer. */
-const GMAIL_CLIP_WARNING_BYTES = 90_000;
 
 /**
  * Hides the preheader in the body while clients show it as the inbox preview. The filler after
@@ -347,7 +51,7 @@ const PREHEADER_FILL = '&#847;&zwnj;&nbsp;'.repeat(60);
  * REJECTS markup TipTap cannot represent (tables, divs, forms, embeds, custom attrs,
  * <style> blocks, etc).
  */
-export function detectCustomHtmlPatterns(html: string): boolean {
+function detectCustomHtmlPatterns(html: string): boolean {
   if (!html || html.trim() === '') return false;
 
   const classMatches = html.matchAll(/class\s*=\s*["']([^"']*)["']/gi);
@@ -414,7 +118,7 @@ function emailDocument(htmlBody: string, styleBlock?: string): string {
  * around inline code) cannot be inlined, and juice drops !important from existing inline styles.
  * If inlining throws, the email goes out with the <style> block instead, as it always used to.
  */
-function wrapWithEmailStyles(htmlBody: string): string {
+function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
   try {
     const $ = load(emailDocument(htmlBody), {xml: {xmlMode: false, decodeEntities: false}});
     juice.inlineDocument($, EMAIL_PROSE_CSS, {
@@ -424,7 +128,11 @@ function wrapWithEmailStyles(htmlBody: string): string {
     });
     return $.html();
   } catch (error) {
-    signale.warn('[EMAIL] Failed to inline the email styles, sending them in a <style> block:', error);
+    warnAtMostEveryMinute(
+      'inline',
+      `[EMAIL] Failed to inline the email styles${emailId ? ` of email ${emailId}` : ''}, sending them in a <style> block:`,
+      error,
+    );
     return emailDocument(htmlBody, EMAIL_PROSE_CSS);
   }
 }
@@ -436,9 +144,13 @@ function insertPreheader(html: string, preheader: string): string {
   }
 
   const block = `<div data-plunk-preheader style="${PREHEADER_STYLE}">${preheader}<span data-plunk-preheader-fill>${PREHEADER_FILL}</span></div>`;
-  // Right after <body>; in a document whose <body> is implicit, after <head> or <html> so the
-  // doctype stays first; in a fragment, at the very start.
-  const anchor = /<body\b[^>]*>/i.exec(html) ?? /<\/head>/i.exec(html) ?? /<html\b[^>]*>/i.exec(html);
+  // Right after <body>; in a document whose <body> is implicit, after <head>, <html> or the
+  // doctype so the doctype stays first; in a fragment, at the very start.
+  const anchor =
+    /<body\b[^>]*>/i.exec(html) ??
+    /<\/head>/i.exec(html) ??
+    /<html\b[^>]*>/i.exec(html) ??
+    /<!doctype[^>]*>/i.exec(html);
   if (!anchor) {
     return `${block}${html}`;
   }
@@ -452,14 +164,17 @@ function insertPreheader(html: string, preheader: string): string {
  * content is wrapped in a styled document; custom HTML (from the HTML editor) already carries its
  * own styles and is used as-is. Either way the preheader, if any, goes at the top.
  */
-export function renderBody(content: string): string {
+export function renderBody(content: string, emailId?: string): string {
   const {preheader, body} = splitPreheader(content);
-  const wrapped = detectCustomHtmlPatterns(body) ? body : wrapWithEmailStyles(body);
+  const wrapped = detectCustomHtmlPatterns(body) ? body : wrapWithEmailStyles(body, emailId);
   const html = insertPreheader(wrapped, preheader);
 
   const bytes = Buffer.byteLength(html);
   if (bytes > GMAIL_CLIP_WARNING_BYTES) {
-    signale.warn(`[EMAIL] Email body is ${bytes} bytes; Gmail clips messages above 102 KB`);
+    warnAtMostEveryMinute(
+      'size',
+      `[EMAIL] Email${emailId ? ` ${emailId}` : ''} is ${bytes} bytes before its footer; Gmail clips messages above 102 KB`,
+    );
   }
 
   return html;

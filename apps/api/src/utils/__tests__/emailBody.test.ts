@@ -116,6 +116,12 @@ describe('renderBody', () => {
       expect(html).toContain('</head><div data-plunk-preheader');
     });
 
+    it('keeps the doctype first when there is no <html>, <head> or <body> tag', () => {
+      const html = renderBody(`${preheader}<!DOCTYPE html><table></table>`);
+
+      expect(html.startsWith('<!DOCTYPE html><div data-plunk-preheader')).toBe(true);
+    });
+
     it('goes first in a custom fragment', () => {
       expect(renderBody(`${preheader}<table></table>`).startsWith('<div data-plunk-preheader')).toBe(true);
     });
@@ -136,6 +142,17 @@ describe('renderBody', () => {
       renderBody('<p>A paragraph long enough to add up when repeated many times over.</p>'.repeat(1500));
 
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Gmail clips'));
+    });
+
+    it('warns at most once a minute, since a campaign renders once per recipient', () => {
+      const warn = vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
+      const long = '<p>A paragraph long enough to add up when repeated many times over.</p>'.repeat(1500);
+
+      renderBody(long, 'email-1');
+      renderBody(long, 'email-2');
+
+      // The previous test already warned within this minute
+      expect(warn).not.toHaveBeenCalled();
     });
 
     it('stays quiet for an ordinary email', () => {

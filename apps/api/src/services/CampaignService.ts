@@ -1446,7 +1446,7 @@ export class CampaignService {
     }
 
     // Mirror the production classification so the test send carries the same
-    // headers real recipients would get. Test emails use the raw body without the
+    // headers real recipients would get. Test emails use the rendered body without the
     // unsubscribe footer, so there is no unsubscribe URL to advertise. A
     // transactional campaign resolves to a TRANSACTIONAL source upstream, so map it
     // here too.
