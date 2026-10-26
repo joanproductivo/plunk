@@ -1,8 +1,10 @@
 import {Button, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
-import {Upload, X} from 'lucide-react';
+import {Images, Upload, X} from 'lucide-react';
 import {useRef, useState} from 'react';
+import {useSWRConfig} from 'swr';
 
 import {network} from '../../lib/network';
+import {ImageGallery, UPLOADED_IMAGES_KEY} from './ImageGallery';
 
 interface ImageDialogProps {
   open: boolean;
@@ -13,20 +15,36 @@ interface ImageDialogProps {
   onInsert: (src: string) => void;
 }
 
-/** Inserts an image by URL or, with storage configured, by uploading a file. */
+/**
+ * Inserts an image by URL or, with storage configured, by uploading a file or picking one uploaded
+ * before. The gallery of uploaded images is only listed once asked for (see ImageGallery).
+ */
 export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDialogProps) {
   const [imageUrl, setImageUrl] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [showGallery, setShowGallery] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const {mutate} = useSWRConfig();
+
+  // Closing folds the gallery away again; its list stays cached for the session
+  const changeOpen = (next: boolean) => {
+    if (!next) setShowGallery(false);
+    onOpenChange(next);
+  };
+
+  const pick = (src: string) => {
+    onInsert(src);
+    setImageUrl('');
+    setImageFile(null);
+    changeOpen(false);
+  };
 
   const handleImageUpload = async () => {
     if (!imageFile && !imageUrl) return;
 
     if (imageUrl) {
       // Insert external URL
-      onInsert(imageUrl);
-      setImageUrl('');
-      onOpenChange(false);
+      pick(imageUrl);
     } else if (imageFile) {
       try {
         // Upload to S3/Minio
@@ -35,10 +53,9 @@ export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDial
 
         const response = await network.upload<{url: string; key: string}>('POST', '/uploads/image', formData);
 
-        // Insert the uploaded image URL
-        onInsert(response.url);
-        setImageFile(null);
-        onOpenChange(false);
+        // The gallery lists it next time it is opened, rather than relisting now
+        void mutate(UPLOADED_IMAGES_KEY, undefined, {revalidate: false});
+        pick(response.url);
       } catch (error) {
         console.error('Failed to upload image:', error);
         alert('Couldn’t upload the image. Try again.');
@@ -47,7 +64,7 @@ export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDial
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Insert image</DialogTitle>
@@ -109,11 +126,20 @@ export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDial
                   </div>
                 )}
               </div>
+
+              {showGallery ? (
+                <ImageGallery onPick={pick} />
+              ) : (
+                <Button type="button" variant="outline" onClick={() => setShowGallery(true)} className="w-full">
+                  <Images className="h-4 w-4 mr-2" />
+                  My images
+                </Button>
+              )}
             </>
           )}
 
           <div className="flex gap-2 justify-end">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" onClick={() => changeOpen(false)}>
               Cancel
             </Button>
             <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
