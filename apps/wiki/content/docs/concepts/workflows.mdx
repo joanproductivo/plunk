@@ -72,6 +72,19 @@ Each contact entering the workflow creates a `WorkflowExecution`. Executions mov
 
 Each execution carries a `context` JSON object that's merged with the contact's `data` when rendering templates and evaluating conditions. When you start an execution manually with `POST /workflows/:id/executions`, you can pass an initial `context` — this is how you parameterise per-execution variables (a coupon code, a referrer name) without storing them on the contact.
 
+## When something fails
+
+The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow or campaign, one for transactional emails, one for the project being disabled. What counts as a failure:
+
+- an execution that fails in a step, for example a webhook to an address Plunk refuses to call. A webhook that answers with an error status does not fail the execution: its step records the status and the workflow carries on;
+- an email of a workflow, a campaign or an API call that SES does not accept. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
+- a campaign batch, or a workflow job, that runs out of attempts;
+- the project being disabled.
+
+Marking a source reviewed closes what the banner showed. If it fails again, it shows up again, counting from one, and its alert email goes out again.
+
+In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. A disabled project sends no alerts.
+
 ## Locking active workflows
 
 A workflow is **locked** for structural edits while it has active (`RUNNING` or `WAITING`) executions. To make breaking changes — adding/removing steps, changing the trigger event, switching trigger type — first either:
