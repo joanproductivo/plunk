@@ -139,7 +139,10 @@ describe('processBulkContactAction - static segments', () => {
 
   it('skips an unticked contact past the first batch while paging by id', async () => {
     const contacts = await factories.createContacts(projectId, 150);
-    const desc = contacts.map(c => c.id).sort().reverse();
+    const desc = contacts
+      .map(c => c.id)
+      .sort()
+      .reverse();
     const unticked = desc[120]!;
 
     const result = await processBulkContactAction(
