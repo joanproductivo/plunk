@@ -33,17 +33,19 @@ function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean {
 }
 
 /**
- * Inserts a block of `type` after the selection, rather than in its place, and leaves the cursor
- * in the text after the new block (inserting at the end of the selection leaves the new block
- * selected, never a block that was already there).
+ * A command that inserts a block of `type` after the selection, rather than in its place, and
+ * leaves the cursor in the text after the new block (inserting at the end of the selection leaves
+ * the new block selected, never a block that was already there). It reads the selection from the
+ * transaction, so it can follow other commands in a chain, such as deleting the slash menu's query.
  */
+export function insertBlockAfterSelection(type: string, attrs?: Record<string, unknown>) {
+  return (props: CommandProps): boolean =>
+    props.commands.insertContentAt(props.tr.selection.to, {type, attrs}) && continueAfterBlock(props);
+}
+
+/** Inserts a block of `type` after the selection (see insertBlockAfterSelection). */
 export function insertBlock(editor: CoreEditor, type: string, attrs?: Record<string, unknown>): boolean {
-  return editor
-    .chain()
-    .focus()
-    .insertContentAt(editor.state.selection.to, {type, attrs})
-    .command(continueAfterBlock)
-    .run();
+  return editor.chain().focus().command(insertBlockAfterSelection(type, attrs)).run();
 }
 
 /** What a block's dialog receives from useBlockDialog. */
