@@ -94,6 +94,18 @@ describe('S3Service', () => {
       });
     });
 
+    it('names the object after its content type, not the file name it was sent with', async () => {
+      const S3Service = await loadS3Service('');
+      const upload = (filename: string, contentType: string) =>
+        S3Service.uploadFile({file: Buffer.from('image'), filename, contentType, projectId: 'project-1'});
+
+      expect((await upload('photo.JPG', 'image/jpeg')).key).toMatch(/\.jpg$/);
+      expect((await upload('photo.jfif', 'image/jpg')).key).toMatch(/\.jpg$/);
+      expect((await upload('picture', 'image/webp')).key).toMatch(/\.webp$/);
+      expect((await upload('page.html', 'image/gif')).key).toMatch(/\.gif$/);
+      await expect(upload('page.html', 'text/html')).rejects.toThrow('Unsupported image type');
+    });
+
     it('ignores leading and trailing slashes in S3_PREFIX', async () => {
       const S3Service = await loadS3Service('/tenants/plunk/');
 

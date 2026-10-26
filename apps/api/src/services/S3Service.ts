@@ -115,6 +115,18 @@ export async function initializeBucket(): Promise<void> {
   }
 }
 
+/**
+ * The extension an image is stored under, from its checked content type rather than the
+ * name the browser sent, which can end in anything (`.JPG`, `.jfif`, no dot at all).
+ */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
 interface UploadFileParams {
   file: Buffer;
   filename: string;
@@ -135,12 +147,15 @@ export async function uploadFile(params: UploadFileParams): Promise<UploadFileRe
     throw new Error('S3 is not enabled');
   }
 
-  const {file, filename, contentType, projectId} = params;
+  const {file, contentType, projectId} = params;
+  const extension = IMAGE_EXTENSIONS[contentType];
+  if (!extension) {
+    throw new Error(`Unsupported image type: ${contentType}`);
+  }
 
   // Generate a unique key for the file
   const timestamp = Date.now();
   const randomString = crypto.randomBytes(8).toString('hex');
-  const extension = filename.split('.').pop();
   const key = `${KEY_PREFIX}${projectId}/${timestamp}-${randomString}.${extension}`;
 
   // Upload to S3/Minio
