@@ -15,6 +15,8 @@ import {type ButtonAttrs, EmailButton} from './EmailButton';
 import {ButtonDialog} from './ButtonDialog';
 import {type DividerAttrs, EmailDivider} from './EmailDivider';
 import {DividerDialog} from './DividerDialog';
+import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
+import {SpacerDialog} from './SpacerDialog';
 import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
@@ -151,6 +153,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       ResizableImage,
       EmailButton,
       EmailDivider,
+      EmailSpacer,
       Variable,
       VariableMention,
       LogicMention,
@@ -177,6 +180,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const button = useBlockDialog<ButtonAttrs>(editor, 'button');
   const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', chain => chain.setHorizontalRule());
+  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', chain => chain.insertContent({type: 'spacer'}));
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -472,6 +476,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onInsertImage={() => setShowImageDialog(true)}
             onButton={button.onToolbar}
             onDivider={divider.onToolbar}
+            onSpacer={spacer.onToolbar}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
@@ -796,6 +801,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
       <ButtonDialog {...button.dialogProps} />
       <DividerDialog {...divider.dialogProps} />
+      <SpacerDialog {...spacer.dialogProps} />
 
       {/* Image insertion dialog */}
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>

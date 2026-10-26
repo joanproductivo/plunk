@@ -1,4 +1,11 @@
-import {BUTTON_PADDING, isSafeButtonHref, readButtonStyle, splitPreheader} from '@plunk/shared';
+import {
+  BUTTON_PADDING,
+  EDITOR_BLOCK_CLASSES,
+  isSafeButtonHref,
+  readButtonStyle,
+  readSpacerHeight,
+  splitPreheader,
+} from '@plunk/shared';
 import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
@@ -63,7 +70,7 @@ function hasRichButton(html: string): boolean {
  * rather than the visual editor. Mirrors the same logic in apps/web/src/lib/emailStyles.ts.
  *
  * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
- * ResizableImage + EmailButton + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
+ * ResizableImage + EmailButton + EmailDivider + EmailSpacer + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
  * <a style="..."> markup. This detection therefore PERMITS span + inline styles and only
  * REJECTS markup TipTap cannot represent (tables, divs, forms, embeds, custom attrs,
  * <style> blocks, etc).
@@ -86,9 +93,10 @@ function detectCustomHtmlPatterns(html: string): boolean {
       'selected',
       'resize-handle',
     ];
-    // The editor's button, matched exactly so that look-alikes such as `email-button-primary` stay custom
+    // The editor's own blocks, matched exactly (see EDITOR_BLOCK_CLASSES)
     const hasDisallowedClass = classes.some(
-      (cls: string) => cls !== 'email-button' && !allowedPrefixes.some((prefix: string) => cls.startsWith(prefix)),
+      (cls: string) =>
+        !EDITOR_BLOCK_CLASSES.includes(cls) && !allowedPrefixes.some((prefix: string) => cls.startsWith(prefix)),
     );
     if (hasDisallowedClass) {
       hasCustomClasses = true;
@@ -162,6 +170,20 @@ function addOutlookButtonPadding($: CheerioAPI): void {
   });
 }
 
+/**
+ * Editor spacers as every client keeps them, MJML's spacer (MIT): a div holding a hair space, as
+ * Outlook for Windows ignores a div's height and goes by its exact line height. The height is
+ * written as a number read from the spacer, never copied from the body.
+ */
+function convertSpacers($: CheerioAPI): void {
+  $('hr.email-spacer').each((_, element) => {
+    const height = readSpacerHeight($(element).attr('style'));
+    $(element).replaceWith(
+      `<div class="email-spacer" style="height:${height}px;line-height:${height}px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>`,
+    );
+  });
+}
+
 /** A full email document around visual editor content. `styleBlock` is only used as a fallback. */
 function emailDocument(htmlBody: string, styleBlock?: string): string {
   return `<!DOCTYPE html>
@@ -203,6 +225,16 @@ function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
     $('blockquote').each((_, element) => {
       element.tagName = 'div';
     });
+    try {
+      convertSpacers($);
+    } catch (error) {
+      // An unconverted spacer is an invisible <hr> of the same height, which most clients keep
+      warnAtMostEveryMinute(
+        'spacer',
+        `[EMAIL] Failed to convert spacers${emailId ? ` of email ${emailId}` : ''}:`,
+        error,
+      );
+    }
     try {
       addOutlookButtonPadding($);
     } catch (error) {

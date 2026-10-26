@@ -1,4 +1,4 @@
-import {normalizeHexColor} from '@plunk/shared';
+import {closestOption, normalizeHexColor} from '@plunk/shared';
 import {Extension} from '@tiptap/core';
 import {Plugin, PluginKey} from '@tiptap/pm/state';
 
@@ -19,12 +19,6 @@ export const DIVIDER_THICKNESS: Record<DividerThickness, number> = {thin: 1, med
 /** Space above and below, in px; `large` is the prose styles' own 3em (about 42px). */
 export const DIVIDER_SPACING: Record<DividerSpacing, number> = {small: 16, medium: 24, large: 42};
 
-// The option whose value is closest to `value`.
-function nearest<K extends string>(table: Record<K, number>, value: number): K {
-  const keys = Object.keys(table) as K[];
-  return keys.reduce((best, key) => (Math.abs(table[key] - value) < Math.abs(table[best] - value) ? key : best));
-}
-
 /**
  * A divider's options from its <hr>, read through the CSSOM: the editor saves styles through it,
  * so a browser may hand back longhands and rgb() colours, or a hand-written border-top shorthand.
@@ -36,8 +30,8 @@ export function readDivider(element: HTMLElement): DividerAttrs {
 
   return {
     color: normalizeHexColor(element.style.borderTopColor) ?? DIVIDER_DEFAULTS.color,
-    thickness: Number.isNaN(width) ? DIVIDER_DEFAULTS.thickness : nearest(DIVIDER_THICKNESS, width),
-    spacing: margin ? nearest(DIVIDER_SPACING, Number(margin[1])) : DIVIDER_DEFAULTS.spacing,
+    thickness: Number.isNaN(width) ? DIVIDER_DEFAULTS.thickness : closestOption(DIVIDER_THICKNESS, width),
+    spacing: margin ? closestOption(DIVIDER_SPACING, Number(margin[1])) : DIVIDER_DEFAULTS.spacing,
   };
 }
 

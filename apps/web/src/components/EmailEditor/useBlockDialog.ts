@@ -1,5 +1,5 @@
-import type {ChainedCommands} from '@tiptap/core';
-import {NodeSelection} from '@tiptap/pm/state';
+import type {ChainedCommands, CommandProps} from '@tiptap/core';
+import {NodeSelection, TextSelection} from '@tiptap/pm/state';
 import type {Editor} from '@tiptap/react';
 import {useEffect, useState} from 'react';
 
@@ -8,6 +8,22 @@ declare module '@tiptap/core' {
     /** A block in the editor was double-clicked, to open its dialog (see useBlockDialog). */
     editBlock: {pos: number};
   }
+}
+
+/**
+ * After inserting a block: a block left selected would be replaced by the next keystroke, so the
+ * cursor moves to the text after it, or to a new paragraph when none follows.
+ */
+export function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean {
+  if (!(tr.selection instanceof NodeSelection)) return true;
+  if (dispatch) {
+    const after = tr.selection.to;
+    if (!tr.doc.resolve(after).nodeAfter?.isTextblock) {
+      tr.insert(after, state.schema.nodes.paragraph!.create());
+    }
+    tr.setSelection(TextSelection.create(tr.doc, after + 1)).scrollIntoView();
+  }
+  return true;
 }
 
 /** What a block's dialog receives from useBlockDialog. */
@@ -51,7 +67,7 @@ export function useBlockDialog<Attrs extends object>(
     const selection = editor.state.selection;
     const selected = selection instanceof NodeSelection && selection.node.type.name === type ? selection.from : null;
     if (selected === null && insert) {
-      insert(atSelectionEnd()).run();
+      insert(atSelectionEnd()).command(continueAfterBlock).run();
     } else {
       setState({open: true, pos: selected});
     }
@@ -62,7 +78,7 @@ export function useBlockDialog<Attrs extends object>(
   const onSubmit = (submitted: Attrs) => {
     const attrs = submitted as Record<string, unknown>;
     if (state.pos === null) {
-      atSelectionEnd().insertContent({type, attrs}).run();
+      atSelectionEnd().insertContent({type, attrs}).command(continueAfterBlock).run();
     } else {
       editor?.chain().focus().setNodeSelection(state.pos).updateAttributes(type, attrs).run();
     }

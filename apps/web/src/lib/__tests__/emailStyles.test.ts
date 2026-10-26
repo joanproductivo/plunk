@@ -151,3 +151,17 @@ describe('detectCustomHtmlPatterns with editor buttons', () => {
     expect(detectCustomHtmlPatterns(button('<strong>Shop</strong> now'))).toBe(true);
   });
 });
+
+describe('detectCustomHtmlPatterns with editor spacers', () => {
+  it('treats an editor spacer as visual editor content', () => {
+    expect(
+      detectCustomHtmlPatterns(
+        '<p>a</p><hr class="email-spacer" style="border-style: none; margin: 0px; height: 32px;">',
+      ),
+    ).toBe(false);
+  });
+
+  it('treats look-alike classes as custom, since only the editor spacer is matched', () => {
+    expect(detectCustomHtmlPatterns('<p>a</p><hr class="email-spacer-big" style="height: 32px;">')).toBe(true);
+  });
+});
