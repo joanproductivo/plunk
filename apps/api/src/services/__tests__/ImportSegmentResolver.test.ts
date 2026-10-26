@@ -9,6 +9,7 @@ import {
   splitSegmentCell,
 } from '../ImportSegmentResolver.js';
 import {EventService} from '../EventService.js';
+import {QueueService} from '../QueueService.js';
 import {SegmentService} from '../SegmentService.js';
 
 /**
@@ -118,6 +119,7 @@ describe('ImportSegmentResolver', () => {
     const club = await SegmentService.create(projectId, {name: 'Club', type: 'STATIC', trackMembership: true});
     const row = await rowFor('ana@example.com', 'Club');
     const trackEvents = vi.spyOn(EventService, 'trackEventsSequentially');
+    const queueEvents = vi.spyOn(QueueService, 'queueSegmentMembershipEvents');
 
     expect((await assign([row])).segmentAssignments).toBe(1);
     expect((await assign([row])).segmentAssignments).toBe(0);
@@ -126,7 +128,9 @@ describe('ImportSegmentResolver', () => {
 
     expect(await activeMembers(club.id)).toEqual(['ana@example.com']);
     expect(trackEvents).not.toHaveBeenCalled();
+    expect(queueEvents).not.toHaveBeenCalled();
     trackEvents.mockRestore();
+    queueEvents.mockRestore();
     expect(await prisma.event.count({where: {projectId, name: {startsWith: 'segment.'}}})).toBe(0);
   });
 
