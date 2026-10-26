@@ -1,5 +1,7 @@
 import {type Contact, Prisma} from '@plunk/db';
 import type {
+  BulkContactActionSelector,
+  ContactListFilter,
   ContactSubscriptionStatus,
   CursorPaginatedResponse,
   FilterCondition,
@@ -30,14 +32,43 @@ export class ContactService {
   }
 
   /**
-   * Translate a subscription status into a where-clause fragment.
+   * Build the where-clause for the contacts list filters: the email search, the subscription
+   * status and the segment. Shared by the list, the select-all bulk actions and the export so
+   * "all matching" always means exactly the rows the dashboard shows.
    *
    * `snoozed` is derived, not stored -- it is `subscribed = false` with a snooze date still
    * set. `unsubscribed` therefore has to exclude snoozed contacts explicitly, or the two
    * filters would overlap and the dashboard's counts would not add up.
    *
    * Falls back to the legacy `subscribed` boolean when no status is given.
+   *
+   * The segment filter reads stored memberships, so it suits static segments; a dynamic
+   * segment's stored members only exist when it tracks membership, and lag its rules.
    */
+  public static buildFilterWhere(projectId: string, filter: ContactListFilter = {}): Prisma.ContactWhereInput {
+    return {
+      projectId,
+      ...(filter.search ? {email: {contains: filter.search, mode: 'insensitive' as const}} : {}),
+      ...this.buildStatusWhere(filter.status, filter.subscribed),
+      ...(filter.segmentId ? {segmentMemberships: {some: {segmentId: filter.segmentId, exitedAt: null}}} : {}),
+    };
+  }
+
+  /**
+   * Where-clause for a "select all matching" selector: the list filters, minus the rows the
+   * user unticked.
+   */
+  public static buildQueryWhere(
+    projectId: string,
+    selector: Extract<BulkContactActionSelector, {mode: 'query'}>,
+  ): Prisma.ContactWhereInput {
+    const excludeIds = selector.excludeIds ?? [];
+    return {
+      ...this.buildFilterWhere(projectId, selector.filter),
+      ...(excludeIds.length > 0 ? {id: {notIn: excludeIds}} : {}),
+    };
+  }
+
   private static buildStatusWhere(
     status?: ContactSubscriptionStatus,
     subscribed?: boolean,
@@ -63,35 +94,20 @@ export class ContactService {
     limit = 20,
     cursor?: string,
     search?: string,
-    options?: {
-      /**
-       * Filter by subscription state, including the derived `snoozed` state.
-       * The `subscribed` and `unsubscribed` branches are backed by the
-       * `(projectId, subscribed)` index; `snoozed` narrows that further on `snoozedUntil`.
-       */
-      status?: ContactSubscriptionStatus;
-      /**
-       * Legacy boolean filter, kept so existing `?subscribed=true|false` callers keep working.
-       * Ignored when `status` is given.
-       */
-      subscribed?: boolean;
-      /** Sortable columns. `email` is covered by the `(projectId, email)` unique index. */
-      sort?: 'email' | 'createdAt';
-      dir?: 'asc' | 'desc';
-    },
+    /**
+     * The list filters other than the search (see {@link ContactListFilter}). The `subscribed`
+     * and `unsubscribed` statuses are backed by the `(projectId, subscribed)` index; `snoozed`
+     * narrows that further on `snoozedUntil`. `sort` picks the column: `email` is covered by the
+     * `(projectId, email)` unique index.
+     */
+    options?: Omit<ContactListFilter, 'search'> & {sort?: 'email' | 'createdAt'; dir?: 'asc' | 'desc'},
   ): Promise<CursorPaginatedResponse<Contact>> {
-    const where: Prisma.ContactWhereInput = {
-      projectId,
-      ...(search
-        ? {
-            email: {
-              contains: search,
-              mode: 'insensitive' as const,
-            },
-          }
-        : {}),
-      ...this.buildStatusWhere(options?.status, options?.subscribed),
-    };
+    const where = this.buildFilterWhere(projectId, {
+      search,
+      status: options?.status,
+      subscribed: options?.subscribed,
+      segmentId: options?.segmentId,
+    });
 
     // The chosen sort column leads; `id` is always the stable tiebreaker the
     // cursor (`{id}`) keys off, so keyset pagination stays correct under any
@@ -771,7 +787,7 @@ export class ContactService {
       }
 
       for (const [projectId, contactIds] of byProject) {
-        await this.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
+        await EventService.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
           reason: 'snooze_expired',
         });
       }
@@ -786,6 +802,27 @@ export class ContactService {
     }
 
     return resumed;
+  }
+
+  /**
+   * Distinct custom field keys in a project's contact `data`. Contacts without custom data hold
+   * a JSON `null` (see `upsert`), which `jsonb_object_keys` rejects, hence the object guard.
+   */
+  private static customFieldKeysSql(projectId: string): Prisma.Sql {
+    return Prisma.sql`
+      SELECT DISTINCT jsonb_object_keys(data) AS key
+      FROM contacts
+      WHERE
+        "projectId" = ${projectId}
+        AND data IS NOT NULL
+        AND jsonb_typeof(data) = 'object'
+    `;
+  }
+
+  /** Custom field keys used by any contact in the project, sorted. */
+  public static async getCustomFieldKeys(projectId: string): Promise<string[]> {
+    const rows = await prisma.$queryRaw<{key: string}[]>(this.customFieldKeysSql(projectId));
+    return rows.map(row => row.key).sort((a, b) => a.localeCompare(b));
   }
 
   /**
@@ -818,12 +855,7 @@ export class ContactService {
       Array<{key: string; sample_value: string; json_type: string; contact_count: bigint}>
     >`
       WITH field_keys AS (
-        SELECT DISTINCT jsonb_object_keys(data) as key
-        FROM contacts
-        WHERE
-          "projectId" = ${projectId}
-          AND data IS NOT NULL
-          AND jsonb_typeof(data) = 'object'
+        ${this.customFieldKeysSql(projectId)}
       ),
       field_samples AS (
         SELECT
@@ -1086,7 +1118,7 @@ export class ContactService {
       data: {subscribed: true, snoozedUntil: null},
     });
 
-    this.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
+    EventService.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
       if (process.env.NODE_ENV !== 'test') {
         console.error('[ContactService] Failed to track bulk subscribe events:', error);
       }
@@ -1136,7 +1168,7 @@ export class ContactService {
       return {updated: 0, unchanged};
     }
 
-    this.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
+    EventService.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
       if (process.env.NODE_ENV !== 'test') {
         console.error('[ContactService] Failed to track bulk unsubscribe events:', error);
       }
@@ -1202,30 +1234,5 @@ export class ContactService {
     }
 
     return false;
-  }
-
-  /**
-   * Track events sequentially to avoid database deadlocks
-   * Processes events one at a time with error handling
-   *
-   * @private
-   */
-  private static async trackEventsSequentially(
-    projectId: string,
-    eventName: string,
-    contactIds: string[],
-    data?: Record<string, unknown>,
-  ): Promise<void> {
-    for (const contactId of contactIds) {
-      try {
-        await EventService.trackEvent(projectId, eventName, contactId, undefined, data);
-      } catch (error) {
-        // Log error but continue processing remaining events
-        // Suppress logging in test environments to reduce noise from cleanup race conditions
-        if (process.env.NODE_ENV !== 'test') {
-          console.error(`[ContactService] Failed to track event ${eventName} for contact ${contactId}:`, error);
-        }
-      }
-    }
   }
 }

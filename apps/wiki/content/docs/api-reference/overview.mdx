@@ -212,9 +212,10 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 
 | Method | Path                                  | Description                                                                                  |
 | ------ | ------------------------------------- | -------------------------------------------------------------------------------------------- |
-| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `limit`, `cursor`.                    |
+| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`. |
 | POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`.             |
 | GET    | `/contacts/:id`                       | Get a single contact.                                                                        |
+| GET    | `/contacts/:id/segments`              | The contact's segments: `{ static, dynamic }`, each a list of `{ id, name }` sorted by name. Dynamic ones are those whose filter it matches now. |
 | PATCH  | `/contacts/:id`                       | Update a contact's email, subscription state, or `data` fields.                              |
 | DELETE | `/contacts/:id`                       | Delete a contact.                                                                            |
 | POST   | `/contacts/lookup`                    | Bulk email-existence check (max 500 emails per call).                                        |
@@ -226,10 +227,13 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | **CSV import** |                               |                                                                                              |
 | POST   | `/contacts/import`                    | Upload a CSV file (multipart, ≤ 5 MB). Queued — returns a `jobId`.                           |
 | GET    | `/contacts/import/:jobId`             | Poll the status of a CSV import job.                                                         |
+| POST   | `/contacts/export`                    | Download contacts as CSV. Takes the bulk operations' selector (`ids`, or `query` with `filter.search` / `filter.status` / `filter.segmentId` and `excludeIds`). |
 | **Bulk operations** |                          |                                                                                              |
 | POST   | `/contacts/bulk-subscribe`            | Subscribe up to 1,000 contacts by ID. Queued — returns a `jobId`.                            |
 | POST   | `/contacts/bulk-unsubscribe`          | Unsubscribe up to 1,000 contacts by ID. Queued.                                              |
 | POST   | `/contacts/bulk-delete`               | Delete up to 1,000 contacts by ID. Queued.                                                   |
+| POST   | `/contacts/bulk-add-to-segment`       | Add contacts to a static segment: the selector plus `targetSegmentId`. Members already in it re-enter it. Queued. |
+| POST   | `/contacts/bulk-remove-from-segment`  | Remove contacts from a static segment: the selector plus `targetSegmentId`. Queued.          |
 | GET    | `/contacts/bulk/:jobId`               | Poll the status of a bulk job.                                                               |
 
 ### Templates
@@ -267,10 +271,10 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | POST   | `/segments`                   | Create a segment. `type: "DYNAMIC"` requires `condition`; `type: "STATIC"` rejects it.       |
 | GET    | `/segments/:id`               | Get a segment, including cached `memberCount`.                                               |
 | PATCH  | `/segments/:id`               | Update name, description, condition (dynamic only), or `trackMembership`.                    |
-| DELETE | `/segments/:id`               | Delete a segment. Returns 409 if used by an active campaign.                                 |
+| DELETE | `/segments/:id`               | Delete a segment. Returns 409 if used by an active campaign or by a workflow's Update contact or Condition step. |
 | GET    | `/segments/:id/contacts`      | Page-based list of segment members. `page`, `pageSize` (max 100). Live for dynamic segments. |
-| POST   | `/segments/:id/members`       | Add emails to a **static** segment. Body: `{ emails, createMissing?, subscribed? }`.         |
-| DELETE | `/segments/:id/members`       | Remove emails from a **static** segment. Body: `{ emails }`.                                 |
+| POST   | `/segments/:id/members`       | Add emails to a **static** segment (max 500). Body: `{ emails, createMissing?, subscribed? }`. See [Segments](/concepts/segments). |
+| DELETE | `/segments/:id/members`       | Remove emails from a **static** segment (max 500). Body: `{ emails }`.                         |
 | POST   | `/segments/:id/compute`       | Recompute membership for a tracked dynamic segment — fires entry/exit events.                |
 | POST   | `/segments/:id/refresh`       | Cheap count refresh — no events, no membership writes.                                       |
 
@@ -281,7 +285,7 @@ Each workflow consists of a **workflow** record, a graph of **steps**, **transit
 | Method | Path                                              | Description                                                                              |
 | ------ | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | GET    | `/workflows`                                      | List all workflows.                                                                      |
-| GET    | `/workflows/fields`                               | Fields available to use in `CONDITION` step filters (contact + event fields).             |
+| GET    | `/workflows/fields`                               | Fields available to use in `CONDITION` step filters (contact, event and segment fields; a segment's name comes in `label`). |
 | POST   | `/workflows`                                      | Create a workflow. Always starts with `triggerType: EVENT` and `enabled: false`.         |
 | GET    | `/workflows/:id`                                  | Get a workflow with its steps and transitions.                                           |
 | PATCH  | `/workflows/:id`                                  | Update workflow metadata, trigger type / config, `enabled`, `allowReentry`.              |

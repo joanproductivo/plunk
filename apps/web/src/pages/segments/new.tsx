@@ -4,6 +4,7 @@ import {DashboardLayout} from '../../components/DashboardLayout';
 import {SegmentFilterBuilder} from '../../components/SegmentFilterBuilder';
 import {ContactPicker} from '../../components/ContactPicker';
 import {network} from '../../lib/network';
+import {addSegmentMembers} from '../../lib/segmentMembers';
 import {ArrowLeft, Save} from 'lucide-react';
 import Link from 'next/link';
 import {useRouter} from 'next/router';
@@ -48,11 +49,7 @@ export default function NewSegmentPage() {
       // For static segments with pre-selected contacts, add them now
       if (segmentType === 'STATIC' && selectedContacts.length > 0) {
         try {
-          const result = await network.fetch<{added: number; created: number; notFound: string[]}, typeof SegmentSchemas.members>(
-            'POST',
-            `/segments/${segment.id}/members`,
-            {emails: selectedContacts, createMissing: true},
-          );
+          const result = await addSegmentMembers(segment.id, selectedContacts, {createMissing: true});
           const msg = result.created > 0
             ? `Segment created with ${result.added} contact${result.added !== 1 ? 's' : ''} (${result.created} new)`
             : `Segment created with ${result.added} contact${result.added !== 1 ? 's' : ''}`;

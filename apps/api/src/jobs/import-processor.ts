@@ -3,26 +3,25 @@
  * Processes CSV contact imports with validation and batch processing
  */
 
-import type {ContactImportJobData} from '@plunk/types';
+import type {ContactImportJobData, ContactImportResult} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import {parse} from 'csv-parse/sync';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {ContactService} from '../services/ContactService.js';
+import {type ImportedRow, ImportSegmentResolver} from '../services/ImportSegmentResolver.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {importQueue} from '../services/QueueService.js';
+import {unescapeCsvFormula} from '../utils/csv.js';
 
 const BATCH_SIZE = 100; // Process contacts in batches of 100
 
-interface ImportResult {
-  totalRows: number;
-  successCount: number;
-  createdCount: number;
-  updatedCount: number;
-  failureCount: number;
-  errors: {row: number; email: string; error: string}[];
-}
+/**
+ * Columns the contacts export writes for reading only. Importing them back would turn each into
+ * a custom field, so they are skipped. `segments` is not among them: it assigns static segments.
+ */
+const READ_ONLY_COLUMNS = new Set(['status', 'createdat', 'updatedat', 'dynamicsegments']);
 
 export function createImportWorker() {
   const worker = new Worker<ContactImportJobData>(
@@ -40,26 +39,22 @@ export function createImportWorker() {
 
       const projectName = project?.name || projectId;
 
-      const result: ImportResult = {
+      const result: ContactImportResult = {
         totalRows: 0,
         successCount: 0,
         createdCount: 0,
         updatedCount: 0,
         failureCount: 0,
         errors: [],
+        segmentsCreated: [],
+        segmentAssignments: 0,
       };
 
       try {
         // Decode base64 CSV data
         const csvContent = Buffer.from(csvData, 'base64').toString('utf-8');
 
-        // Parse CSV with column header normalization
-        const records = parse(csvContent, {
-          columns: (header: string[]) => header.map(h => h.toLowerCase()), // Normalize headers to lowercase
-          skip_empty_lines: true,
-          trim: true,
-          relax_column_count: true, // Allow rows with different column counts
-        }) as Record<string, string>[];
+        const records = parseImportCsv(csvContent);
 
         result.totalRows = records.length;
 
@@ -79,17 +74,21 @@ export function createImportWorker() {
           throw new Error('CSV must have an "email" column (case-insensitive)');
         }
 
+        const segments = await ImportSegmentResolver.load(projectId);
+
         // Process contacts in batches
         for (let i = 0; i < records.length; i += BATCH_SIZE) {
           const batch = records.slice(i, Math.min(i + BATCH_SIZE, records.length));
+          const imported: ImportedRow[] = [];
 
           // Process batch sequentially (to avoid overwhelming the database)
           for (const [batchIndex, record] of batch.entries()) {
             const rowNumber = i + batchIndex + 2; // +2 for header row and 1-based index
 
             try {
+              const {email, subscribed, keepSnooze, data, segments: segmentCell} = splitImportRecord(record);
+
               // Validate email
-              const email = record.email?.trim();
               if (!email) {
                 result.failureCount++;
                 result.errors.push({
@@ -111,24 +110,6 @@ export function createImportWorker() {
                 continue;
               }
 
-              // Extract subscribed field if present (case-insensitive)
-              const subscribedValue = record.subscribed;
-              let subscribed: boolean | undefined;
-
-              if (subscribedValue !== undefined && subscribedValue !== '') {
-                // Handle various truthy/falsy values
-                const lowerValue = subscribedValue.toLowerCase().trim();
-                subscribed = lowerValue === 'true' || lowerValue === '1' || lowerValue === 'yes';
-              }
-
-              // Extract custom data (all fields except email and subscribed)
-              const {email: _, subscribed: __, ...customData} = record;
-              const customEntries = Object.entries(customData);
-              const data =
-                customEntries.length > 0
-                  ? Object.fromEntries(customEntries.map(([k, v]) => [k, coerceCustomValue(v)]))
-                  : undefined;
-
               // Check if contact exists before upserting
               const existingContact = await ContactService.findByEmail(projectId, email);
               const isUpdate = !!existingContact;
@@ -136,7 +117,15 @@ export function createImportWorker() {
               // Upsert contact with subscribed value from CSV if provided
               // For new contacts, ContactService.upsert defaults to true
               // For existing contacts, only update if explicitly provided in CSV
-              await ContactService.upsert(projectId, email, data, subscribed);
+              // An unchanged snoozed row keeps an existing contact's snooze; a contact new to this
+              // project cannot carry the snooze over, so it arrives unsubscribed rather than mailable.
+              const contact = await ContactService.upsert(
+                projectId,
+                email,
+                data,
+                keepSnooze && isUpdate ? undefined : subscribed,
+              );
+              imported.push({contactId: contact.id, segments: segmentCell});
 
               result.successCount++;
               if (isUpdate) {
@@ -154,9 +143,20 @@ export function createImportWorker() {
             }
           }
 
+          await segments.assignBatch(imported);
+
           // Update progress
           const progress = Math.round(((i + batch.length) / records.length) * 100);
           await job.updateProgress(progress);
+        }
+
+        const segmentsCreated = segments.segmentsCreated;
+        result.segmentsCreated = segmentsCreated;
+        result.segmentAssignments = segments.segmentAssignments;
+        // Segment problems go first: there is one per name, and the dashboard lists only the first few errors.
+        result.errors.unshift(...segments.errors);
+        if (segmentsCreated.length > 0) {
+          signale.info(`[IMPORT-PROCESSOR] Created static segments: ${segmentsCreated.join(', ')}`);
         }
 
         signale.info(
@@ -211,6 +211,55 @@ export function createImportWorker() {
   });
 
   return worker;
+}
+
+/**
+ * Parse an uploaded CSV. Headers are lowercased; a UTF-8 byte order mark (spreadsheets write
+ * one, and so does the contacts export) is dropped so the first header still reads `email`.
+ */
+export function parseImportCsv(content: string): Record<string, string>[] {
+  return parse(content, {
+    bom: true,
+    // Normalize headers to lowercase, undoing the export's formula escaping like any other cell
+    columns: (header: string[]) => header.map(h => unescapeCsvFormula(h).toLowerCase()),
+    skip_empty_lines: true,
+    trim: true,
+    relax_column_count: true, // Allow rows with different column counts
+  }) as Record<string, string>[];
+}
+
+/**
+ * Split one parsed row into what the import writes: the email, the subscription decision, custom
+ * data, and the raw `segments` cell. Undoes the export's formula escaping on every cell and skips
+ * the export's read-only columns, so an exported file re-imports to the same contacts.
+ */
+export function splitImportRecord(record: Record<string, string>): {
+  email: string;
+  subscribed?: boolean;
+  /** An exported snoozed row, unchanged: an existing contact's subscription should be left alone. */
+  keepSnooze: boolean;
+  data?: Record<string, string | boolean | number>;
+  segments?: string;
+} {
+  const cells = Object.fromEntries(Object.entries(record).map(([key, value]) => [key, unescapeCsvFormula(value)]));
+  const {email, subscribed: subscribedValue, segments, ...rest} = cells;
+
+  // Extract subscribed field if present (case-insensitive)
+  let subscribed: boolean | undefined;
+  if (subscribedValue !== undefined && subscribedValue !== '') {
+    const lowerValue = subscribedValue.toLowerCase().trim();
+    subscribed = lowerValue === 'true' || lowerValue === '1' || lowerValue === 'yes';
+  }
+  // The export writes snoozed contacts as subscribed=false; importing that back would turn the
+  // snooze into a permanent opt-out, so an unchanged snoozed row is flagged for the worker.
+  const keepSnooze = subscribed === false && rest.status?.trim().toLowerCase() === 'snoozed';
+
+  // Custom data: every other column except the read-only ones
+  const customEntries = Object.entries(rest).filter(([key]) => !READ_ONLY_COLUMNS.has(key));
+  const data =
+    customEntries.length > 0 ? Object.fromEntries(customEntries.map(([k, v]) => [k, coerceCustomValue(v)])) : undefined;
+
+  return {email: email?.trim() ?? '', subscribed, keepSnooze, data, segments};
 }
 
 /**

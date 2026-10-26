@@ -1,4 +1,5 @@
 import {type Contact, Prisma, type Segment} from '@plunk/db';
+import {segmentEventName} from '@plunk/shared';
 import type {FilterCondition, FilterGroup, PaginatedResponse, SegmentFilter, SegmentType} from '@plunk/types';
 import {fromPrismaJson, toPrismaJson} from '@plunk/types';
 import signale from 'signale';
@@ -9,22 +10,9 @@ import {HttpException} from '../exceptions/index.js';
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {SegmentMembershipService} from './SegmentMembershipService.js';
 
 export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
-
-/**
- * Convert segment name to a URL-safe slug for event names
- * Example: "VIP Customers" -> "vip-customers"
- */
-function slugifySegmentName(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s-]/g, '') // Remove special characters
-    .replace(/\s+/g, '-') // Replace spaces with hyphens
-    .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
-    .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
-}
 
 export class SegmentService {
   /**
@@ -55,6 +43,46 @@ export class SegmentService {
     }
 
     return segment;
+  }
+
+  /**
+   * Whether a contact is in a segment right now: a current member of a static segment, or a
+   * match for a dynamic segment's filter (evaluated live, like the member counts). False when
+   * the segment is missing or belongs to another project, or its filter cannot be built (e.g.
+   * it references a deleted segment). A database error is thrown, so the caller fails rather
+   * than taking the "not a member" path by mistake.
+   */
+  public static async isMember(projectId: string, segmentId: string, contactId: string): Promise<boolean> {
+    const segment = await prisma.segment.findFirst({
+      where: {id: segmentId, projectId},
+      select: {type: true, condition: true},
+    });
+    if (!segment) {
+      signale.warn(`[SEGMENT] Membership check on missing segment ${segmentId}`);
+      return false;
+    }
+
+    if (segment.type === 'STATIC') {
+      const membership = await prisma.segmentMembership.findUnique({
+        where: {contactId_segmentId: {contactId, segmentId}},
+        select: {exitedAt: true},
+      });
+      return membership !== null && membership.exitedAt === null;
+    }
+
+    let where: Prisma.ContactWhereInput;
+    try {
+      where = await this.buildConditionClause(fromPrismaJson<FilterCondition>(segment.condition));
+    } catch (error) {
+      signale.warn(`[SEGMENT] Membership check on segment ${segmentId}: its filter cannot be built:`, error);
+      return false;
+    }
+
+    const match = await prisma.contact.findFirst({
+      where: {AND: [{id: contactId, projectId}, where]},
+      select: {id: true},
+    });
+    return match !== null;
   }
 
   /**
@@ -251,12 +279,41 @@ export class SegmentService {
       );
     }
 
+    const workflows = await this.workflowsUsingSegment(projectId, segmentId);
+    if (workflows.length > 0) {
+      throw new HttpException(
+        409,
+        `Cannot delete segment: it is used by the workflow(s) ${workflows.map(name => `"${name}"`).join(', ')}. Remove it from their Update contact and Condition steps first.`,
+      );
+    }
+
     await prisma.segment.delete({
       where: {id: segmentId},
     });
 
     // Notify about segment deletion
     await NtfyService.notifySegmentDeleted(segment.name, segment.project.name, projectId);
+  }
+
+  /**
+   * Names of the project's workflows with an Update contact step that adds or removes the
+   * segment, or a Condition step on its `segment.<id>` field. Triggers and waits on its
+   * `segment.<slug>.*` events are not tracked: the slug follows the name and is not unique.
+   */
+  private static async workflowsUsingSegment(projectId: string, segmentId: string): Promise<string[]> {
+    const steps = await prisma.workflowStep.findMany({
+      where: {
+        workflow: {projectId},
+        OR: [
+          {type: 'CONDITION', config: {path: ['field'], equals: `segment.${segmentId}`}},
+          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'add'], array_contains: [segmentId]}},
+          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'remove'], array_contains: [segmentId]}},
+        ],
+      },
+      select: {workflow: {select: {name: true}}},
+    });
+
+    return [...new Set(steps.map(step => step.workflow.name))].sort((a, b) => a.localeCompare(b));
   }
 
   /**
@@ -327,7 +384,8 @@ export class SegmentService {
   }
 
   /**
-   * Add contacts to a static segment by email
+   * Add contacts to a static segment by email. Contacts already in it re-enter it
+   * (see SegmentMembershipService); entry events are fired in the background.
    */
   public static async addContacts(
     projectId: string,
@@ -336,11 +394,8 @@ export class SegmentService {
     createMissing = false,
     subscribed = true,
   ): Promise<{added: number; created: number; notFound: string[]}> {
-    const segment = await this.get(projectId, segmentId);
-
-    if (segment.type !== 'STATIC') {
-      throw new HttpException(400, 'Can only add contacts to STATIC segments');
-    }
+    // Checked before any contact is created for a segment that cannot take them
+    await SegmentMembershipService.getStaticSegment(projectId, segmentId, 'add contacts to');
 
     // Emails are stored normalized, so look up (and create) on the normalized
     // value. Dedupe first so case-variants in the same request collapse to one.
@@ -375,76 +430,40 @@ export class SegmentService {
     // Report unmatched addresses using the caller's original input strings.
     const notFound = emails.filter(e => !foundEmails.has(ContactService.normalizeEmail(e)));
 
-    if (contacts.length > 0) {
-      // Check for existing memberships (to reactivate vs create new)
-      const existingMemberships = await prisma.segmentMembership.findMany({
-        where: {segmentId, contactId: {in: contacts.map(c => c.id)}},
-        select: {contactId: true},
-      });
-      const existingIds = new Set(existingMemberships.map(m => m.contactId));
+    const {added} = await SegmentMembershipService.addMembers(
+      projectId,
+      segmentId,
+      contacts.map(c => c.id),
+      {mode: 'background'},
+    );
 
-      const newContactIds = contacts.filter(c => !existingIds.has(c.id)).map(c => c.id);
-      const reEntryIds = contacts.filter(c => existingIds.has(c.id)).map(c => c.id);
-
-      if (newContactIds.length > 0) {
-        await prisma.segmentMembership.createMany({
-          data: newContactIds.map(contactId => ({segmentId, contactId, enteredAt: new Date()})),
-          skipDuplicates: true,
-        });
-      }
-
-      if (reEntryIds.length > 0) {
-        await prisma.segmentMembership.updateMany({
-          where: {segmentId, contactId: {in: reEntryIds}},
-          data: {exitedAt: null, enteredAt: new Date()},
-        });
-      }
-
-      // Update member count
-      const memberCount = await prisma.segmentMembership.count({where: {segmentId, exitedAt: null}});
-      await prisma.segment.update({where: {id: segmentId}, data: {memberCount}});
-    }
-
-    return {added: contacts.length, created, notFound};
+    return {added, created, notFound};
   }
 
   /**
-   * Remove contacts from a static segment by email
+   * Remove contacts from a static segment by email. `removed` counts the contacts that were
+   * members; exit events are fired in the background.
    */
   public static async removeContacts(
     projectId: string,
     segmentId: string,
     emails: string[],
   ): Promise<{removed: number}> {
-    const segment = await this.get(projectId, segmentId);
-
-    if (segment.type !== 'STATIC') {
-      throw new HttpException(400, 'Can only remove contacts from STATIC segments');
-    }
-
-    // Look up contacts by email
+    // Emails are stored normalized, so look up on the normalized value
+    const normalizedEmails = [...new Set(emails.map(e => ContactService.normalizeEmail(e)))];
     const contacts = await prisma.contact.findMany({
-      where: {
-        projectId,
-        email: {in: emails, mode: 'insensitive'},
-      },
+      where: {projectId, email: {in: normalizedEmails}},
       select: {id: true},
     });
 
-    if (contacts.length > 0) {
-      const contactIds = contacts.map(c => c.id);
+    const {removed} = await SegmentMembershipService.removeMembers(
+      projectId,
+      segmentId,
+      contacts.map(c => c.id),
+      {mode: 'background'},
+    );
 
-      await prisma.segmentMembership.updateMany({
-        where: {segmentId, contactId: {in: contactIds}, exitedAt: null},
-        data: {exitedAt: new Date()},
-      });
-
-      // Update member count
-      const memberCount = await prisma.segmentMembership.count({where: {segmentId, exitedAt: null}});
-      await prisma.segment.update({where: {id: segmentId}, data: {memberCount}});
-    }
-
-    return {removed: contacts.length};
+    return {removed};
   }
 
   /**
@@ -572,19 +591,10 @@ export class SegmentService {
       }
 
       // Create segment-specific entry events for each contact in the batch
-      for (const contactId of batch) {
-        try {
-          // Create a human-readable event name using slugified segment name
-          const segmentSlug = slugifySegmentName(segment.name);
-          const eventName = `segment.${segmentSlug}.entry`;
-          await EventService.trackEvent(projectId, eventName, contactId, undefined, {
-            segmentId: segment.id,
-            segmentName: segment.name,
-          });
-        } catch (error) {
-          signale.error(`[SEGMENT] Failed to track segment entry event for contact ${contactId}:`, error);
-        }
-      }
+      await EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, 'entry'), batch, {
+        segmentId: segment.id,
+        segmentName: segment.name,
+      });
     }
 
     const REMOVE_BATCH_SIZE = 500;
@@ -603,19 +613,10 @@ export class SegmentService {
       });
 
       // Create segment-specific exit events for each contact in the batch
-      for (const contactId of batch) {
-        try {
-          // Create a human-readable event name using slugified segment name
-          const segmentSlug = slugifySegmentName(segment.name);
-          const eventName = `segment.${segmentSlug}.exit`;
-          await EventService.trackEvent(projectId, eventName, contactId, undefined, {
-            segmentId: segment.id,
-            segmentName: segment.name,
-          });
-        } catch (error) {
-          signale.error(`[SEGMENT] Failed to track segment exit event for contact ${contactId}:`, error);
-        }
-      }
+      await EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, 'exit'), batch, {
+        segmentId: segment.id,
+        segmentName: segment.name,
+      });
     }
 
     // Update member count on segment

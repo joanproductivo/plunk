@@ -69,3 +69,17 @@ export interface SegmentMembershipComputeResult {
   removed: number;
   total: number;
 }
+
+/** A segment a contact belongs to: enough to name it and link to it */
+export interface SegmentRef {
+  id: string;
+  name: string;
+}
+
+/** A contact's segments, each list sorted by name. Returned by `GET /contacts/:id/segments`. */
+export interface ContactSegments {
+  /** Static segments the contact is currently a member of */
+  static: SegmentRef[];
+  /** Dynamic segments whose filter the contact matches right now */
+  dynamic: SegmentRef[];
+}

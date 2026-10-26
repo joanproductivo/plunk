@@ -21,6 +21,7 @@ import {
   defaultStepName,
   DELAY_UNITS,
   findStep,
+  MAX_SEGMENT_CHANGES,
   reviewWorkflow,
   slotTransition,
   type StepParams,
@@ -115,8 +116,11 @@ const stepConfigShape = {
     .min(1)
     .optional()
     .describe(
-      'CONDITION: what to test — contact.email, contact.subscribed, data.<field> (contact data) or ' +
-        'event.<field> (data of the event that started the workflow). See plunk_list_workflow_fields.',
+      'CONDITION: what to test — contact.email, contact.subscribed, data.<field> (contact data), ' +
+        'event.<field> (data of the event that started the workflow) or segment.<segmentId> (true when the ' +
+        'contact is in that segment as the step runs; compare with equals / notEquals and a boolean true or ' +
+        'false, not "true"). ' +
+        'See plunk_list_workflow_fields.',
     ),
   operator: z
     .enum(CONDITION_OPERATORS)
@@ -146,6 +150,18 @@ const stepConfigShape = {
     .enum(SUBSCRIPTION_ACTIONS)
     .optional()
     .describe('UPDATE_CONTACT: also subscribe or unsubscribe the contact.'),
+  segments: z
+    .object({
+      add: z.array(z.string().uuid()).max(MAX_SEGMENT_CHANGES).optional(),
+      remove: z.array(z.string().uuid()).max(MAX_SEGMENT_CHANGES).optional(),
+    })
+    .optional()
+    .describe(
+      'UPDATE_CONTACT: static segment IDs (UUIDs from plunk_list_segments) to add the contact to and remove it ' +
+        'from. Removals run first. Adding someone already in a segment counts as a new entry, firing its entry ' +
+        'event again when it tracks membership. A deleted or dynamic segment is skipped when the step runs. ' +
+        'When editing, a list you leave out keeps its current IDs; pass [] to clear it.',
+    ),
   url: z.string().optional().describe('WEBHOOK: URL to call. Template variables like {{email}} are rendered.'),
   method: z.enum(WEBHOOK_METHODS).optional().describe('WEBHOOK: HTTP method (default POST).'),
   headers: z.record(z.string(), z.string()).optional().describe('WEBHOOK: request headers.'),
@@ -510,8 +526,9 @@ export function registerWorkflowTools(ctx: ToolContext, client: PlunkClient): vo
         '**Purpose:** List the fields a CONDITION step can test: contact fields, custom contact data, and',
         'the data keys seen on an event.',
         '',
-        '**Returns:** `typedFields[]` with `field`, `type` and `category`. Contact data appears as',
-        '`contact.data.<key>`, which conditions accept as-is; event keys appear as `event.<key>`.',
+        '**Returns:** `typedFields[]` with `field`, `type`, `category` and, for segments, `label`. Contact data appears as',
+        '`contact.data.<key>`, which conditions accept as-is; event keys appear as `event.<key>`; each',
+        'segment appears as `segment.<id>` (boolean) with its name in `label`.',
         'Of the built-in contact fields only `contact.email` and `contact.subscribed` can be tested.',
         '',
         '**Key trigger phrases:** "what can I branch on", "which fields can the condition use"',
@@ -821,7 +838,8 @@ export function registerWorkflowTools(ctx: ToolContext, client: PlunkClient): vo
         '  on the same path whether the event arrives or the timeout passes.',
         '- `CONDITION` — `field` + `operator` (+ `value`) for yes/no, or `field` + `branches` for',
         '  several outcomes. Connect what follows with `after` = the condition and `branch`.',
-        '- `UPDATE_CONTACT` — `updates` (data fields to set) and/or `subscriptionAction`.',
+        '- `UPDATE_CONTACT` — `updates` (data fields to set), `subscriptionAction` and/or `segments`',
+        '  (`add` / `remove` lists of static segment IDs).',
         '- `WEBHOOK` — `url`, optional `method`, `headers`, `body`.',
         '- `EXIT` — ends the run, optional `reason`. Nothing can follow it.',
         '',

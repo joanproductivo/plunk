@@ -29,20 +29,12 @@ export class network {
     path: string,
     body?: Schema extends TypedSchema ? ZodInfer<Schema> : never,
   ): Promise<T> {
-    const url = path.startsWith('http') ? path : API_URI + path;
-
-    // Get active project ID from localStorage
-    const activeProjectId = typeof window !== 'undefined' ? localStorage.getItem('activeProjectId') : null;
-
-    const headers: Record<string, string> = {};
+    const headers = network.projectHeaders();
     if (body) {
       headers['Content-Type'] = 'application/json';
     }
-    if (activeProjectId) {
-      headers['X-Project-Id'] = activeProjectId;
-    }
 
-    const response = await fetch(url, {
+    const response = await fetch(network.url(path), {
       method,
       body: body && JSON.stringify(body),
       headers,
@@ -55,21 +47,7 @@ export class network {
     }
 
     const res = (await response.json()) as ApiResponse;
-
-    if (response.status >= 400) {
-      // Check if this is an email verification required error
-      if (res.error?.code === 'EMAIL_VERIFICATION_REQUIRED') {
-        // Redirect to verification page
-        if (typeof window !== 'undefined' && !window.location.href.includes('/auth/verify-email')) {
-          window.location.href = '/auth/verify-email';
-        }
-        throw new Error(res.error.message ?? 'Please verify your email address to continue');
-      }
-
-      // Extract error message from standardized error response or fall back to direct message property
-      const errorMessage = res.error?.message ?? res.message ?? 'Something went wrong!';
-      throw new Error(errorMessage);
-    }
+    network.throwIfError(response, res);
 
     return res as T;
   }
@@ -79,41 +57,93 @@ export class network {
    * Used for file uploads where Content-Type must be set by browser
    */
   public static async upload<T>(method: 'POST' | 'PUT' | 'PATCH', path: string, formData: FormData): Promise<T> {
-    const url = path.startsWith('http') ? path : API_URI + path;
-
-    // Get active project ID from localStorage
-    const activeProjectId = typeof window !== 'undefined' ? localStorage.getItem('activeProjectId') : null;
-
-    const headers: Record<string, string> = {};
     // DO NOT set Content-Type - browser will set it automatically with boundary
-    if (activeProjectId) {
-      headers['X-Project-Id'] = activeProjectId;
-    }
-
-    const response = await fetch(url, {
+    const response = await fetch(network.url(path), {
       method,
       body: formData,
-      headers,
+      headers: network.projectHeaders(),
       credentials: 'include',
     });
 
     const res = (await response.json()) as ApiResponse;
-
-    if (response.status >= 400) {
-      // Check if this is an email verification required error
-      if (res.error?.code === 'EMAIL_VERIFICATION_REQUIRED') {
-        // Redirect to verification page
-        if (typeof window !== 'undefined') {
-          window.location.href = '/auth/verify-email';
-        }
-        throw new Error(res.error.message ?? 'Please verify your email address to continue');
-      }
-
-      // Extract error message from standardized error response or fall back to direct message property
-      const errorMessage = res.error?.message ?? res.message ?? 'Something went wrong!';
-      throw new Error(errorMessage);
-    }
+    network.throwIfError(response, res);
 
     return res as T;
+  }
+
+  /**
+   * Request a file and save it in the browser as `filename`. The name is chosen here because the
+   * API runs on another origin and does not expose `Content-Disposition` to the dashboard.
+   */
+  public static async download<Schema extends TypedSchema>(
+    method: 'GET' | 'POST',
+    path: string,
+    filename: string,
+    body?: ZodInfer<Schema>,
+  ): Promise<void> {
+    const headers = network.projectHeaders();
+    if (body) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    const response = await fetch(network.url(path), {
+      method,
+      body: body && JSON.stringify(body),
+      headers,
+      credentials: 'include',
+    });
+
+    if (response.status >= 400) {
+      network.throwIfError(response, (await response.json().catch(() => ({}))) as ApiResponse);
+    }
+
+    // Reading the whole body also surfaces a download cut short by the server as an error.
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    try {
+      link.href = href;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+    } finally {
+      link.remove();
+      // Revoking in the same tick can cancel the download in some browsers (Safari).
+      setTimeout(() => URL.revokeObjectURL(href), 1000);
+    }
+  }
+
+  private static url(path: string): string {
+    return path.startsWith('http') ? path : API_URI + path;
+  }
+
+  private static projectHeaders(): Record<string, string> {
+    // Get active project ID from localStorage
+    const activeProjectId = typeof window !== 'undefined' ? localStorage.getItem('activeProjectId') : null;
+
+    const headers: Record<string, string> = {};
+    if (activeProjectId) {
+      headers['X-Project-Id'] = activeProjectId;
+    }
+    return headers;
+  }
+
+  private static throwIfError(response: Response, res: ApiResponse): void {
+    if (response.status < 400) {
+      return;
+    }
+
+    // Check if this is an email verification required error
+    if (res.error?.code === 'EMAIL_VERIFICATION_REQUIRED') {
+      // Redirect to verification page
+      if (typeof window !== 'undefined' && !window.location.href.includes('/auth/verify-email')) {
+        window.location.href = '/auth/verify-email';
+      }
+      throw new Error(res.error.message ?? 'Please verify your email address to continue');
+    }
+
+    // Extract error message from standardized error response or fall back to direct message property
+    const errorMessage = res.error?.message ?? res.message ?? 'Something went wrong!';
+    throw new Error(errorMessage);
   }
 }

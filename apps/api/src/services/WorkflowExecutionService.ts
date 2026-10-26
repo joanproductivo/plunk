@@ -8,6 +8,7 @@ import type {
   WorkflowStepExecution,
 } from '@plunk/db';
 import {StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
+import type {SegmentChangesResult, UpdateContactSegmentChanges} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
 import {renderTemplate, WorkflowStepConfigSchemas} from '@plunk/shared';
 import dns from 'node:dns/promises';
@@ -737,6 +738,7 @@ export class WorkflowExecutionService {
     // - data.firstName, data.lastName, etc.
     // - workflow.* (execution context - alias for event data)
     // - event.* (event data that triggered the workflow)
+    // - segment.<id> (whether the contact is in that segment now; see conditionValue)
     const fieldData = {
       contact: {
         email: contact.email,
@@ -749,7 +751,7 @@ export class WorkflowExecutionService {
 
     // Multi-branch mode (switch/case)
     if ('mode' in parsed && parsed.mode === 'multi') {
-      const actualValue = this.resolveField(parsed.field, fieldData);
+      const actualValue = await this.conditionValue(parsed.field, fieldData, execution);
 
       for (const branch of parsed.branches) {
         if (this.evaluateCondition(actualValue, branch.operator, branch.value)) {
@@ -777,7 +779,7 @@ export class WorkflowExecutionService {
     const field = parsed.field;
     const operator = 'operator' in parsed ? parsed.operator : 'equals';
     const value = 'value' in parsed ? parsed.value : undefined;
-    const actualValue = this.resolveField(field, fieldData);
+    const actualValue = await this.conditionValue(field, fieldData, execution);
     const result = this.evaluateCondition(actualValue, operator, value);
 
     return {
@@ -1132,7 +1134,12 @@ export class WorkflowExecutionService {
   }
 
   /**
-   * UPDATE_CONTACT step - Update contact data
+   * UPDATE_CONTACT step - Update contact data, subscription and static segments.
+   *
+   * Applied in a fixed order -- data, subscription, segment removals, segment additions -- and
+   * segment events are tracked before the step returns, so a workflow they start (which runs
+   * right away, in this same call) already sees the contact's new data. A segment that no longer
+   * exists or is not static is skipped and reported, and the step carries on (D2).
    */
   private static async executeUpdateContact(
     _step: WorkflowStep,
@@ -1140,7 +1147,7 @@ export class WorkflowExecutionService {
     _stepExecution: WorkflowStepExecution,
     config: StepConfig,
   ): Promise<StepResult> {
-    const {updates, subscriptionAction} = WorkflowStepConfigSchemas.updateContact.parse(config);
+    const {updates, subscriptionAction, segments} = WorkflowStepConfigSchemas.updateContact.parse(config);
 
     const contact = execution.contact;
     const currentData =
@@ -1185,13 +1192,67 @@ export class WorkflowExecutionService {
       );
     }
 
+    const segmentChanges = await this.applySegmentChanges(
+      execution.workflow.projectId,
+      contact.id,
+      segments ?? {add: [], remove: []},
+    );
+
     return {
-      updated: hasDataUpdates || subscriptionChanging,
+      updated:
+        hasDataUpdates ||
+        subscriptionChanging ||
+        segmentChanges.segmentsAdded.length + segmentChanges.segmentsRemoved.length > 0,
       updates,
       newData,
       subscriptionAction,
       subscribed: desiredSubscribed ?? contact.subscribed,
+      ...segmentChanges,
     };
+  }
+
+  /**
+   * Remove the contact from, then add it to, static segments. Adding counts as an entry even
+   * for a current member (D1).
+   */
+  private static async applySegmentChanges(
+    projectId: string,
+    contactId: string,
+    segments: UpdateContactSegmentChanges,
+  ): Promise<SegmentChangesResult> {
+    const {SegmentMembershipService} = await import('./SegmentMembershipService.js');
+    const result: SegmentChangesResult = {segmentsAdded: [], segmentsRemoved: [], skippedSegments: []};
+
+    // Removals first. Repeated ids are dropped: each add is an entry of its own, so a repeated
+    // id would fire the segment's entry, and start its workflows, once per repetition.
+    const changes = [
+      ...[...new Set(segments.remove)].map(segmentId => ({segmentId, add: false})),
+      ...[...new Set(segments.add)].map(segmentId => ({segmentId, add: true})),
+    ];
+
+    for (const {segmentId, add} of changes) {
+      try {
+        if (add) {
+          const {added} = await SegmentMembershipService.addMembers(projectId, segmentId, [contactId], {mode: 'await'});
+          if (added > 0) result.segmentsAdded.push(segmentId);
+        } else {
+          const {removed} = await SegmentMembershipService.removeMembers(projectId, segmentId, [contactId], {
+            mode: 'await',
+          });
+          if (removed > 0) result.segmentsRemoved.push(segmentId);
+        }
+      } catch (error) {
+        // A missing, foreign or dynamic segment is a 404/400 from getStaticSegment: skip it (D2).
+        // Anything else, such as a database error, fails the step as usual.
+        if (!(error instanceof HttpException) || (error.code !== 404 && error.code !== 400)) {
+          throw error;
+        }
+        signale.warn(`[WORKFLOW] Skipping segment ${segmentId} in an Update contact step: ${error.message}`);
+        result.skippedSegments.push(segmentId);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1283,6 +1344,26 @@ export class WorkflowExecutionService {
    */
   private static renderTemplate(template: string, variables: Record<string, unknown>): string {
     return renderTemplate(template, variables);
+  }
+
+  /**
+   * The value a condition compares: `segment.<id>` is whether the contact is in that segment
+   * right now (a boolean); any other field is read from the contact and event data.
+   */
+  private static async conditionValue(
+    field: string,
+    fieldData: Record<string, unknown>,
+    execution: WorkflowExecutionWithRelations,
+  ): Promise<unknown> {
+    if (field.startsWith('segment.')) {
+      const {SegmentService} = await import('./SegmentService.js');
+      return SegmentService.isMember(
+        execution.workflow.projectId,
+        field.slice('segment.'.length),
+        execution.contact.id,
+      );
+    }
+    return this.resolveField(field, fieldData);
   }
 
   /**
