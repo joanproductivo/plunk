@@ -1,4 +1,4 @@
-import {isSafeVideoHref} from '@plunk/shared';
+import {EMAIL_COLUMN_RADIUS, isSafeVideoHref, visualAttributeText} from '@plunk/shared';
 import {Node} from '@tiptap/core';
 import {NodeViewWrapper, type ReactNodeViewProps, ReactNodeViewRenderer} from '@tiptap/react';
 
@@ -18,9 +18,9 @@ export interface VideoAttrs {
 
 const VIDEO = 'a.email-video';
 
-// Rounded like a framed email's column; Outlook for Windows squares it
-// Written as browsers serialise it, so a video reads back exactly as it was saved
-const IMAGE_STYLE = 'display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: 12px;';
+// Rounded like a framed email's column, which Outlook for Windows squares. Written as browsers
+// serialise it, so a video reads back exactly as it was saved.
+const IMAGE_STYLE = `display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: ${EMAIL_COLUMN_RADIUS}px;`;
 
 // A video is a watch link holding one image with a source and nothing else, so reading it as a
 // block never drops anything; any other a.email-video stays custom HTML (see emailDocument).
@@ -35,14 +35,12 @@ function isVideoLink(element: Element | null): element is HTMLAnchorElement {
 }
 
 // The attributes live on the link and its image: the matched link, or the paragraph's only child.
-function imageOf(element: HTMLElement): HTMLImageElement {
-  const link = element.matches('a') ? element : element.firstElementChild!;
-  return link.firstElementChild as HTMLImageElement;
+function linkOf(element: HTMLElement): Element {
+  return element.matches('a') ? element : element.firstElementChild!;
 }
 
-// The alt text without < or >: raw in an attribute, they would read as markup when checking for custom HTML
-export function cleanAlt(alt: string): string {
-  return alt.replace(/[<>]/g, '').trim();
+function imageOf(element: HTMLElement): HTMLImageElement {
+  return linkOf(element).firstElementChild as HTMLImageElement;
 }
 
 function readSize(value: string | null): number | null {
@@ -63,7 +61,14 @@ function VideoView({node, editor, getPos}: ReactNodeViewProps) {
         title="Double-click to edit"
         draggable={false}
         onDoubleClick={() => emitEditBlock(editor, getPos)}
-        style={{display: 'block', width: '100%', height: 'auto', margin: 0, borderRadius: 12, cursor: 'pointer'}}
+        style={{
+          display: 'block',
+          width: '100%',
+          height: 'auto',
+          margin: 0,
+          borderRadius: EMAIL_COLUMN_RADIUS,
+          cursor: 'pointer',
+        }}
       />
     </NodeViewWrapper>
   );
@@ -71,8 +76,9 @@ function VideoView({node, editor, getPos}: ReactNodeViewProps) {
 
 /**
  * A YouTube video: its poster, with a play button drawn on it, linking to the video. Saved as
- * <p style="text-align: center"><a class="email-video" href="…"><img class="email-image" …></a></p>,
- * always the column's width.
+ * <p style="text-align: center;"><a class="email-video" href="…"><img class="email-image" …></a></p>,
+ * always centred at the column's width: the link only when it is a safe watch page, the image
+ * with the poster's own width and height and its alt text kept visual (see visualAttributeText).
  */
 export const EmailVideo = Node.create({
   name: 'video',
@@ -85,12 +91,12 @@ export const EmailVideo = Node.create({
       src: {default: '', parseHTML: element => imageOf(element).getAttribute('src') ?? '', renderHTML: () => ({})},
       href: {
         default: '',
-        parseHTML: element => (element.matches('a') ? element : element.firstElementChild!).getAttribute('href'),
+        parseHTML: element => linkOf(element).getAttribute('href'),
         renderHTML: () => ({}),
       },
       alt: {
         default: '',
-        parseHTML: element => cleanAlt(imageOf(element).getAttribute('alt') ?? ''),
+        parseHTML: element => visualAttributeText(imageOf(element).getAttribute('alt') ?? ''),
         renderHTML: () => ({}),
       },
       width: {
@@ -125,7 +131,7 @@ export const EmailVideo = Node.create({
     const size = attrs.width && attrs.height ? {width: String(attrs.width), height: String(attrs.height)} : {};
     const image = [
       'img',
-      {class: 'email-image', src: attrs.src, alt: cleanAlt(attrs.alt), ...size, style: IMAGE_STYLE},
+      {class: 'email-image', src: attrs.src, alt: visualAttributeText(attrs.alt), ...size, style: IMAGE_STYLE},
     ];
     const link = [
       'a',

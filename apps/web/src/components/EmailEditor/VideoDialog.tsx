@@ -1,8 +1,8 @@
-import {parseYouTubeLink, youTubeWatchUrl} from '@plunk/shared';
+import {parseYouTubeLink, visualAttributeText, youTubeWatchUrl} from '@plunk/shared';
 import {Button, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {useEffect, useRef, useState} from 'react';
 
-import {cleanAlt, type VideoAttrs} from './EmailVideo';
+import type {VideoAttrs} from './EmailVideo';
 import type {BlockDialogProps} from './useBlockDialog';
 import {useImageUpload} from './useImageUpload';
 import {composeVideoPoster, VideoNotFoundError, type VideoPoster} from './videoPoster';
@@ -44,8 +44,8 @@ function VideoForm({
 }) {
   const [link, setLink] = useState(initial?.href ?? '');
   const [alt, setAlt] = useState(initial?.alt ?? '');
-  // Read when a poster arrives: the title fills in the alt text only if it was not written
-  const altEdited = useRef(initial !== null);
+  // Read when a poster arrives: the new video's title fills in the alt text unless it was written
+  const altEdited = useRef(false);
   const [poster, setPoster] = useState<Poster | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -58,8 +58,10 @@ function VideoForm({
   useEffect(
     () => () => {
       mounted.current = false;
+      // A dialog closed from outside, its block deleted, no longer waits for the upload it left
+      onBusy(false);
     },
-    [],
+    [onBusy],
   );
 
   const video = parseYouTubeLink(link);
@@ -93,6 +95,8 @@ function VideoForm({
     return () => {
       current = false;
       if (url) URL.revokeObjectURL(url);
+      // Its preview URL is gone, so the poster is composed again if this video comes back
+      setPoster(previous => (previous?.id === posterId ? null : previous));
     };
   }, [posterId]);
 
@@ -101,7 +105,7 @@ function VideoForm({
 
   const submit = async () => {
     if (!valid || !video) return;
-    const attrs = {href: youTubeWatchUrl(video), alt: cleanAlt(alt) || DEFAULT_ALT};
+    const attrs = {href: youTubeWatchUrl(video), alt: visualAttributeText(alt) || DEFAULT_ALT};
     if (!needsPoster && initial) {
       submitRef.current({...initial, ...attrs});
       return;
@@ -119,8 +123,10 @@ function VideoForm({
     } catch {
       if (mounted.current) setUploadError('Couldn’t upload the poster. Try again.');
     } finally {
-      onBusy(false);
-      if (mounted.current) setUploading(false);
+      if (mounted.current) {
+        onBusy(false);
+        setUploading(false);
+      }
     }
   };
 
@@ -142,7 +148,16 @@ function VideoForm({
         {link.trim() !== '' && !video && (
           <p className="mt-1 text-xs text-red-700">Paste a link to a YouTube video, from youtube.com or youtu.be.</p>
         )}
-        {video?.start && <p className="mt-1 text-xs text-neutral-500">Starts at {formatStart(video.start)}.</p>}
+        {video?.start ? (
+          <p className="mt-1 text-xs text-neutral-500">Starts at {formatStart(video.start)}.</p>
+        ) : (
+          video &&
+          /[?&#](?:t|start)=[^&#]*[1-9]/.test(link) && (
+            <p className="mt-1 text-xs text-neutral-500">
+              The start in the link can’t be read, so the video starts at the beginning.
+            </p>
+          )
+        )}
       </div>
 
       <div className="flex aspect-video items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50">

@@ -46,6 +46,12 @@ function videoNodes() {
   return nodes;
 }
 
+// Saving the email and opening it again.
+function reopen(html: string) {
+  editor.commands.setContent(html);
+  return editor.getHTML();
+}
+
 afterEach(() => {
   editor.destroy();
 });
@@ -94,11 +100,17 @@ describe('EmailVideo', () => {
     expect(editor.getHTML()).toContain(video());
   });
 
-  it('keeps < and > out of the alt text, where they would read as custom HTML', () => {
-    createEditor(`<p>a</p>${video(image('I &lt;3 yoga &gt; all'))}<p>b</p>`);
+  it.each([
+    ['I &lt;3 yoga &gt; all', 'I 3 yoga all'],
+    ['How to become data-driven', 'How to become data\u2011driven'],
+    ['Social @media tips', 'Social @\u200bmedia tips'],
+  ])('keeps the alt text %s from reading as custom HTML', (alt, kept) => {
+    createEditor(`<p>a</p>${video(image(alt))}<p>b</p>`);
 
-    expect(videoNodes()[0]).toMatchObject({alt: 'I 3 yoga  all'});
+    expect(videoNodes()[0]).toMatchObject({alt: kept});
     expect(detectCustomHtmlPatterns(editor.getHTML())).toBe(false);
+    // And it stays as it is from then on
+    expect(reopen(editor.getHTML())).toBe(editor.getHTML());
   });
 
   it.each([

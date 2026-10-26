@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 
-import {isSafeVideoHref, parseYouTubeLink, youTubeWatchUrl} from '../template/index.js';
+import {isSafeVideoHref, isSafeVideoHrefAttribute, parseYouTubeLink, youTubeWatchUrl} from '../template/index.js';
 
 describe('parseYouTubeLink', () => {
   it.each([
@@ -83,5 +83,13 @@ describe('isSafeVideoHref', () => {
     undefined,
   ])('refuses %s', href => {
     expect(isSafeVideoHref(href)).toBe(false);
+  });
+});
+
+describe('isSafeVideoHrefAttribute', () => {
+  it('reads the start as an attribute writes it', () => {
+    expect(isSafeVideoHrefAttribute('https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s')).toBe(true);
+    expect(isSafeVideoHrefAttribute('https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;amp;t=90s')).toBe(false);
+    expect(isSafeVideoHrefAttribute(undefined)).toBe(false);
   });
 });

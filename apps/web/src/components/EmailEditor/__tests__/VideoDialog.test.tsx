@@ -156,6 +156,38 @@ describe('VideoDialog', () => {
     });
   });
 
+  it("gives another video's title to a block edited to show it, unless the alt text was written", async () => {
+    await render(EDITED);
+
+    await type('#video-link', 'https://youtu.be/jNQXAC9IVRw');
+    expect(composeVideoPoster).toHaveBeenCalledWith({id: 'jNQXAC9IVRw', start: null});
+    expect(document.querySelector<HTMLInputElement>('#video-alt')!.value).toBe('Never gonna');
+    await click(buttonNamed('Save')!);
+
+    expect(network.upload).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({src: SRC, alt: 'Never gonna'}));
+  });
+
+  it('composes a video again when it comes back, its earlier preview gone', async () => {
+    await render();
+
+    await type('#video-link', 'https://youtu.be/dQw4w9WgXcQ');
+    await type('#video-link', 'https://youtu.be/dQw4');
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:poster');
+    await type('#video-link', 'https://youtu.be/dQw4w9WgXcQ');
+
+    expect(composeVideoPoster).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('img')!.getAttribute('src')).toBe('blob:poster');
+  });
+
+  it('says when a start in the link cannot be kept', async () => {
+    await render();
+
+    await type('#video-link', 'https://youtu.be/dQw4w9WgXcQ?t=01:30');
+
+    expect(text()).toContain('The start in the link can’t be read');
+  });
+
   it('stays open while the poster uploads', async () => {
     let finish: (value: {url: string; key: string}) => void = () => undefined;
     vi.mocked(network.upload).mockReturnValueOnce(new Promise(resolve => (finish = resolve)) as never);

@@ -80,6 +80,7 @@ describe('composeVideoPoster', () => {
     // The title is asked for the video, without its start
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent('https://www.youtube.com/watch?v=dQw4w9WgXcQ')}`,
+      expect.objectContaining({referrerPolicy: 'no-referrer', signal: expect.any(AbortSignal)}),
     );
   });
 
@@ -92,6 +93,23 @@ describe('composeVideoPoster', () => {
     expect(loaded).toEqual(['maxresdefault', 'sddefault', 'hqdefault']);
     expect(drawn[0]!.slice(1, 5)).toEqual([0, 0, 480, 360]);
     expect(poster).toMatchObject({width: 480, height: 360});
+  });
+
+  it('keeps Liquid in a title from opening a tag, since Liquid runs on the email', async () => {
+    oEmbed({status: 200, body: {title: "{{ '%22%3E' | url_decode }} and {% if x %} {not}"}});
+    const {fake} = tools({maxresdefault: {width: 1280, height: 720}});
+
+    expect((await composeVideoPoster(VIDEO, fake)).title).toBe(
+      "{\u200b{ '%22%3E' | url_decode }} and {\u200b% if x %} {not}",
+    );
+  });
+
+  it('skips a poster that loads without a size', async () => {
+    oEmbed({status: 200, body: {}});
+    const {fake, loaded} = tools({maxresdefault: {width: 0, height: 0}, sddefault: {width: 640, height: 480}});
+
+    expect(await composeVideoPoster(VIDEO, fake)).toMatchObject({width: 640, height: 360});
+    expect(loaded).toEqual(['maxresdefault', 'sddefault']);
   });
 
   it('crops a 16:9 video out of a 4:3 poster', async () => {

@@ -25,16 +25,20 @@ export interface PosterTools {
   createCanvas: (width: number, height: number) => HTMLCanvasElement;
 }
 
-// An image that has not loaded by then is taken as failed, so the dialog never waits forever
+// An image that has not loaded by then is taken as failed, and a title not given by then is done
+// without, so the dialog never waits forever
 const LOAD_TIMEOUT_MS = 15_000;
+const OEMBED_TIMEOUT_MS = 10_000;
 
 const browserTools: PosterTools = {
   loadImage: src =>
     new Promise(resolve => {
       const image = new Image();
       const timer = setTimeout(() => resolve(null), LOAD_TIMEOUT_MS);
-      // YouTube's posters allow any origin, so drawing one leaves the canvas readable
+      // YouTube's posters allow any origin, so drawing one leaves the canvas readable. YouTube
+      // needs no word of which dashboard asked.
       image.crossOrigin = 'anonymous';
+      image.referrerPolicy = 'no-referrer';
       image.onload = () => {
         clearTimeout(timer);
         resolve(image);
@@ -60,12 +64,21 @@ const WIDEST = 16 / 9;
 /** The play button's diameter, as a share of the poster's width. */
 const PLAY_SIZE = 0.17;
 
+// A video's title is a stranger's text going into the email, where Liquid would run it: it keeps
+// its braces, but none opens a tag
+function withoutLiquid(text: string): string {
+  return text.replace(/\{(?=[{%])/g, '{\u200b');
+}
+
 // The title and shape YouTube gives; null when it cannot be asked
 async function readOEmbed(video: YouTubeVideo): Promise<{title: string | null; ratio: number} | null> {
   let response: Response;
   try {
     const url = youTubeWatchUrl({id: video.id, start: null});
-    response = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+    response = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`, {
+      referrerPolicy: 'no-referrer',
+      signal: AbortSignal.timeout(OEMBED_TIMEOUT_MS),
+    });
   } catch {
     return null;
   }
@@ -78,7 +91,7 @@ async function readOEmbed(video: YouTubeVideo): Promise<{title: string | null; r
     const width = Number(data.width);
     const height = Number(data.height);
     return {
-      title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : null,
+      title: typeof data.title === 'string' && data.title.trim() ? withoutLiquid(data.title.trim()) : null,
       ratio: width > 0 && height > 0 ? width / height : WIDEST,
     };
   } catch {
@@ -90,7 +103,7 @@ async function loadPoster(video: YouTubeVideo, tools: PosterTools): Promise<Load
   for (const quality of POSTER_QUALITIES) {
     const image = await tools.loadImage(`https://i.ytimg.com/vi/${video.id}/${quality}.jpg`);
     const isPlaceholder = image?.naturalWidth === PLACEHOLDER.width && image.naturalHeight === PLACEHOLDER.height;
-    if (image && !isPlaceholder) return image;
+    if (image && !isPlaceholder && image.naturalWidth > 0 && image.naturalHeight > 0) return image;
   }
   throw new VideoNotFoundError();
 }

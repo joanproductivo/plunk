@@ -10,7 +10,7 @@ import {
   type EmailBrand,
   isFramedBrand,
   isSafeButtonHref,
-  isSafeVideoHref,
+  isSafeVideoHrefAttribute,
   readButtonStyle,
   readSpacerHeight,
   splitEmailMarkers,
@@ -101,27 +101,36 @@ function addOutlookButtonPadding($: CheerioAPI, emailFont: string): void {
 /** Videos outside a column of a chosen width go out this wide in Outlook, the usual email width. */
 const VIDEO_DEFAULT_WIDTH = 600;
 
+/** Posters taller or wider than this are not a video's, so their height is left to the client. */
+const VIDEO_MAX_RATIO = 4;
+
+// A size attribute as written by the editor: a whole number of pixels
+const pixels = (value: string | undefined) => (value && /^\d{1,5}$/.test(value) ? Number(value) : 0);
+
 /**
  * Editor videos as Outlook for Windows can render them. Its Word engine sizes images by their
  * width and height attributes, ignoring CSS, so the poster's own size (1280 px) would burst the
- * column: they become the column's width, whatever the brand was when the video was inserted,
- * and the matching height. A video whose link is not one a video may have loses it.
+ * column: the width becomes the column's (the brand's width less the column's padding, or the
+ * usual 600 px), whatever the brand was when the video was inserted, and the height follows the
+ * poster's shape. A video whose link is not one a video may have loses it.
  */
 function sizeVideos($: CheerioAPI, brand: EmailBrand): void {
   const width = brand.contentWidth ? brand.contentWidth - 2 * EMAIL_COLUMN_PADDING : VIDEO_DEFAULT_WIDTH;
   $('a.email-video').each((_, element) => {
     const link = $(element);
-    // Attributes are read undecoded (see wrapWithEmailStyles), so the start's & is still &amp;
-    if (!isSafeVideoHref(link.attr('href')?.replace(/&amp;/g, '&'))) {
-      link.removeAttr('href');
-      return;
+    const image = link.children('img').first();
+    const [posterWidth, posterHeight] = [pixels(image.attr('width')), pixels(image.attr('height'))];
+    const ratio = posterWidth / posterHeight;
+    image.attr('width', String(width));
+    if (ratio >= 1 / VIDEO_MAX_RATIO && ratio <= VIDEO_MAX_RATIO) {
+      image.attr('height', String(Math.round(width / ratio)));
+    } else {
+      image.removeAttr('height');
     }
 
-    const image = link.children('img').first();
-    const [posterWidth, posterHeight] = [Number(image.attr('width')), Number(image.attr('height'))];
-    if (posterWidth > 0 && posterHeight > 0) {
-      image.attr('width', String(width));
-      image.attr('height', String(Math.round((width * posterHeight) / posterWidth)));
+    // Attributes are read undecoded (see wrapWithEmailStyles), so the start's & is still &amp;
+    if (!isSafeVideoHrefAttribute(link.attr('href'))) {
+      link.removeAttr('href');
     }
   });
 }

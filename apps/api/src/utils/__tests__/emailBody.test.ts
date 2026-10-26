@@ -4,7 +4,7 @@ import {
   detectCustomHtmlPatterns,
   type EmailBrand,
   EMAIL_FONTS,
-  isSafeVideoHref,
+  isSafeVideoHrefAttribute,
   joinEmailMarkers,
   readButtonStyle,
   readSpacerHeight,
@@ -23,7 +23,7 @@ vi.mock('@plunk/shared', async importOriginal => {
   return {
     ...actual,
     detectCustomHtmlPatterns: vi.fn(actual.detectCustomHtmlPatterns),
-    isSafeVideoHref: vi.fn(actual.isSafeVideoHref),
+    isSafeVideoHrefAttribute: vi.fn(actual.isSafeVideoHrefAttribute),
     readButtonStyle: vi.fn(actual.readButtonStyle),
     readSpacerHeight: vi.fn(actual.readSpacerHeight),
   };
@@ -277,7 +277,7 @@ describe('renderBody', () => {
 
   describe('editor videos', () => {
     const image = (width = 1280, height = 720) =>
-      `<img class="email-image" src="https://files.example.com/youtube-abc.jpg" alt="The video" width="${width}" height="${height}" style="display: block; width: 100%; height: auto; margin: 0; border: 0; border-radius: 12px;">`;
+      `<img class="email-image" src="https://files.example.com/youtube-abc.jpg" alt="The video" width="${width}" height="${height}" style="display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: 12px;">`;
     const video = (inner = image(), href = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s') =>
       `<p style="text-align: center;"><a class="email-video" href="${href}" style="text-decoration: none;">${inner}</a></p>`;
     const imageTag = (html: string) => html.match(/<img\b[^>]*>/)?.[0] ?? '';
@@ -288,7 +288,7 @@ describe('renderBody', () => {
 
       expect(html).toContain('<a class="email-video" href="https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s"');
       expect(img).toContain('width="600" height="338"');
-      expect(img).toMatch(/margin-top: [^;]+;.*margin: 0; border: 0; border-radius: 12px;/);
+      expect(img).toMatch(/margin-top: [^;]+;.*margin: 0px; border: 0px; border-radius: 12px;/);
       expect(img).toContain('width: 100%;');
       expect(html).toMatch(/<a class="email-video" [^>]*style="[^"]*text-decoration: none;"/);
     });
@@ -302,22 +302,30 @@ describe('renderBody', () => {
       expect(imageTag(html)).toContain('width="652" height="489"');
     });
 
-    it('leaves an image without a size of its own as it is', () => {
-      expect(imageTag(renderBody(video(image().replace(/ width="1280" height="720"/, ''))))).not.toContain('width=');
+    it.each([
+      ['no size of its own', ''],
+      ['only a width', ' width="1280"'],
+      ['a size that is not whole pixels', ' width="1e3" height="720"'],
+      ['a shape no video has', ' width="1" height="900"'],
+    ])('sends a poster with %s at the column width, its height left to the client', (_, size) => {
+      const img = imageTag(renderBody(video(image().replace(/ width="1280" height="720"/, size))));
+
+      expect(img).toContain('width="600"');
+      expect(img).not.toContain('height=');
     });
 
-    it('drops a link that is not one a video may have', () => {
+    it('drops a link that is not one a video may have, still sizing the poster', () => {
       vi.mocked(detectCustomHtmlPatterns).mockReturnValueOnce(false);
 
       const html = renderBody(video(image(), 'javascript:alert(1)'));
 
       expect(html).toContain('<a class="email-video" style=');
       expect(html).not.toContain('javascript:');
-      expect(imageTag(html)).toContain('width="1280"');
+      expect(imageTag(html)).toContain('width="600" height="338"');
     });
 
     it('still sends the inlined email when sizing videos fails', () => {
-      vi.mocked(isSafeVideoHref).mockImplementationOnce(() => {
+      vi.mocked(isSafeVideoHrefAttribute).mockImplementationOnce(() => {
         throw new Error('broken link');
       });
       const warn = vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
@@ -325,7 +333,6 @@ describe('renderBody', () => {
       const html = renderBody(`<h1>Hi</h1>${video()}`);
 
       expect(styleOf(html, 'h1')).toContain('font-weight: 800');
-      expect(imageTag(html)).toContain('width="1280"');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('size videos'), expect.any(Error));
     });
 

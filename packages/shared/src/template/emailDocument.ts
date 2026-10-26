@@ -1,6 +1,6 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
 import {EDITOR_BLOCK_CLASSES} from './emailBlocks.js';
-import {isSafeVideoHref} from './emailVideo.js';
+import {isSafeVideoHrefAttribute} from './emailVideo.js';
 
 /**
  * The document visual editor emails go out in, shared by the dashboard's previews and the API,
@@ -24,22 +24,26 @@ function hasRichButton(html: string): boolean {
   return false;
 }
 
-// Whether an `a.email-video` is not one the editor writes: a video link holding a single image
-// with a source and nothing else. The visual editor would drop the rest, so it stays custom HTML.
-// A linear scan, as hasRichButton.
+// Whether an `a.email-video` is not one the editor writes: a video link, its one href in double
+// quotes, holding a single image with a source and nothing else. The visual editor would drop the
+// rest, so it stays custom HTML. A linear scan, as hasRichButton.
 function hasForeignVideo(html: string): boolean {
   const links = html.split(/<a\b/i);
   for (let i = 1; i < links.length; i++) {
     const link = links[i]!;
     const tagEnd = link.indexOf('>');
-    if (tagEnd < 0) return false;
+    // An unclosed <a is no link; the scan goes on to the next one
+    if (tagEnd < 0) continue;
     const tag = link.slice(0, tagEnd);
     if (!/\bclass\s*=\s*["'][^"']*\bemail-video\b/i.test(tag)) continue;
 
+    // Browsers follow the first href however it is quoted, so a second one, or one hidden in
+    // another attribute's value, would be checked instead of it
+    if (tag.match(/\shref\s*=/gi)?.length !== 1) return true;
     const hrefAt = /\shref\s*=\s*"/i.exec(tag);
     const hrefStart = hrefAt ? hrefAt.index + hrefAt[0].length : -1;
     const hrefEnd = hrefAt ? tag.indexOf('"', hrefStart) : -1;
-    if (hrefEnd < 0 || !isSafeVideoHref(tag.slice(hrefStart, hrefEnd).replace(/&amp;/g, '&'))) return true;
+    if (hrefEnd < 0 || !isSafeVideoHrefAttribute(tag.slice(hrefStart, hrefEnd))) return true;
 
     const content = link.slice(tagEnd + 1);
     const end = content.search(/<\/a>/i);
@@ -116,6 +120,22 @@ export function detectCustomHtmlPatterns(html: string): boolean {
     hasRichButton(html) ||
     hasForeignVideo(html)
   );
+}
+
+/**
+ * Text for an attribute of visual editor content, such as an image's alt text, that never makes
+ * it read as custom HTML: without < or >, which would read as markup, and with what
+ * detectCustomHtmlPatterns looks for anywhere in the HTML (`data-`, `aria-`, `role=`, `id=`,
+ * `class=`, `@media`) broken by a non-breaking hyphen or an invisible space, so it reads the same.
+ */
+export function visualAttributeText(text: string): string {
+  return text
+    .replace(/[<>]/g, '')
+    .replace(/(data|aria)-/gi, '$1\u2011')
+    .replace(/\b(role|id|class)(\s*=)/gi, '$1\u200b$2')
+    .replace(/@media/gi, '@\u200bmedia')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
