@@ -1,5 +1,6 @@
 import {
   BRAND_DEFAULTS,
+  EMAIL_COLUMN_RADIUS,
   type EmailBrand,
   emailFontFamily,
   isFramedBrand,
@@ -51,7 +52,12 @@ export function canvasStyle(look: EmailBrand): {outer: CSSProperties; inner: CSS
   return {
     outer: {backgroundColor: look.backgroundColor ?? undefined, padding: framed ? 16 : undefined},
     inner: framed
-      ? {maxWidth: look.contentWidth ?? undefined, margin: '0 auto', backgroundColor: look.contentColor}
+      ? {
+          maxWidth: look.contentWidth ?? undefined,
+          margin: '0 auto',
+          backgroundColor: look.contentColor,
+          borderRadius: EMAIL_COLUMN_RADIUS,
+        }
       : {},
   };
 }
