@@ -341,7 +341,9 @@ export class QueueService {
    */
   public static async queueCampaignBatch(data: CampaignBatchJobData): Promise<Job<CampaignBatchJobData>> {
     return campaignQueue.add('process-batch', data, {
-      jobId: `campaign-${data.campaignId}-batch-${data.batchNumber}`,
+      // The generation keeps a later send of the same campaign from colliding with the
+      // batch jobs of an earlier one, which BullMQ still holds and would silently keep
+      jobId: `campaign-${data.campaignId}-${data.generation}-batch-${data.batchNumber}`,
     });
   }
 

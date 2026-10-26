@@ -1,5 +1,5 @@
 import type {Contact, Email, Project, TemplateType} from '@plunk/db';
-import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
+import {EmailSourceType, EmailStatus, Prisma, TrackingMode} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
@@ -30,6 +30,8 @@ interface Attachment {
 }
 
 interface SendEmailParams {
+  /** A fixed id for the row (campaign emails): creating it a second time returns the first */
+  id?: string;
   projectId: string;
   contactId: string;
   subject: string;
@@ -46,6 +48,15 @@ interface SendEmailParams {
   workflowStepExecutionId?: string;
   recipientEmail?: string; // Optional custom recipient email (overrides contact.email)
   isTransactional?: boolean; // Override source type to TRANSACTIONAL (e.g. for transactional campaigns)
+}
+
+/** A create that collided with an existing row's primary key */
+function isIdConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = error.meta?.target;
+  return Array.isArray(target) ? target.includes('id') : String(target).endsWith('_pkey');
 }
 
 /**
@@ -192,23 +203,40 @@ export class EmailService {
       signale.warn(`[BILLING_LIMIT] ${limitCheck.message}`);
     }
 
-    const email = await prisma.email.create({
-      data: {
-        projectId: params.projectId,
-        contactId: params.contactId,
-        subject: params.subject,
-        body: params.body,
-        from: params.from,
-        fromName: params.fromName,
-        replyTo: params.replyTo,
-        headers: params.headers ? toPrismaJson(params.headers) : undefined,
-        attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
-        sourceType,
-        templateId: params.templateId,
-        campaignId: params.campaignId,
-        status: EmailStatus.PENDING,
-      },
-    });
+    let email: Email;
+    try {
+      email = await prisma.email.create({
+        data: {
+          id: params.id,
+          projectId: params.projectId,
+          contactId: params.contactId,
+          subject: params.subject,
+          body: params.body,
+          from: params.from,
+          fromName: params.fromName,
+          replyTo: params.replyTo,
+          headers: params.headers ? toPrismaJson(params.headers) : undefined,
+          attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
+          sourceType,
+          templateId: params.templateId,
+          campaignId: params.campaignId,
+          status: EmailStatus.PENDING,
+        },
+      });
+    } catch (error) {
+      const existing = params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
+      if (!existing) {
+        throw error;
+      }
+
+      // An earlier run of the same batch created this email. It is not created or counted
+      // again; if it was never sent, it is queued again, because that run may have died
+      // before queueing it (the job id is the email's, so a job that exists is not doubled).
+      if (existing.status === EmailStatus.PENDING) {
+        await this.queueEmail(existing.id, existing.sourceType);
+      }
+      return existing;
+    }
 
     // Increment usage counter in cache
     await BillingLimitService.incrementUsage(params.projectId, sourceType);

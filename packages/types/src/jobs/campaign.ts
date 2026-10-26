@@ -12,6 +12,12 @@ export interface CampaignBatchJobData {
   offset: number;
   limit: number;
   cursor?: string; // For cursor-based pagination
+  /**
+   * The send this batch belongs to: the campaign's `sentAt`, in milliseconds. A batch of an
+   * earlier send of the same campaign (cancelled, reverted to draft and sent again) no longer
+   * matches and is dropped, and the emails a batch creates take their ids from it.
+   */
+  generation: number;
 }
 
 /**

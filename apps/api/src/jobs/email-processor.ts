@@ -93,7 +93,7 @@ const EMAIL_INCLUDE = {
   contact: true,
   project: true,
   template: {select: {type: true}},
-  campaign: {select: {type: true, status: true, name: true}},
+  campaign: {select: {type: true, status: true, name: true, sentAt: true}},
 } satisfies Prisma.EmailInclude;
 
 type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
@@ -272,6 +272,27 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
 
     // No `finalizeIfDone` here: it only advances a campaign that is still
     // SENDING, and this branch runs precisely when it is not.
+    return;
+  }
+
+  // An email of an earlier send of this campaign -- created by a batch that was still running
+  // when that send was cancelled, and so outlived the cleanup -- must not go out with this one.
+  // Every email of the current send carries the id derived from it.
+  if (
+    email.campaign &&
+    email.campaignId &&
+    (!email.campaign.sentAt ||
+      email.id !== CampaignService.emailIdFor(email.campaignId, email.campaign.sentAt.getTime(), email.contactId))
+  ) {
+    signale.warn(`[EMAIL-PROCESSOR] Email ${emailId} belongs to an earlier send of campaign ${email.campaignId}, skipping`);
+    await prisma.email.update({
+      where: {id: emailId},
+      data: {
+        status: EmailStatus.FAILED,
+        error: 'Stale campaign generation',
+      },
+    });
+    await finalizeCampaignSafely(email.campaignId);
     return;
   }
 

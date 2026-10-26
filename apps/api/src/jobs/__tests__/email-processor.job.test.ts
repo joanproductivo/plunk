@@ -4,6 +4,7 @@ import type {SendEmailJobData} from '@plunk/types';
 import {UnrecoverableError} from 'bullmq';
 
 import {prisma as appPrisma} from '../../database/prisma';
+import {CampaignService} from '../../services/CampaignService';
 import {EventService} from '../../services/EventService';
 import {SecurityService} from '../../services/SecurityService';
 import {sendRawEmail} from '../../services/SESService';
@@ -56,13 +57,23 @@ describe('processEmailJob', () => {
     return job as typeof job & EmailJob;
   }
 
-  async function pendingEmail(options: {subscribed?: boolean; sourceType?: EmailSourceType; campaignId?: string} = {}) {
+  async function pendingEmail(
+    options: {
+      subscribed?: boolean;
+      sourceType?: EmailSourceType;
+      campaign?: {id: string; sentAt: Date | null};
+      id?: string;
+    } = {},
+  ) {
     const contact = await factories.createContact({projectId, subscribed: options.subscribed ?? true});
+    const {campaign} = options;
     return prisma.email.create({
       data: {
+        // A campaign email carries the id its send derives, as `processBatch` creates it
+        id: options.id ?? (campaign ? CampaignService.emailIdFor(campaign.id, campaign.sentAt!.getTime(), contact.id) : undefined),
         projectId,
         contactId: contact.id,
-        campaignId: options.campaignId ?? null,
+        campaignId: campaign?.id ?? null,
         subject: 'Hello',
         body: '<p>Hello</p>',
         from: 'hello@plunk.test',
@@ -116,7 +127,7 @@ describe('processEmailJob', () => {
 
     it('marks it failed on the last attempt and finalizes its campaign', async () => {
       const campaign = await sendingCampaign();
-      const email = await pendingEmail({campaignId: campaign.id});
+      const email = await pendingEmail({campaign});
       vi.mocked(sendRawEmail).mockRejectedValue(new Error('MessageRejected'));
 
       await expect(processEmailJob(makeJob(email.id, 2))).rejects.toThrow('MessageRejected');
@@ -180,7 +191,7 @@ describe('processEmailJob', () => {
   describe('subscription at send time', () => {
     it('does not send a campaign email to a contact who unsubscribed after it was queued', async () => {
       const campaign = await sendingCampaign();
-      const email = await pendingEmail({campaignId: campaign.id});
+      const email = await pendingEmail({campaign});
       await prisma.contact.update({where: {id: email.contactId}, data: {subscribed: false}});
 
       await processEmailJob(makeJob(email.id));
@@ -231,7 +242,7 @@ describe('processEmailJob', () => {
   describe('a job out of attempts', () => {
     it('fails an email still pending and finalizes its campaign', async () => {
       const campaign = await sendingCampaign();
-      const email = await pendingEmail({campaignId: campaign.id});
+      const email = await pendingEmail({campaign});
 
       await failAbandonedEmail(email.id);
 
@@ -250,5 +261,18 @@ describe('processEmailJob', () => {
       const row = await prisma.email.findUnique({where: {id: email.id}});
       expect(row?.status).toBe(EmailStatus.SENDING);
     });
+  });
+
+  it('does not send an email left from an earlier send of the same campaign', async () => {
+    const campaign = await sendingCampaign();
+    // Created under a send that was cancelled: its id derives from another generation
+    const stale = await pendingEmail({campaign: {id: campaign.id, sentAt: new Date(campaign.sentAt!.getTime() - 60_000)}});
+
+    await processEmailJob(makeJob(stale.id));
+
+    const row = await prisma.email.findUnique({where: {id: stale.id}});
+    expect(row?.status).toBe(EmailStatus.FAILED);
+    expect(row?.error).toBe('Stale campaign generation');
+    expect(sendRawEmail).not.toHaveBeenCalled();
   });
 });

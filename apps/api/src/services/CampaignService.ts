@@ -2,6 +2,7 @@ import type {Campaign, Contact} from '@plunk/db';
 import {CampaignAudienceType, CampaignStatus, EmailSourceType, EmailStatus, Prisma, TemplateType} from '@plunk/db';
 import {compileTemplate} from '@plunk/shared';
 import type {
+  CampaignBatchJobData,
   CampaignListResponse,
   CampaignRecipient,
   CampaignRecipientType,
@@ -19,6 +20,7 @@ import {HttpException} from '../exceptions/index.js';
 import {renderBody} from '../utils/emailBody.js';
 import type {ListSort} from '../utils/listSort.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
+import {uuidv5} from '../utils/uuid.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
@@ -32,6 +34,9 @@ import {DASHBOARD_URI, STRIPE_ENABLED} from '../app/constants.js';
 import {sendRawEmail} from './SESService.js';
 
 const BATCH_SIZE = 500; // Number of emails to process per batch (increased for better performance)
+
+/** Namespace of the campaign email ids; fixed, and used for nothing else */
+const CAMPAIGN_EMAIL_ID_NAMESPACE = 'b438d7ec-4f8c-4929-b750-e677bcec6d06';
 
 /**
  * Statuses a campaign may be archived from.
@@ -591,12 +596,14 @@ export class CampaignService {
   public static async startSending(projectId: string, campaignId: string, recipientCount?: number): Promise<void> {
     const campaign = await this.get(projectId, campaignId);
 
+    // Another request started this send first -- see the transition below
+    if (campaign.status === CampaignStatus.SENDING) {
+      signale.warn(`[CAMPAIGN] Campaign ${campaignId} is already sending, not starting it again`);
+      return;
+    }
+
     // Validate status
-    if (
-      campaign.status !== CampaignStatus.DRAFT &&
-      campaign.status !== CampaignStatus.SCHEDULED &&
-      campaign.status !== CampaignStatus.SENDING
-    ) {
+    if (campaign.status !== CampaignStatus.DRAFT && campaign.status !== CampaignStatus.SCHEDULED) {
       throw new HttpException(400, 'Campaign cannot be sent in its current status');
     }
 
@@ -605,28 +612,28 @@ export class CampaignService {
       recipientCount = await this.getRecipientCount(projectId, campaign);
     }
 
-    // Update campaign to SENDING status
-    const updatedCampaign = await prisma.campaign.update({
-      where: {id: campaignId},
+    // Move to SENDING only from DRAFT or SCHEDULED, in one statement: of two sends that race
+    // (a double click, a manual send of a campaign whose schedule fires at the same moment),
+    // exactly one starts. Two would be two generations, and every recipient would get two
+    // emails with different ids.
+    const sentAt = new Date();
+    const started = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: {in: [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED]}},
       data: {
         status: CampaignStatus.SENDING,
         totalRecipients: recipientCount,
-        sentAt: new Date(),
-      },
-      include: {
-        project: {
-          select: {name: true},
-        },
+        sentAt,
       },
     });
 
-    // Send notification about campaign sending started
-    await NtfyService.notifyCampaignSendingStarted(
-      updatedCampaign.name,
-      updatedCampaign.project.name,
-      projectId,
-      recipientCount,
-    );
+    if (started.count === 0) {
+      const current = await prisma.campaign.findUnique({where: {id: campaignId}, select: {status: true}});
+      if (current?.status === CampaignStatus.SENDING) {
+        signale.warn(`[CAMPAIGN] Campaign ${campaignId} was started by another request`);
+        return;
+      }
+      throw new HttpException(400, 'Campaign cannot be sent in its current status');
+    }
 
     // Queue first batch to start the cursor-based chain
     await QueueService.queueCampaignBatch({
@@ -634,20 +641,38 @@ export class CampaignService {
       batchNumber: 1,
       offset: 0,
       limit: BATCH_SIZE,
+      generation: sentAt.getTime(),
     });
+
+    // Never allowed to fail the send: the campaign is SENDING and its first batch is queued
+    try {
+      const project = await prisma.project.findUnique({where: {id: projectId}, select: {name: true}});
+      await NtfyService.notifyCampaignSendingStarted(campaign.name, project?.name ?? projectId, projectId, recipientCount);
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to notify that campaign ${campaignId} started sending:`, error);
+    }
+  }
+
+  /**
+   * The id of the email a send of a campaign creates for a contact. Derived rather than random,
+   * so a batch that runs twice (a worker killed mid-batch, a retry after its last step failed)
+   * finds the rows it already created instead of creating -- and sending -- a second email.
+   */
+  public static emailIdFor(campaignId: string, generation: number, contactId: string): string {
+    return uuidv5(`${campaignId}:${generation}:${contactId}`, CAMPAIGN_EMAIL_ID_NAMESPACE);
   }
 
   /**
    * Process a single batch of campaign emails
    * Now uses cursor-based pagination for better performance
    */
-  public static async processBatch(
-    campaignId: string,
-    batchNumber: number,
-    offset: number,
-    limit: number,
-    cursor?: string,
-  ): Promise<void> {
+  public static async processBatch({
+    campaignId,
+    batchNumber,
+    limit,
+    cursor,
+    generation,
+  }: CampaignBatchJobData): Promise<void> {
     const campaign = await prisma.campaign.findUnique({
       where: {id: campaignId},
       include: {
@@ -661,6 +686,13 @@ export class CampaignService {
 
     if (campaign.status !== CampaignStatus.SENDING) {
       signale.warn(`[CAMPAIGN] Campaign ${campaignId} is not in SENDING status, skipping batch ${batchNumber}`);
+      return;
+    }
+
+    // A batch of an earlier send of this campaign, or one queued before batches carried their
+    // send: creating its emails now would mail the audience a second time
+    if (!campaign.sentAt || campaign.sentAt.getTime() !== generation) {
+      signale.warn(`[CAMPAIGN] Batch ${batchNumber} of campaign ${campaignId} belongs to another send, skipping it`);
       return;
     }
 
@@ -692,6 +724,7 @@ export class CampaignService {
         const renderedBody = bodyTemplate.render(variables);
 
         await EmailService.sendCampaignEmail({
+          id: this.emailIdFor(campaign.id, generation, contact.id),
           projectId: campaign.projectId,
           contactId: contact.id,
           campaignId: campaign.id,
@@ -717,6 +750,7 @@ export class CampaignService {
         offset: 0, // Not used with cursor pagination
         limit,
         cursor: nextCursor,
+        generation,
       });
     } else {
       // Last batch: reconcile totalRecipients to the actual number of emails created.
