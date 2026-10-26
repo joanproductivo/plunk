@@ -6,7 +6,13 @@ import signale from 'signale';
 import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, TRACKING_TOGGLE_ENABLED} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
-import {createTranslatorSync, renderTemplate} from '@plunk/shared';
+import {
+  footerParagraph,
+  type ProjectFooters,
+  renderTemplate,
+  resolveContactLanguage,
+  unsubscribeFooterHtml,
+} from '@plunk/shared';
 
 import {renderBody} from '../utils/emailBody.js';
 
@@ -357,11 +363,14 @@ export class EmailService {
     project,
     includeUnsubscribe = true,
     sourceEmailId,
+    footers,
   }: {
     content: string;
     contact: Contact;
     project: Project;
     includeUnsubscribe?: boolean;
+    /** The project's own footers by language (ProjectFooterService); Plunk's for the rest. */
+    footers?: ProjectFooters;
     /**
      * Id of the email this footer is being rendered into, so an opt-out from the
      * footer link can be attributed to it. See {@link withSourceEmail}.
@@ -370,36 +379,20 @@ export class EmailService {
   }): string {
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
-          // Get contact-level locale (overrides project language)
-          const contactLocale =
-            contact.data &&
-            typeof contact.data === 'object' &&
-            !Array.isArray(contact.data) &&
-            'locale' in contact.data &&
-            typeof contact.data.locale === 'string'
-              ? contact.data.locale
-              : null;
+          // The contact's language (their locale, else the project's), with its own footer or Plunk's
+          const locale =
+            contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
+              ? (contact.data as Record<string, unknown>).locale
+              : undefined;
 
-          // Get translator for contact's locale or project's language
-          const translator = createTranslatorSync(contactLocale || project.language || 'en');
-          const unsubscribeText = translator.t('email.footer.unsubscribeText', {
-            projectName: project.name,
-          });
-          const updatePreferencesText = translator.t('email.footer.updatePreferences');
-
-          return `<table align="center" width="100%" style="max-width: 480px; width: 100%; margin-left: auto; margin-right: auto; font-family: Inter, ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'; border: 0; cellpadding: 0; cellspacing: 0;" role="presentation">
-          <tbody>
-            <tr>
-              <td>
-                <hr style="border: none; border-top: 1px solid #eaeaea; width: 100%; margin-top: 12px; margin-bottom: 12px;">
-                <p style="font-size: 12px; line-height: 24px; margin: 16px 0; text-align: center; color: rgb(64, 64, 64);">
-                  ${unsubscribeText}
-                  <a href="${withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId)}">${updatePreferencesText}</a>.
-                </p>
-              </td>
-            </tr>
-          </tbody>
-        </table>`;
+          return unsubscribeFooterHtml(
+            footerParagraph({
+              language: resolveContactLanguage(locale, project.language),
+              projectName: project.name,
+              href: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
+              footers,
+            }),
+          );
         })()
       : '';
 

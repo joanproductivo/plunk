@@ -2,6 +2,7 @@ import type {Contact, Project} from '@plunk/db';
 import {joinEmailMarkers, toEmailBrand} from '@plunk/shared';
 import {describe, expect, it} from 'vitest';
 
+import {bodyHasListManagementLink} from '../EmailHeaderService';
 import {EmailService} from '../EmailService';
 import {factories} from '../../../../../test/helpers';
 
@@ -87,5 +88,38 @@ describe('EmailService.compile — brands', () => {
 
       expect(html.indexOf('unsubscribe/contact-1')).toBeGreaterThan(html.indexOf('After'));
     }
+  });
+});
+
+describe('EmailService.compile — project footers', () => {
+  const footers = {
+    es: {text: 'Recibes esto de {projectName}.\nCalle Mayor 1, Madrid. Para irte, {link}.', linkText: 'date de baja'},
+  };
+  const withLocale = (locale: unknown) => ({...contact, data: {locale}}) as unknown as Contact;
+  const spanish = {...project, language: 'es'} as Project;
+
+  it("uses the project's own footer in the contact's language, with its link", () => {
+    const html = EmailService.compile({content: '<p>Hola</p>', contact: withLocale('es-ES'), project, footers});
+
+    expect(html).toContain('Recibes esto de Acme.<br>Calle Mayor 1, Madrid. Para irte, <a href="');
+    expect(html).toMatch(/unsubscribe\/contact-1[^"]*">date de baja<\/a>\./);
+    expect(bodyHasListManagementLink(html, 'contact-1')).toBe(true);
+  });
+
+  it("gives other languages Plunk's footer, and a hostile locale the project's language", () => {
+    expect(
+      EmailService.compile({content: '<p>Hi</p>', contact: withLocale('de'), project: spanish, footers}),
+    ).toContain('aktualisieren Sie Ihre Einstellungen');
+    for (const locale of ['constructor', '__proto__', 42]) {
+      expect(
+        EmailService.compile({content: '<p>Hi</p>', contact: withLocale(locale), project: spanish, footers}),
+      ).toContain('Recibes esto de Acme.');
+    }
+  });
+
+  it('leaves the footer as it always was without footers of its own', () => {
+    const html = EmailService.compile({content: '<p>Hi</p>', contact, project});
+
+    expect(html).toContain('receive emails from Acme');
   });
 });

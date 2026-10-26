@@ -12,6 +12,7 @@ export * from './emailFonts.js';
 export * from './emailProseCss.js';
 export {escapeHtml} from './html.js';
 export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
+export * from './unsubscribeFooter.js';
 
 /** A template parsed once and ready to be rendered against many recipients. */
 export interface CompiledTemplate {

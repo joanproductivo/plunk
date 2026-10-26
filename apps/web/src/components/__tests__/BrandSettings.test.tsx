@@ -18,13 +18,14 @@ const STORED: ProjectBrand = {...BRAND_DEFAULTS, textColor: '#222222', button: B
 
 let root: Root;
 let container: HTMLDivElement;
-const fetcher = vi.fn(async (): Promise<ProjectBrand> => STORED);
+// The project's footers come from their own URL; this project has none of its own
+const fetcher = vi.fn(async (url: string): Promise<unknown> => (url.endsWith('/footers') ? {} : STORED));
 
 async function render(canEdit: boolean) {
   await act(async () => {
     root.render(
       <SWRConfig value={{fetcher, provider: () => new Map(), dedupingInterval: 0}}>
-        <BrandSettings projectId="project-1" canEdit={canEdit} />
+        <BrandSettings projectId="project-1" projectName="Acme" language="es" canEdit={canEdit} />
       </SWRConfig>,
     );
   });
@@ -50,6 +51,7 @@ describe('BrandSettings', () => {
     await render(true);
 
     expect(fetcher).toHaveBeenCalledWith('/projects/project-1/brand');
+    expect(fetcher).toHaveBeenCalledWith('/projects/project-1/footers');
     expect(document.querySelector<HTMLInputElement>('#brand-text')!.value).toBe('#222222');
     expect(document.querySelector('iframe')!.getAttribute('srcdoc')).toContain('color: #222222;');
   });
@@ -72,17 +74,19 @@ describe('BrandSettings', () => {
     expect(toast.success).toHaveBeenCalledWith('Brand saved');
   });
 
-  it('shows the unsubscribe footer in the preview of a framed brand', async () => {
-    vi.mocked(network.fetch).mockResolvedValueOnce(STORED);
+  it("shows the unsubscribe footer as sent, in the project's language, framed or not", async () => {
     await render(true);
+    const preview = () => document.querySelector('iframe')!.getAttribute('srcdoc')!;
+
+    expect(preview()).toContain('aceptaste recibir correos electrónicos de Acme');
+    expect(preview()).toContain('actualiza tus preferencias</a>.');
 
     await act(async () => {
       document.querySelector<HTMLButtonElement>('#brand-has-background')!.click();
     });
 
-    const preview = document.querySelector('iframe')!.getAttribute('srcdoc')!;
-    expect(preview).toContain('Update your preferences');
-    expect(preview).not.toContain('plunk:footer');
+    expect(preview()).toContain('actualiza tus preferencias</a>.');
+    expect(preview()).not.toContain('plunk:footer');
   });
 
   it('does not offer saving to members who are not admins', async () => {

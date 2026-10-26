@@ -50,6 +50,7 @@ import {useRouter} from 'next/router';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {BrandSettings} from '../../components/BrandSettings';
 import {DomainsSettings} from '../../components/DomainsSettings';
+import {FooterSettings} from '../../components/FooterSettings';
 import {BillingLimits} from '../../components/BillingLimits';
 import {BillingConsumption} from '../../components/BillingConsumption';
 import {BillingInvoices} from '../../components/BillingInvoices';
@@ -826,7 +827,20 @@ export default function Settings() {
 
             {/* Brand Tab */}
             <TabsContent value="brand">
-              <BrandSettings projectId={activeProject.id} canEdit={currentUserRole !== 'MEMBER'} />
+              <div className="space-y-6">
+                <BrandSettings
+                  projectId={activeProject.id}
+                  projectName={activeProject.name}
+                  language={activeProject.language}
+                  canEdit={currentUserRole !== 'MEMBER'}
+                />
+                <FooterSettings
+                  projectId={activeProject.id}
+                  projectName={activeProject.name}
+                  language={activeProject.language}
+                  canEdit={currentUserRole !== 'MEMBER'}
+                />
+              </div>
             </TabsContent>
 
             {/* Domains Tab */}

@@ -87,7 +87,7 @@ export function detectCustomHtmlPatterns(html: string): boolean {
 }
 
 /** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
-export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
+const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
 
 /** The rounding of a framed email's column, in px. Outlook for Windows ignores it and squares it. */
 export const EMAIL_COLUMN_RADIUS = 12;
@@ -159,4 +159,23 @@ export function emailDocument(htmlBody: string, brand: EmailBrand = BRAND_DEFAUL
   </table>
 </body>
 </html>`;
+}
+
+/**
+ * Places the footer (unsubscribe link and badge) in a framed email's slot, so it sits on the
+ * email's background, or else before the last closing body tag, or at the end. The slot is only
+ * looked for in documents framed here, after their content: contact data in the body cannot
+ * move the footer. An earlier </body> can come from contact data inside the hidden preheader.
+ */
+export function insertFooter(html: string, footer: string, framed: boolean): string {
+  const slot = framed ? html.lastIndexOf(EMAIL_FOOTER_SLOT) : -1;
+  if (slot !== -1) {
+    return `${html.slice(0, slot)}${footer}${html.slice(slot + EMAIL_FOOTER_SLOT.length)}`;
+  }
+
+  const bodyEnd = html.lastIndexOf('</body>');
+  if (bodyEnd !== -1) {
+    return `${html.slice(0, bodyEnd)}${footer}${html.slice(bodyEnd)}`;
+  }
+  return `${html}${footer}`;
 }

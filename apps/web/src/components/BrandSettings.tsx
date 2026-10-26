@@ -1,10 +1,12 @@
 import {
   type BrandSchemas,
   buttonStyle,
-  EMAIL_FOOTER_SLOT,
+  footerParagraph,
   isFramedBrand,
   normalizeHexColor,
   type ProjectBrand,
+  type ProjectFooters,
+  resolveContactLanguage,
   toProjectBrand,
 } from '@plunk/shared';
 import {Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Checkbox, Label} from '@plunk/ui';
@@ -12,29 +14,36 @@ import {useState} from 'react';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 
-import {wrapEmailWithStyles} from '../lib/emailStyles';
+import {wrapEmailWithFooter} from '../lib/emailStyles';
 import {network} from '../lib/network';
+
 import {ColorField, FontSelect, OptionSelect} from './EmailEditor/BlockFields';
 import {ButtonStyleFields} from './EmailEditor/ButtonDialog';
 import {brandUrl} from './EmailEditor/useEmailBrand';
+import {footersUrl} from './FooterSettings';
 
 const FULL_WIDTH = 'full';
 const WIDTHS = {[FULL_WIDTH]: 'Full width', '560': '560 px', '600': '600 px', '640': '640 px'};
 
 // What the preview shows: each style the brand sets, once
-// Like the unsubscribe footer the API adds (EmailService.compile), so its legibility shows
-const SAMPLE_FOOTER =
-  '<hr style="border: none; border-top: 1px solid #eaeaea; margin: 12px 0;">' +
-  '<p style="font-size: 12px; line-height: 24px; margin: 16px 0; text-align: center; color: rgb(64, 64, 64);">' +
-  'You received this email from Your project. <a href="#">Update your preferences</a>.</p>';
-
 const sample = (brand: ProjectBrand) =>
   '<h1>Your weekly update</h1><p>Hi Ana, here is <strong>what changed</strong> this week and ' +
   '<a href="#">what comes next</a>.</p><h2>Highlights</h2><ul><li><p>A new look for every email</p></li></ul>' +
   `<p style="text-align: center;"><a class="email-button" href="#" style="${buttonStyle(brand.button)}">Read more</a></p>`;
 
-export function BrandSettings({projectId, canEdit}: {projectId: string; canEdit: boolean}) {
+interface BrandSettingsProps {
+  projectId: string;
+  /** The project's name and language, for the preview's unsubscribe footer. */
+  projectName: string;
+  language: string;
+  canEdit: boolean;
+}
+
+export function BrandSettings({projectId, projectName, language, canEdit}: BrandSettingsProps) {
   const {data, error} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
+  // The footer the project's emails end with, in its language: its own text or Plunk's
+  const {data: footers} = useSWR<ProjectFooters>(footersUrl(projectId), {revalidateOnFocus: false});
+  const footer = footerParagraph({language: resolveContactLanguage(null, language), projectName, href: '#', footers});
 
   return (
     <Card>
@@ -46,23 +55,34 @@ export function BrandSettings({projectId, canEdit}: {projectId: string; canEdit:
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {error ? (
+        {data ? (
+          // Mounted once the brand loads, so the form starts from it, and again for another project
+          <BrandForm key={projectId} projectId={projectId} footer={footer} canEdit={canEdit} initial={data} />
+        ) : error ? (
           <p className="text-sm text-red-700">{error instanceof Error ? error.message : String(error)}</p>
-        ) : !data ? (
-          <p className="text-sm text-neutral-500">Loading…</p>
         ) : (
-          // Mounted once the brand loads, so the form starts from it
-          <BrandForm projectId={projectId} canEdit={canEdit} initial={data} />
+          <p className="text-sm text-neutral-500">Loading…</p>
         )}
       </CardContent>
     </Card>
   );
 }
 
-function BrandForm({projectId, canEdit, initial}: {projectId: string; canEdit: boolean; initial: ProjectBrand}) {
+function BrandForm({
+  projectId,
+  footer,
+  canEdit,
+  initial,
+}: {
+  projectId: string;
+  /** The HTML inside the preview's unsubscribe footer. */
+  footer: string;
+  canEdit: boolean;
+  initial: ProjectBrand;
+}) {
   const [brand, setBrand] = useState(initial);
   const [saving, setSaving] = useState(false);
-  const {mutate} = useSWR<ProjectBrand>(brandUrl(projectId));
+  const {mutate} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
 
   const set = <K extends keyof ProjectBrand>(key: K, value: ProjectBrand[K]) =>
     setBrand(prev => ({...prev, [key]: value}));
@@ -181,7 +201,7 @@ function BrandForm({projectId, canEdit, initial}: {projectId: string; canEdit: b
         <iframe
           title="Brand preview"
           sandbox=""
-          srcDoc={wrapEmailWithStyles(sample(brand), toProjectBrand(brand)).replace(EMAIL_FOOTER_SLOT, SAMPLE_FOOTER)}
+          srcDoc={wrapEmailWithFooter(sample(brand), toProjectBrand(brand), footer)}
           className="h-[480px] w-full rounded border border-neutral-200 bg-white"
         />
       </div>
