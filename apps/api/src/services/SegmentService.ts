@@ -16,8 +16,20 @@ export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
 
 /** Campaigns in these states still send to their segment, so it cannot be deleted. */
 const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = ['DRAFT', 'SCHEDULED', 'SENDING'];
-/** Most blocked segments a refused bulk delete names; the rest are counted. */
+/** Most blocked segments a refused bulk delete names, and most workflows it names for each one. */
 const MAX_BLOCKED_SEGMENTS_LISTED = 5;
+const MAX_BLOCKING_WORKFLOWS_LISTED = 3;
+/** The cascade over a big static segment's memberships can outlast Prisma's 5 s default. */
+const BULK_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
+
+/** `"A", "B", "C"`, or `"A", "B" and 3 more` past `max` names. */
+function listNames(names: string[], max: number): string {
+  const shown = names
+    .slice(0, max)
+    .map(name => `"${name}"`)
+    .join(', ');
+  return names.length > max ? `${shown} and ${names.length - max} more` : shown;
+}
 
 export class SegmentService {
   /**
@@ -306,9 +318,14 @@ export class SegmentService {
     }
 
     const {deleted, projectName} = await prisma.$transaction(async tx => {
+      // Locks the rows first, so a campaign pointed at one of them meanwhile either is seen by the
+      // check below or waits and then fails on its foreign key; a concurrent bulk delete of the
+      // same segments waits too and then finds them gone.
+      await tx.$queryRaw`SELECT 1 FROM segments WHERE id IN (${Prisma.join(ids)}) AND "projectId" = ${projectId} FOR UPDATE`;
       const segments = await tx.segment.findMany({
         where: {id: {in: ids}, projectId},
         select: {id: true, name: true, project: {select: {name: true}}},
+        orderBy: {name: 'asc'},
       });
       if (segments.length !== ids.length) {
         throw new HttpException(404, 'One or more segments not found in this project');
@@ -319,7 +336,9 @@ export class SegmentService {
         const blocker = blockers.get(segment.id);
         const uses = [
           blocker?.campaigns ? `${blocker.campaigns} active campaign(s)` : null,
-          blocker?.workflows.length ? `the workflow(s) ${blocker.workflows.map(name => `"${name}"`).join(', ')}` : null,
+          blocker?.workflows.length
+            ? `the workflow(s) ${listNames(blocker.workflows, MAX_BLOCKING_WORKFLOWS_LISTED)}`
+            : null,
         ].filter(Boolean);
         return uses.length > 0 ? [`"${segment.name}" is used by ${uses.join(' and ')}`] : [];
       });
@@ -332,13 +351,19 @@ export class SegmentService {
         );
       }
 
-      await tx.segment.deleteMany({where: {id: {in: ids}, projectId}});
+      const {count} = await tx.segment.deleteMany({where: {id: {in: ids}, projectId}});
+      if (count !== segments.length) {
+        throw new HttpException(
+          409,
+          'The segments changed while they were being deleted. Nothing was deleted; try again.',
+        );
+      }
       return {deleted: segments, projectName: segments[0]!.project.name};
-    });
+    }, BULK_DELETE_TRANSACTION);
 
-    for (const segment of deleted) {
-      await NtfyService.notifySegmentDeleted(segment.name, projectName, projectId);
-    }
+    await Promise.allSettled(
+      deleted.map(segment => NtfyService.notifySegmentDeleted(segment.name, projectName, projectId)),
+    );
 
     return {deleted: deleted.length};
   }
@@ -366,7 +391,7 @@ export class SegmentService {
 
     const campaigns = await db.campaign.groupBy({
       by: ['segmentId'],
-      where: {segmentId: {in: segmentIds}, status: {in: ACTIVE_CAMPAIGN_STATUSES}},
+      where: {projectId, segmentId: {in: segmentIds}, status: {in: ACTIVE_CAMPAIGN_STATUSES}},
       _count: {_all: true},
     });
     for (const {segmentId, _count} of campaigns) {

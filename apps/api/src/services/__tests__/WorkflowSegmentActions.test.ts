@@ -1,4 +1,4 @@
-import {WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
+import {CampaignStatus, WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -9,7 +9,8 @@ import {WorkflowService} from '../WorkflowService';
 
 /**
  * Segments in workflows: an Update contact step that removes from and adds to static segments,
- * a Condition on `segment.<id>`, and the guard against deleting a segment a step uses.
+ * a Condition on `segment.<id>`, and the guards against deleting segments (one or several at once)
+ * that a step or an active campaign uses.
  */
 describe('Workflow segment actions', () => {
   const prisma = getPrismaClient();
@@ -383,7 +384,8 @@ describe('Workflow segment actions', () => {
           ],
           [['trigger', 'check']],
         );
-        await factories.createCampaign({projectId, segmentId: sent.id});
+        await factories.createCampaign({projectId, segmentId: sent.id, status: CampaignStatus.DRAFT});
+        await factories.createCampaign({projectId, segmentId: sent.id, status: CampaignStatus.SENT});
         const ids = [added.id, removed.id, checked.id, sent.id, unused.id];
 
         const refusal = SegmentService.bulkUpdate(projectId, {ids, delete: true});
@@ -402,12 +404,29 @@ describe('Workflow segment actions', () => {
       it('names five blocked segments and counts the rest', async () => {
         const segments = await Promise.all(Array.from({length: 7}, (_, n) => staticSegment(`Blocked ${n}`, false)));
         for (const segment of segments) {
-          await factories.createCampaign({projectId, segmentId: segment.id});
+          await factories.createCampaign({projectId, segmentId: segment.id, status: CampaignStatus.DRAFT});
         }
 
         await expect(
           SegmentService.bulkUpdate(projectId, {ids: segments.map(s => s.id), delete: true}),
         ).rejects.toMatchObject({code: 409, message: expect.stringContaining('; and 2 more.')});
+      });
+
+      it('names three of the workflows that use a segment and counts the rest', async () => {
+        const busy = await staticSegment('Busy', false);
+        for (const name of ['W1', 'W2', 'W3', 'W4']) {
+          await workflow(
+            name,
+            'test.start',
+            [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [busy.id]}}}],
+            [['trigger', 'add']],
+          );
+        }
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids: [busy.id], delete: true})).rejects.toMatchObject({
+          code: 409,
+          message: expect.stringContaining('the workflow(s) "W1", "W2", "W3" and 1 more'),
+        });
       });
 
       it('deletes none when one is not in the project', async () => {

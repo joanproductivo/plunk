@@ -1,6 +1,6 @@
 import {Badge, Button, Card, CardContent, Checkbox, ConfirmDialog, EmptyState, IconSpinner} from '@plunk/ui';
 import type {Segment} from '@plunk/db';
-import type {SegmentSchemas} from '@plunk/shared';
+import {SEGMENTS_BULK_MAX, type SegmentSchemas} from '@plunk/shared';
 import {
   getCoreRowModel,
   getSortedRowModel,
@@ -52,9 +52,6 @@ const DEFAULT_COLUMN_VISIBILITY: VisibilityState = {
   updatedAt: true,
   actions: true,
 };
-
-/** Most segments one bulk delete accepts (`SegmentSchemas.bulkUpdate`). */
-const MAX_BULK_DELETE = 1000;
 
 const TYPE_OPTIONS = [
   {value: 'DYNAMIC', label: 'Dynamic'},
@@ -149,8 +146,8 @@ export default function SegmentsPage() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (selectedIds.length > MAX_BULK_DELETE) {
-      toast.error(`Select at most ${MAX_BULK_DELETE.toLocaleString()} segments to delete at once.`);
+    if (selectedIds.length > SEGMENTS_BULK_MAX) {
+      toast.error(`Select at most ${SEGMENTS_BULK_MAX.toLocaleString()} segments to delete at once.`);
       return;
     }
     setBulkDeleteStatus('loading');
@@ -165,8 +162,10 @@ export default function SegmentsPage() {
       setRowSelection({});
       void mutate();
     } catch (error) {
-      // The selection stays, so the user can untick what the message names and try again.
+      // The selection stays, so the user can untick what the message names and try again; the
+      // refresh drops segments deleted elsewhere, which would otherwise fail every retry.
       toast.error(error instanceof Error ? error.message : 'Couldn’t delete those segments. Try again.');
+      void mutate();
     } finally {
       // ConfirmDialog closes itself after onConfirm resolves.
       setBulkDeleteStatus('idle');
@@ -292,8 +291,9 @@ export default function SegmentsPage() {
         cell: ({row}) => <div className="flex justify-end">{deleteButton(row.original)}</div>,
       },
     ],
-    // `shiftSelect` comes from the table these columns build. The table instance and the hook's refs
-    // never change, so an earlier render's handlers stay valid (as on the templates page).
+    // `shiftSelect` (from the table these columns build) and `deleteButton` only use the table
+    // instance, the hook's refs and state setters, which never change, so an earlier render's
+    // handlers stay valid (as on the templates page).
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [segmentNames],
   );

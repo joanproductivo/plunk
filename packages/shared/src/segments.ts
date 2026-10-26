@@ -17,6 +17,9 @@ export function slugifySegmentName(name: string): string {
 /** Most emails one call to the static segment members endpoints takes */
 export const SEGMENT_MEMBERS_MAX = 500;
 
+/** Most segments one call to the segments bulk-update endpoint takes */
+export const SEGMENTS_BULK_MAX = 1000;
+
 /**
  * Name of the event fired when a contact enters or leaves a segment that tracks membership.
  * Example: ("VIP Customers", "entry") -> "segment.vip-customers.entry"
