@@ -55,15 +55,48 @@ describe('ImportSegmentResolver', () => {
 
     it('keeps an existing name that contains a semicolon in one piece', () => {
       const known = new Set([segmentKey('A; B')]);
-      expect(splitSegmentCell('A; B; C', key => known.has(key), 2)).toEqual(['A; B', 'C']);
+      expect(splitSegmentCell('A; B; C', key => known.has(key), {';': 2})).toEqual(['A; B', 'C']);
     });
 
     it('splits a cell of thousands of separators quickly', () => {
       const cell = Array.from({length: 5000}, (_, n) => `S${n}`).join(';');
       const started = Date.now();
 
-      expect(splitSegmentCell(cell, () => false, 3)).toHaveLength(5000);
+      expect(splitSegmentCell(cell, () => false, {';': 3})).toHaveLength(5000);
+      expect(splitSegmentCell(cell.replaceAll(';', ','), () => false, {',': 3})).toHaveLength(5000);
       expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it('splits a cell of thousands of commas quickly, whatever names with commas exist', () => {
+      const cell = Array.from({length: 100_000}, () => 'a').join(',');
+      const started = Date.now();
+
+      expect(splitSegmentCell(cell, () => false, {',': 50})).toEqual(['a']);
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it('reads a cell from the contacts export on semicolons only', () => {
+      expect(splitSegmentCell('Ventas, 2024', () => false, {}, false)).toEqual(['Ventas, 2024']);
+      expect(splitSegmentCell('Club; Ventas, 2024', () => false, {}, false)).toEqual(['Club', 'Ventas, 2024']);
+    });
+
+    it('splits on commas when the cell has no semicolon, as Flodesk exports it', () => {
+      expect(splitSegmentCell('Club, Ventas, Newsletter', () => false)).toEqual(['Club', 'Ventas', 'Newsletter']);
+    });
+
+    it('splits on semicolons only when the cell has one', () => {
+      expect(splitSegmentCell('Otro; Ventas, 2024', () => false, {',': 2})).toEqual(['Otro', 'Ventas, 2024']);
+    });
+
+    it('keeps an existing name that contains a comma in one piece', () => {
+      const known = new Set([segmentKey('Ventas, 2024')]);
+      expect(splitSegmentCell('Club, Ventas, 2024, VIP', key => known.has(key), {',': 2})).toEqual([
+        'Club',
+        'Ventas, 2024',
+        'VIP',
+      ]);
+      // Without the name in the project, the comma splits it (the cell has no `;`)
+      expect(splitSegmentCell('Club, Ventas, 2024', () => false, {',': 2})).toEqual(['Club', 'Ventas', '2024']);
     });
   });
 
@@ -218,6 +251,15 @@ describe('ImportSegmentResolver', () => {
 
     expect(await activeMembers(ab.id)).toEqual(['ana@example.com']);
     expect(resolver.segmentsCreated).toEqual(['C']);
+  });
+
+  it('keeps an existing name with a comma whole in a comma-separated cell', async () => {
+    const sales = await SegmentService.create(projectId, {name: 'Ventas, 2024', type: 'STATIC'});
+
+    const resolver = await assign([await rowFor('ana@example.com', 'Club, Ventas, 2024')]);
+
+    expect(await activeMembers(sales.id)).toEqual(['ana@example.com']);
+    expect(resolver.segmentsCreated).toEqual(['Club']);
   });
 
   it('ignores segments of another project with the same name', async () => {
