@@ -1,5 +1,5 @@
 import {Controller, Get, Middleware, Put} from '@overnightjs/core';
-import {UtilitySchemas} from '@plunk/shared';
+import {BrandSchemas, UtilitySchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
 
 import {ErrorCode, HttpException} from '../exceptions/index.js';
@@ -44,12 +44,13 @@ export class Brand {
       throw new HttpException(403, "A project's brand can only be changed in the dashboard", ErrorCode.FORBIDDEN);
     }
     const {id} = UtilitySchemas.id.parse(req.params);
-    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    const body = BrandSchemas.update.safeParse(req.body);
+    if (!body.success) {
       throw new HttpException(400, 'The brand must be an object', ErrorCode.INVALID_REQUEST_BODY);
     }
 
     await MembershipService.requireAdminAccess(auth.userId!, id);
 
-    return res.status(200).json(await BrandService.save(id, req.body));
+    return res.status(200).json(await BrandService.save(id, body.data));
   }
 }

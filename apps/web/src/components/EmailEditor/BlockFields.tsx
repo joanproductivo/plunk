@@ -1,4 +1,4 @@
-import {normalizeHexColor} from '@plunk/shared';
+import {EMAIL_FONTS, type EmailFont, normalizeHexColor} from '@plunk/shared';
 import {Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@plunk/ui';
 import type {CSSProperties} from 'react';
 
@@ -50,5 +50,33 @@ export function ColorField(props: {id: string; label: string; value: string; onC
       </div>
       {!valid && <p className="mt-1 text-xs text-red-700">Use a hex color such as #e11d48.</p>}
     </div>
+  );
+}
+
+const FONTS: Record<EmailFont, string> = {
+  'modern-sans': 'Modern sans',
+  'geometric-sans': 'Geometric sans',
+  'rounded-sans': 'Rounded sans',
+  'modern-serif': 'Modern serif',
+  'book-serif': 'Book serif',
+  'monospace': 'Monospace',
+};
+// No font of its own, which `ownFont` names: the email's font for a button, the system's for a brand
+const OWN_FONT = 'own';
+
+export function FontSelect(props: {
+  label: string;
+  value: EmailFont | null;
+  ownFont: string;
+  onChange: (value: EmailFont | null) => void;
+}) {
+  return (
+    <OptionSelect<EmailFont | typeof OWN_FONT>
+      label={props.label}
+      value={props.value ?? OWN_FONT}
+      options={{[OWN_FONT]: props.ownFont, ...FONTS}}
+      onChange={value => props.onChange(value === OWN_FONT ? null : value)}
+      optionStyle={value => ({fontFamily: value === OWN_FONT ? undefined : EMAIL_FONTS[value]})}
+    />
   );
 }
