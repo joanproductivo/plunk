@@ -185,9 +185,13 @@ export function subscribeSuggestionOpen(listener: (open: boolean) => void): () =
 /**
  * Tippy plumbing shared by the editor's suggestion triggers: positioning, keeping the
  * popup pinned while the editor scrolls, and teardown. Only the list rendering differs
- * between triggers, so that is all a caller supplies.
+ * between triggers, so that is all a caller supplies. `holdsValidation: false` keeps a
+ * menu out of the open-menu count, for menus whose query is never Liquid.
  */
-export function createSuggestionRenderer(createList: (props: SuggestionProps) => SuggestionListView) {
+export function createSuggestionRenderer(
+  createList: (props: SuggestionProps) => SuggestionListView,
+  {holdsValidation = true}: {holdsValidation?: boolean} = {},
+) {
   return () => {
     let component: SuggestionListView;
     let popup: TippyInstance[];
@@ -196,7 +200,7 @@ export function createSuggestionRenderer(createList: (props: SuggestionProps) =>
     return {
       onStart: (props: SuggestionProps) => {
         component = createList(props);
-        setMenuOpen(1);
+        if (holdsValidation) setMenuOpen(1);
 
         if (!props.clientRect) {
           return;
@@ -247,6 +251,12 @@ export function createSuggestionRenderer(createList: (props: SuggestionProps) =>
       },
 
       onKeyDown(props: {event: KeyboardEvent}) {
+        // A click elsewhere hides the popup without ending the suggestion; keys must not pick
+        // from a menu the author can no longer see
+        if (popup?.[0] && !popup[0].state.isVisible) {
+          return false;
+        }
+
         if (props.event.key === 'Escape') {
           popup?.[0]?.hide();
           return true;
@@ -256,7 +266,7 @@ export function createSuggestionRenderer(createList: (props: SuggestionProps) =>
       },
 
       onExit() {
-        setMenuOpen(-1);
+        if (holdsValidation) setMenuOpen(-1);
 
         if (scrollHandler) {
           const editorContainer = document.querySelector('.overflow-y-auto');

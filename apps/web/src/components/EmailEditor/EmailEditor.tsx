@@ -133,7 +133,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const {data: config} = useConfig();
   const canUploadImages = Boolean(config?.features.storage.s3Enabled);
-  // Read by the slash menu each time it opens, after the config has loaded
+  // Read by the slash menu as it updates, so it follows the config once loaded
   const canUploadImagesRef = useRef(canUploadImages);
   canUploadImagesRef.current = canUploadImages;
 
@@ -191,6 +191,9 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const button = useBlockDialog<ButtonAttrs>(editor, 'button');
 
+  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
+  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
+
   // The slash menu's image row opens the same dialog as the toolbar
   useEffect(() => {
     if (!editor) return;
@@ -202,8 +205,6 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       editor.off('newBlock', add);
     };
   }, [editor]);
-  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
-  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -1011,7 +1012,6 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           outline: none;
         }
 
-        .ProseMirror p.is-editor-empty:first-child::before,
         .ProseMirror p.is-empty::before {
           color: #9ca3af;
           content: attr(data-placeholder);

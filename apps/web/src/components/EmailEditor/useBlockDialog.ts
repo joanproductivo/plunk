@@ -63,8 +63,8 @@ export interface BlockDialogProps<Attrs> {
  * Wires a block's dialog to an editor. The toolbar edits the selected block of `type`; with none
  * selected, it inserts one with its defaults (`insertDirectly`, for blocks that need nothing
  * filled in) or opens the dialog to fill in a new one, as it does when the slash menu asks for
- * one (`newBlock`). Double-clicking a block of `type` opens the dialog for it. New blocks go after the
- * selection (see insertBlock).
+ * one (`newBlock`). Double-clicking a block of `type` opens the dialog for it. New blocks go
+ * after the selection (see insertBlockAfterSelection).
  */
 export function useBlockDialog<Attrs extends object>(editor: Editor | null, type: string, insertDirectly = false) {
   // The dialog edits the block at `pos`, or fills in a new one when it is null
@@ -75,7 +75,7 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
     const edit = ({pos}: {pos: number}) => {
       if (editor.state.doc.nodeAt(pos)?.type.name === type) setState({open: true, pos});
     };
-    // Blocks inserted straight away need no dialog; the slash menu inserts those itself
+    // A new block asked for outside the toolbar (the slash menu only asks for blocks that need a dialog)
     const add = ({type: asked}: {type: string}) => {
       if (asked === type) setState({open: true, pos: null});
     };

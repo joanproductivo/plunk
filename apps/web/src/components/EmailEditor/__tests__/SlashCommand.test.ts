@@ -8,7 +8,7 @@ import {EmailButton} from '../EmailButton';
 import {EmailDivider} from '../EmailDivider';
 import {EmailSpacer} from '../EmailSpacer';
 import {LogicMention} from '../LogicMention';
-import {SlashCommand, slashItems} from '../SlashCommand';
+import {SlashCommand, SlashCommandPluginKey, slashItems} from '../SlashCommand';
 import {subscribeSuggestionOpen} from '../suggestionPopup';
 import {VariableMention} from '../VariableMention';
 
@@ -59,14 +59,16 @@ function press(key: string): boolean {
 // Suggestion items resolve asynchronously
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
-// Whether a suggestion menu is open, as the editor's Liquid check sees it
+// Whether a menu that holds back the Liquid check is open (the {{ and {% ones)
 let menuOpen = false;
 subscribeSuggestionOpen(open => (menuOpen = open));
+
+const slashOpen = () => Boolean(SlashCommandPluginKey.getState(editor.state)?.active);
 
 async function pick(query: string) {
   type(`/${query}`);
   await tick();
-  expect(menuOpen).toBe(true);
+  expect(slashOpen()).toBe(true);
   press('Enter');
 }
 
@@ -101,24 +103,37 @@ describe('slashItems', () => {
     createEditor('<p></p>');
 
     expect(labels('line')).toEqual(['Divider']);
-    // Names or aliases starting with "h" first ("hr"), then any containing it ("photo", "show or hide")
-    expect(labels('h')).toEqual(['Heading 1', 'Heading 2', 'Heading 3', 'Divider', 'Image', 'Show or hide content']);
+    // Short queries only match the start of a name or alias ("hr")
+    expect(labels('h')).toEqual(['Heading 1', 'Heading 2', 'Heading 3', 'Divider']);
+    expect(labels('or')).toEqual([]);
+    // Longer ones also match inside, after those that start with them
+    expect(labels('ote')).toEqual(['Quote']);
     expect(labels('zzz')).toEqual([]);
   });
 
   it('only offers rows that apply where it is opened', () => {
+    // Inside lists and quotes only rows that change text, without taking the item out of its list
     createEditor('<ul><li><p>a</p></li></ul>');
+    expect(labels()).toEqual(['Numbered list', 'Variable', 'Show or hide content']);
+
+    createEditor('<ol><li><p>a</p></li></ol>');
+    expect(labels()).toEqual(['Bulleted list', 'Variable', 'Show or hide content']);
+
+    createEditor('<blockquote><p>a</p></blockquote>');
     expect(labels()).toEqual([
       'Heading 1',
       'Heading 2',
       'Heading 3',
+      'Bulleted list',
       'Numbered list',
-      'Quote',
       'Variable',
       'Show or hide content',
     ]);
 
+    // Not the heading it already is, and Text to turn it back
     createEditor('<h2>a</h2>');
+    expect(labels()).not.toContain('Heading 2');
+    expect(labels()).toContain('Heading 1');
     expect(labels()).toContain('Text');
 
     images = false;
@@ -188,6 +203,26 @@ describe('SlashCommand', () => {
     expect(editor.getHTML()).toBe('<p></p>');
   });
 
+  it('does not hold back the Liquid check while it is open, as what follows a slash is not Liquid', async () => {
+    createEditor('<p></p>');
+    type('24 /7');
+    await tick();
+
+    expect(slashOpen()).toBe(true);
+    expect(menuOpen).toBe(false);
+  });
+
+  it('does not pick from a menu a click has hidden', async () => {
+    createEditor('<p></p>');
+    type('a /div');
+    await tick();
+
+    document.body.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+    press('Enter');
+
+    expect(editor.getHTML()).not.toContain('<hr>');
+  });
+
   it('hands over to the {{ and {% menus by writing their trigger', async () => {
     createEditor('<p></p>');
     await pick('variable');
@@ -207,7 +242,7 @@ describe('SlashCommand', () => {
       createEditor(content);
       type(typed);
       await tick();
-      return menuOpen;
+      return slashOpen();
     };
 
     expect(await opens('<p></p>', '/')).toBe(true);
