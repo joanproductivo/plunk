@@ -662,3 +662,27 @@ export const FooterSchemas = {
     'The footers must be an object',
   ),
 } as const;
+
+/** How many addresses a project's failure alerts can go to (Plunk Lite) */
+export const ALERT_RECIPIENTS_MAX = 10;
+
+/** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
+export const FAILURE_ALERTS_OPEN_MAX = 20;
+
+export const AlertSchemas = {
+  // An empty list turns the alert emails off; the dashboard banner stays.
+  settings: z.object({
+    recipients: z
+      .array(z.string().trim().toLowerCase().email())
+      .max(ALERT_RECIPIENTS_MAX, `At most ${ALERT_RECIPIENTS_MAX} addresses`),
+    fromEmail: z.string().trim().toLowerCase().email().optional(),
+    fromName: z.string().trim().max(100).optional(),
+  }),
+  // The failures the banner showed, each with the last failure it saw
+  review: z.object({
+    seen: z
+      .array(z.object({id: uuid, lastAt: z.string().datetime()}))
+      .min(1)
+      .max(FAILURE_ALERTS_OPEN_MAX),
+  }),
+} as const;

@@ -6,6 +6,7 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
@@ -745,6 +746,12 @@ export class SecurityService {
         signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
       }
 
+      await FailureAlertService.record(projectId, {
+        sourceKey: 'project',
+        label: 'Project disabled',
+        error: status.violations.join('; '),
+      });
+
       // Send urgent notification about project suspension
       await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, status.violations);
 
@@ -1041,6 +1048,8 @@ ${strippedBody.substring(0, 2000)}`,
       } catch (error) {
         signale.error(`[PHISHING] Failed to cancel pending jobs for project ${projectId}:`, error);
       }
+
+      await FailureAlertService.record(projectId, {sourceKey: 'project', label: 'Project disabled', error: violation});
 
       // Send urgent notification about project suspension
       await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, [violation]);

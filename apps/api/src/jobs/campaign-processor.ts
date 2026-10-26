@@ -8,6 +8,7 @@ import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {CampaignService} from '../services/CampaignService.js';
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {campaignQueue} from '../services/QueueService.js';
 
 export function createCampaignWorker() {
@@ -34,6 +35,10 @@ export function createCampaignWorker() {
 
   worker.on('failed', (job, err) => {
     signale.error(`[CAMPAIGN-PROCESSOR] Job ${job?.id} failed:`, err.message);
+    // Out of attempts, the campaign stays SENDING with nothing left to move it on
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      void FailureAlertService.recordCampaignJob(job.data.campaignId, err.message);
+    }
   });
 
   worker.on('error', err => {
