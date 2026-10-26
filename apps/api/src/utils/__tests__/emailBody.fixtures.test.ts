@@ -1,4 +1,4 @@
-import {BUTTON_DEFAULTS, buttonStyle, spacerStyle} from '@plunk/shared';
+import {BUTTON_DEFAULTS, buttonStyle, joinEmailMarkers, spacerStyle, toEmailBrand} from '@plunk/shared';
 import {describe, expect, it} from 'vitest';
 
 import {renderBody} from '../emailBody.js';
@@ -35,6 +35,31 @@ describe('renderBody without a brand', () => {
   for (const [name, body] of Object.entries(FIXTURES)) {
     it(`sends "${name}" exactly as before brands`, async () => {
       await expect(renderBody(body)).toMatchFileSnapshot(`./__fixtures__/renderBody/${name}.html`);
+    });
+  }
+});
+
+/**
+ * Emails in a framed brand, kept as files from before editor boxes: sending boxes rearranges a
+ * framed column only when it holds a full-width one, so these must keep going out the same.
+ */
+const FOOTER = '<p style="font-size: 12px;">Unsubscribe from Acme.</p>';
+const BRANDED: Record<string, Parameters<typeof toEmailBrand>[0]> = {
+  'framed': {backgroundColor: '#f3f4f6', contentWidth: 600, font: 'book-serif', linkColor: '#0a7c3e'},
+  'framed-dark-column': {backgroundColor: '#111827', contentColor: '#1f2937', textColor: '#f9fafb'},
+};
+
+describe('renderBody in a framed brand', () => {
+  for (const [name, brand] of Object.entries(BRANDED)) {
+    it(`sends "${name}" as before editor boxes`, async () => {
+      const content = joinEmailMarkers({
+        preheader: 'Hi there',
+        brand: toEmailBrand(brand),
+        body: FIXTURES.text! + FIXTURES['lists-and-quote']! + FIXTURES.blocks!,
+      });
+      await expect(renderBody(content, undefined, FOOTER)).toMatchFileSnapshot(
+        `./__fixtures__/renderBody/branded-${name}.html`,
+      );
     });
   }
 });
