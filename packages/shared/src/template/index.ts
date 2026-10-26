@@ -10,6 +10,7 @@ export * from './emailButton.js';
 export * from './emailDocument.js';
 export * from './emailFonts.js';
 export * from './emailProseCss.js';
+export * from './emailVideo.js';
 export {escapeHtml} from './html.js';
 export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
 export * from './unsubscribeFooter.js';

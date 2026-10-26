@@ -11,7 +11,7 @@ import {declarations} from './inlineStyle.js';
  * Classes of the editor's own blocks. Telling visual editor content from custom HTML, they are
  * accepted only as they are, so look-alikes such as `email-button-primary` stay custom.
  */
-export const EDITOR_BLOCK_CLASSES: readonly string[] = ['email-button', 'email-spacer'];
+export const EDITOR_BLOCK_CLASSES: readonly string[] = ['email-button', 'email-spacer', 'email-video'];
 
 /** The option of `table` whose value is closest to `value`, for blocks whose HTML set another. */
 export function closestOption<K extends string>(table: Record<K, number>, value: number): K {

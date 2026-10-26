@@ -161,3 +161,48 @@ describe('detectCustomHtmlPatterns with editor spacers', () => {
     expect(detectCustomHtmlPatterns('<p>a</p><hr class="email-spacer-big" style="height: 32px;">')).toBe(true);
   });
 });
+
+describe('detectCustomHtmlPatterns with editor videos', () => {
+  const image =
+    '<img class="email-image" src="https://files.example.com/youtube-abc.jpg" alt="The video" width="1280" height="720" style="display: block; width: 100%; border-radius: 12px;">';
+  const video = (
+    inner = image,
+    href = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s',
+    className = 'email-video',
+  ) =>
+    `<p style="text-align: center;"><a class="${className}" href="${href}" style="text-decoration: none;">${inner}</a></p>`;
+
+  it('treats an editor video as visual editor content', () => {
+    expect(detectCustomHtmlPatterns(video())).toBe(false);
+    expect(detectCustomHtmlPatterns(video(image, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'))).toBe(false);
+  });
+
+  it('treats look-alike classes as custom, since only the editor video is matched', () => {
+    expect(detectCustomHtmlPatterns(video(image, undefined, 'email-video-big'))).toBe(true);
+  });
+
+  it.each([
+    ['a link that is not a watch page', 'https://example.com/watch?v=dQw4w9WgXcQ'],
+    ['a short link', 'https://youtu.be/dQw4w9WgXcQ'],
+    ['a Liquid link', '{{videoUrl}}'],
+  ])('treats a video with %s as custom', (_, href) => {
+    expect(detectCustomHtmlPatterns(video(image, href))).toBe(true);
+  });
+
+  it.each([
+    ['text besides the image', `${image} Watch now`],
+    ['two images', image + image],
+    ['no image', 'Watch now'],
+    ['an image without a source', '<img class="email-image" alt="x">'],
+    ['other markup', `<span>${image}</span>`],
+  ])('treats a video with %s as custom, since the editor would drop it', (_, inner) => {
+    expect(detectCustomHtmlPatterns(video(inner))).toBe(true);
+  });
+
+  it('reads a long run of videos quickly', () => {
+    const html = video().repeat(5_000);
+    const started = performance.now();
+    expect(detectCustomHtmlPatterns(html)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
