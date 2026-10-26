@@ -16,9 +16,12 @@ export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
 
 /** Campaigns in these states still send to their segment, so it cannot be deleted. */
 const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = ['DRAFT', 'SCHEDULED', 'SENDING'];
-/** Most blocked segments a refused bulk delete names, and most workflows it names for each one. */
+/**
+ * Most blocked segments a refused bulk delete names, and most workflows, segments or filtered
+ * campaigns a refused delete names for each one.
+ */
 const MAX_BLOCKED_SEGMENTS_LISTED = 5;
-const MAX_BLOCKING_WORKFLOWS_LISTED = 3;
+const MAX_BLOCKING_NAMES_LISTED = 3;
 /** The cascade over a big static segment's memberships can outlast Prisma's 5 s default. */
 const BULK_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
 
@@ -289,10 +292,24 @@ export class SegmentService {
       );
     }
 
+    if (blockers?.filteredCampaigns.length) {
+      throw new HttpException(
+        409,
+        `Cannot delete segment: the audience filter of the active campaign(s) ${listNames(blockers.filteredCampaigns, MAX_BLOCKING_NAMES_LISTED)} uses it. Remove it from their audience first or wait for them to complete.`,
+      );
+    }
+
     if (blockers?.workflows.length) {
       throw new HttpException(
         409,
         `Cannot delete segment: it is used by the workflow(s) ${blockers.workflows.map(name => `"${name}"`).join(', ')}. Remove it from their Update contact and Condition steps first.`,
+      );
+    }
+
+    if (blockers?.segments.length) {
+      throw new HttpException(
+        409,
+        `Cannot delete segment: the condition of the segment(s) ${listNames(blockers.segments, MAX_BLOCKING_NAMES_LISTED)} uses it. Remove it from their conditions first.`,
       );
     }
 
@@ -306,7 +323,8 @@ export class SegmentService {
 
   /**
    * Apply a bulk operation to several segments. Only `delete` exists: it deletes all of them or,
-   * when any is missing or still used by an active campaign or a workflow, none.
+   * when any is missing or still used by an active campaign, a workflow or a segment outside the
+   * batch, none.
    */
   public static async bulkUpdate(
     projectId: string,
@@ -336,11 +354,18 @@ export class SegmentService {
         const blocker = blockers.get(segment.id);
         const uses = [
           blocker?.campaigns ? `${blocker.campaigns} active campaign(s)` : null,
+          blocker?.filteredCampaigns.length
+            ? `the audience filter of the active campaign(s) ${listNames(blocker.filteredCampaigns, MAX_BLOCKING_NAMES_LISTED)}`
+            : null,
           blocker?.workflows.length
-            ? `the workflow(s) ${listNames(blocker.workflows, MAX_BLOCKING_WORKFLOWS_LISTED)}`
+            ? `the workflow(s) ${listNames(blocker.workflows, MAX_BLOCKING_NAMES_LISTED)}`
+            : null,
+          blocker?.segments.length
+            ? `the condition of the segment(s) ${listNames(blocker.segments, MAX_BLOCKING_NAMES_LISTED)}`
             : null,
         ].filter(Boolean);
-        return uses.length > 0 ? [`"${segment.name}" is used by ${uses.join(' and ')}`] : [];
+        const last = uses.pop();
+        return last ? [`"${segment.name}" is used by ${uses.length > 0 ? `${uses.join(', ')} and ` : ''}${last}`] : [];
       });
       if (reasons.length > 0) {
         const shown = reasons.slice(0, MAX_BLOCKED_SEGMENTS_LISTED);
@@ -369,21 +394,27 @@ export class SegmentService {
   }
 
   /**
-   * What keeps each segment from being deleted: how many active campaigns send to it, and the
-   * names of the workflows with an Update contact step that adds or removes it or a Condition step
-   * on its `segment.<id>` field. Triggers and waits on its `segment.<slug>.*` events are not
-   * tracked: the slug follows the name and is not unique. Segments nothing uses are left out.
+   * What keeps each segment from being deleted: how many active campaigns send to it, the names of
+   * the active campaigns whose audience filter uses its `segment.<id>` field, the names of the
+   * workflows with an Update contact step that adds or removes it or a Condition step on that
+   * field, and the names of the other segments whose condition uses that field. Segments among
+   * `segmentIds` do not count, since they go together. Triggers and waits on its
+   * `segment.<slug>.*` events are not tracked: the slug follows the name and is not unique.
+   * Segments nothing uses are left out.
    */
   private static async deletionBlockers(
     db: Prisma.TransactionClient,
     projectId: string,
     segmentIds: string[],
-  ): Promise<Map<string, {campaigns: number; workflows: string[]}>> {
-    const blockers = new Map<string, {campaigns: number; workflows: Set<string>}>();
+  ): Promise<Map<string, {campaigns: number; filteredCampaigns: string[]; workflows: string[]; segments: string[]}>> {
+    const blockers = new Map<
+      string,
+      {campaigns: number; filteredCampaigns: Set<string>; workflows: Set<string>; segments: Set<string>}
+    >();
     const blockerFor = (segmentId: string) => {
       let blocker = blockers.get(segmentId);
       if (!blocker) {
-        blocker = {campaigns: 0, workflows: new Set()};
+        blocker = {campaigns: 0, filteredCampaigns: new Set(), workflows: new Set(), segments: new Set()};
         blockers.set(segmentId, blocker);
       }
       return blocker;
@@ -419,10 +450,42 @@ export class SegmentService {
       }
     }
 
+    // Conditions were validated when saved, so they can be walked as filter conditions. Like the
+    // steps above, one query each, and the ids are matched here.
+    const filteredCampaigns = await db.campaign.findMany({
+      where: {projectId, audienceType: 'FILTERED', status: {in: ACTIVE_CAMPAIGN_STATUSES}},
+      select: {name: true, audienceCondition: true},
+    });
+    for (const campaign of filteredCampaigns) {
+      if (!campaign.audienceCondition) continue;
+      for (const segmentId of this.getReferencedSegmentIds(
+        fromPrismaJson<FilterCondition>(campaign.audienceCondition),
+      )) {
+        if (wanted.has(segmentId)) blockerFor(segmentId).filteredCampaigns.add(campaign.name);
+      }
+    }
+
+    const referencing = await db.segment.findMany({
+      where: {projectId, id: {notIn: segmentIds}, type: 'DYNAMIC'},
+      select: {name: true, condition: true},
+    });
+    for (const segment of referencing) {
+      if (!segment.condition) continue;
+      for (const segmentId of this.getReferencedSegmentIds(fromPrismaJson<FilterCondition>(segment.condition))) {
+        if (wanted.has(segmentId)) blockerFor(segmentId).segments.add(segment.name);
+      }
+    }
+
+    const sorted = (names: Set<string>) => [...names].sort((a, b) => a.localeCompare(b));
     return new Map(
-      [...blockers].map(([segmentId, {campaigns, workflows}]) => [
+      [...blockers].map(([segmentId, blocker]) => [
         segmentId,
-        {campaigns, workflows: [...workflows].sort((a, b) => a.localeCompare(b))},
+        {
+          campaigns: blocker.campaigns,
+          filteredCampaigns: sorted(blocker.filteredCampaigns),
+          workflows: sorted(blocker.workflows),
+          segments: sorted(blocker.segments),
+        },
       ]),
     );
   }
