@@ -24,3 +24,6 @@ export const SEGMENT_MEMBERS_MAX = 500;
 export function segmentEventName(segmentName: string, kind: SegmentEventKind): string {
   return `segment.${slugifySegmentName(segmentName)}.${kind}`;
 }
+
+/** Most segments one Update contact workflow step adds to, and removes from, each */
+export const WORKFLOW_SEGMENT_CHANGES_MAX = 20;

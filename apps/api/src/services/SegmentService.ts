@@ -46,6 +46,46 @@ export class SegmentService {
   }
 
   /**
+   * Whether a contact is in a segment right now: a current member of a static segment, or a
+   * match for a dynamic segment's filter (evaluated live, like the member counts). False when
+   * the segment is missing or belongs to another project, or its filter cannot be built (e.g.
+   * it references a deleted segment). A database error is thrown, so the caller fails rather
+   * than taking the "not a member" path by mistake.
+   */
+  public static async isMember(projectId: string, segmentId: string, contactId: string): Promise<boolean> {
+    const segment = await prisma.segment.findFirst({
+      where: {id: segmentId, projectId},
+      select: {type: true, condition: true},
+    });
+    if (!segment) {
+      signale.warn(`[SEGMENT] Membership check on missing segment ${segmentId}`);
+      return false;
+    }
+
+    if (segment.type === 'STATIC') {
+      const membership = await prisma.segmentMembership.findUnique({
+        where: {contactId_segmentId: {contactId, segmentId}},
+        select: {exitedAt: true},
+      });
+      return membership !== null && membership.exitedAt === null;
+    }
+
+    let where: Prisma.ContactWhereInput;
+    try {
+      where = await this.buildConditionClause(fromPrismaJson<FilterCondition>(segment.condition));
+    } catch (error) {
+      signale.warn(`[SEGMENT] Membership check on segment ${segmentId}: its filter cannot be built:`, error);
+      return false;
+    }
+
+    const match = await prisma.contact.findFirst({
+      where: {AND: [{id: contactId, projectId}, where]},
+      select: {id: true},
+    });
+    return match !== null;
+  }
+
+  /**
    * Get contacts that match a segment's condition
    */
   public static async getContacts(
@@ -239,12 +279,41 @@ export class SegmentService {
       );
     }
 
+    const workflows = await this.workflowsUsingSegment(projectId, segmentId);
+    if (workflows.length > 0) {
+      throw new HttpException(
+        409,
+        `Cannot delete segment: it is used by the workflow(s) ${workflows.map(name => `"${name}"`).join(', ')}. Remove it from their Update contact and Condition steps first.`,
+      );
+    }
+
     await prisma.segment.delete({
       where: {id: segmentId},
     });
 
     // Notify about segment deletion
     await NtfyService.notifySegmentDeleted(segment.name, segment.project.name, projectId);
+  }
+
+  /**
+   * Names of the project's workflows with an Update contact step that adds or removes the
+   * segment, or a Condition step on its `segment.<id>` field. Triggers and waits on its
+   * `segment.<slug>.*` events are not tracked: the slug follows the name and is not unique.
+   */
+  private static async workflowsUsingSegment(projectId: string, segmentId: string): Promise<string[]> {
+    const steps = await prisma.workflowStep.findMany({
+      where: {
+        workflow: {projectId},
+        OR: [
+          {type: 'CONDITION', config: {path: ['field'], equals: `segment.${segmentId}`}},
+          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'add'], array_contains: [segmentId]}},
+          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'remove'], array_contains: [segmentId]}},
+        ],
+      },
+      select: {workflow: {select: {name: true}}},
+    });
+
+    return [...new Set(steps.map(step => step.workflow.name))].sort((a, b) => a.localeCompare(b));
   }
 
   /**

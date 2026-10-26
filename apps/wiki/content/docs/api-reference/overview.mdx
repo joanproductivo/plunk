@@ -271,7 +271,7 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | POST   | `/segments`                   | Create a segment. `type: "DYNAMIC"` requires `condition`; `type: "STATIC"` rejects it.       |
 | GET    | `/segments/:id`               | Get a segment, including cached `memberCount`.                                               |
 | PATCH  | `/segments/:id`               | Update name, description, condition (dynamic only), or `trackMembership`.                    |
-| DELETE | `/segments/:id`               | Delete a segment. Returns 409 if used by an active campaign.                                 |
+| DELETE | `/segments/:id`               | Delete a segment. Returns 409 if used by an active campaign or by a workflow's Update contact or Condition step. |
 | GET    | `/segments/:id/contacts`      | Page-based list of segment members. `page`, `pageSize` (max 100). Live for dynamic segments. |
 | POST   | `/segments/:id/members`       | Add emails to a **static** segment (max 500). Body: `{ emails, createMissing?, subscribed? }`. See [Segments](/concepts/segments). |
 | DELETE | `/segments/:id/members`       | Remove emails from a **static** segment (max 500). Body: `{ emails }`.                         |
@@ -285,7 +285,7 @@ Each workflow consists of a **workflow** record, a graph of **steps**, **transit
 | Method | Path                                              | Description                                                                              |
 | ------ | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | GET    | `/workflows`                                      | List all workflows.                                                                      |
-| GET    | `/workflows/fields`                               | Fields available to use in `CONDITION` step filters (contact + event fields).             |
+| GET    | `/workflows/fields`                               | Fields available to use in `CONDITION` step filters (contact, event and segment fields; a segment's name comes in `label`). |
 | POST   | `/workflows`                                      | Create a workflow. Always starts with `triggerType: EVENT` and `enabled: false`.         |
 | GET    | `/workflows/:id`                                  | Get a workflow with its steps and transitions.                                           |
 | PATCH  | `/workflows/:id`                                  | Update workflow metadata, trigger type / config, `enabled`, `allowReentry`.              |
