@@ -418,12 +418,51 @@ describe('renderBody', () => {
       expect(styleOf(html, 'td')).toBe('padding: 16px;');
     });
 
-    it('puts the footer on the background, and leaves no slot behind without one', () => {
+    it('puts the footer at the end of the column, and leaves no slot behind without one', () => {
       const withFooter = renderBody(branded({backgroundColor: '#f3f4f6'}), undefined, '<p>footer</p>');
       const without = renderBody(branded({backgroundColor: '#f3f4f6'}));
 
-      expect(withFooter).toMatch(/<p>footer<\/p>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/);
+      expect(withFooter).toMatch(/<\/div>\s*<p>footer<\/p>\s*<\/div>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/);
       expect(without).not.toContain('plunk:footer');
+    });
+
+    it('keeps the footer legible on a dark content colour', () => {
+      const light = renderBody(
+        branded({backgroundColor: '#000000', contentColor: '#ffffff'}),
+        undefined,
+        '<p>footer</p>',
+      );
+      const dark = renderBody(
+        branded({backgroundColor: '#000000', contentColor: '#1f2937'}),
+        undefined,
+        '<p>footer</p>',
+      );
+
+      expect(light).not.toContain('<div style="background-color: #ffffff; padding: 8px 16px;">');
+      expect(dark).toContain('<div style="background-color: #ffffff; padding: 8px 16px;"><p>footer</p></div>');
+    });
+
+    it('keeps the footer out of reach of the content it follows', () => {
+      // As contact data rendered by Liquid could leave the body: an unclosed comment, or closing
+      // tags followed by a hidden element
+      for (const body of ['<p>a</p><!-- open', '<p>a</p></div></div><span style="display:none">']) {
+        for (const brand of [{backgroundColor: '#eeeeee'}, {contentWidth: 600}]) {
+          const html = renderBody(branded(brand, body), undefined, '<p id="footer">footer</p>');
+          const footer = html.indexOf('<p id="footer">');
+          const before = html.slice(0, footer);
+
+          expect(footer).toBeGreaterThan(-1);
+          // Not inside a comment, nor inside the hidden span
+          expect(before.lastIndexOf('<!--')).toBeLessThanOrEqual(before.lastIndexOf('-->'));
+          expect(before.lastIndexOf('<span')).toBeLessThanOrEqual(before.lastIndexOf('</span>'));
+        }
+      }
+    });
+
+    it('keeps entities in a framed email exactly as written', () => {
+      const html = renderBody(branded({contentWidth: 600}, '<p>Im&aacute;genes &amp; &lt;b&gt; “x”</p>'));
+
+      expect(html).toContain('Im&aacute;genes &amp; &lt;b&gt; “x”</p>');
     });
 
     it("gives buttons without a font of their own the brand's font", () => {

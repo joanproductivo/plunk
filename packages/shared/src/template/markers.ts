@@ -1,4 +1,4 @@
-import {brandToMarkerText, type EmailBrand, markerTextToBrand} from './brand.js';
+import {type EmailBrand, toEmailBrand} from './brand.js';
 import {escapeHtml} from './html.js';
 import {decodeEntities} from './preprocess.js';
 
@@ -14,6 +14,40 @@ import {decodeEntities} from './preprocess.js';
  */
 const PREHEADER_PATTERN = /^<!--plunk:preheader:([\s\S]*?)-->/;
 const BRAND_PATTERN = /^<!--plunk:brand:([a-z0-9#=;-]*)-->/;
+
+// The marker's keys, short so that every email carries few bytes
+const MARKER_KEYS = {
+  font: 'font',
+  textColor: 'text',
+  headingColor: 'heading',
+  linkColor: 'link',
+  backgroundColor: 'background',
+  contentColor: 'content',
+  contentWidth: 'width',
+} as const satisfies Record<keyof EmailBrand, string>;
+
+/** A brand as the text of its marker: `key=value` pairs, leaving out what is null. */
+function brandToMarkerText(brand: EmailBrand): string {
+  return (Object.keys(MARKER_KEYS) as (keyof EmailBrand)[])
+    .filter(key => brand[key] !== null)
+    .map(key => `${MARKER_KEYS[key]}=${brand[key]}`)
+    .join(';');
+}
+
+/** The brand a marker's text describes; anything unknown or invalid takes the default. */
+function markerTextToBrand(text: string): EmailBrand {
+  const values = new Map(
+    text.split(';').map(pair => {
+      const at = pair.indexOf('=');
+      return [pair.slice(0, at), pair.slice(at + 1)] as const;
+    }),
+  );
+  const data: Record<string, unknown> = {};
+  for (const [key, name] of Object.entries(MARKER_KEYS)) {
+    if (values.has(name)) data[key] = values.get(name);
+  }
+  return toEmailBrand(data);
+}
 
 export interface EmailMarkers {
   /** Still HTML-escaped; empty for none. */

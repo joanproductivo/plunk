@@ -1,8 +1,7 @@
-import {splitEmailMarkers} from '@plunk/shared';
 import {Dialog, DialogContent, DialogDescription, DialogTitle, IconSpinner, cn} from '@plunk/ui';
 import {useEffect, useRef, useState} from 'react';
 
-import {wrapEmailWithStyles} from '../lib/emailStyles';
+import {wrapStoredEmail} from '../lib/emailStyles';
 import {Segmented} from './Segmented';
 
 export interface EmailPreviewModalProps {
@@ -125,9 +124,7 @@ function EmailBody({html}: {html: string}) {
   const [height, setHeight] = useState(320);
   const [loaded, setLoaded] = useState(false);
 
-  // The stored body carries its preview text and brand in front of its content
-  const {brand, body} = splitEmailMarkers(html);
-  const srcDoc = withNewTabLinks(wrapEmailWithStyles(body, brand ?? undefined));
+  const srcDoc = withNewTabLinks(wrapStoredEmail(html));
 
   useEffect(() => {
     const iframe = frame.current;

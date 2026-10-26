@@ -66,10 +66,12 @@ describe('EmailService.compile — brands', () => {
     expect(html).toMatch(/<p style="[^"]*">Hello Ana<\/p>/);
     expect(html).toContain('bgcolor="#f3f4f6"');
     expect(html).not.toContain('plunk:brand');
-    // The footer sits inside the background's table, which closes right before </body>
+    // The footer ends the column, inside the background's table, which closes right before </body>
     const footer = html.indexOf('unsubscribe/contact-1');
     expect(footer).toBeGreaterThan(html.indexOf('Hello Ana'));
-    expect(html.slice(footer)).toMatch(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>\s*<\/html>$/);
+    expect(html.slice(footer)).toMatch(
+      /<\/table>\s*<\/div>\s*(<!--\[if mso\]>[^]*?<!\[endif\]-->\s*)?<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>\s*<\/html>$/,
+    );
     expect(html).not.toContain('plunk:footer');
   });
 

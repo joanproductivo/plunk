@@ -1,14 +1,6 @@
 import {describe, expect, it} from 'vitest';
 
-import {
-  BRAND_DEFAULTS,
-  BUTTON_DEFAULTS,
-  brandToMarkerText,
-  markerTextToBrand,
-  sameEmailBrand,
-  toEmailBrand,
-  toProjectBrand,
-} from '../template/index.js';
+import {BRAND_DEFAULTS, BUTTON_DEFAULTS, sameEmailBrand, toEmailBrand, toProjectBrand} from '../template/index.js';
 
 describe('toEmailBrand', () => {
   it('falls back to the defaults for missing or invalid data', () => {
@@ -50,6 +42,13 @@ describe('toEmailBrand', () => {
     expect(brand).toEqual(BRAND_DEFAULTS);
   });
 
+  it('ignores values that are not strings, whatever they hold', () => {
+    const odd = {toString: 1};
+
+    expect(toEmailBrand({textColor: odd, backgroundColor: {toString: null}})).toEqual(BRAND_DEFAULTS);
+    expect(toProjectBrand({button: {textColor: odd}}).button).toEqual(BUTTON_DEFAULTS);
+  });
+
   it('only takes widths between 480 and 800 px', () => {
     expect(toEmailBrand({contentWidth: 479}).contentWidth).toBeNull();
     expect(toEmailBrand({contentWidth: 480}).contentWidth).toBe(480);
@@ -76,13 +75,5 @@ describe('sameEmailBrand', () => {
 
     expect(sameEmailBrand(project, {...BRAND_DEFAULTS, textColor: '#000000'})).toBe(true);
     expect(sameEmailBrand(project, BRAND_DEFAULTS)).toBe(false);
-  });
-});
-
-describe('marker text', () => {
-  it('round-trips every brand field', () => {
-    const brand = toEmailBrand({font: 'monospace', backgroundColor: '#000000', contentWidth: 560});
-
-    expect(markerTextToBrand(brandToMarkerText(brand))).toEqual(brand);
   });
 });

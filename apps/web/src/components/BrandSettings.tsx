@@ -1,7 +1,8 @@
 import {
-  BRAND_DEFAULTS,
   type BrandSchemas,
   buttonStyle,
+  EMAIL_FOOTER_SLOT,
+  isFramedBrand,
   normalizeHexColor,
   type ProjectBrand,
   toProjectBrand,
@@ -11,16 +12,22 @@ import {useState} from 'react';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 
+import {wrapEmailWithStyles} from '../lib/emailStyles';
+import {network} from '../lib/network';
 import {ColorField, FontSelect, OptionSelect} from './EmailEditor/BlockFields';
 import {ButtonStyleFields} from './EmailEditor/ButtonDialog';
 import {brandUrl} from './EmailEditor/useEmailBrand';
-import {network} from '../lib/network';
-import {wrapEmailWithStyles} from '../lib/emailStyles';
 
 const FULL_WIDTH = 'full';
 const WIDTHS = {[FULL_WIDTH]: 'Full width', '560': '560 px', '600': '600 px', '640': '640 px'};
 
 // What the preview shows: each style the brand sets, once
+// Like the unsubscribe footer the API adds (EmailService.compile), so its legibility shows
+const SAMPLE_FOOTER =
+  '<hr style="border: none; border-top: 1px solid #eaeaea; margin: 12px 0;">' +
+  '<p style="font-size: 12px; line-height: 24px; margin: 16px 0; text-align: center; color: rgb(64, 64, 64);">' +
+  'You received this email from Your project. <a href="#">Update your preferences</a>.</p>';
+
 const sample = (brand: ProjectBrand) =>
   '<h1>Your weekly update</h1><p>Hi Ana, here is <strong>what changed</strong> this week and ' +
   '<a href="#">what comes next</a>.</p><h2>Highlights</h2><ul><li><p>A new look for every email</p></li></ul>' +
@@ -34,7 +41,7 @@ export function BrandSettings({projectId, canEdit}: {projectId: string; canEdit:
       <CardHeader>
         <CardTitle>Brand</CardTitle>
         <CardDescription>
-          The font, colours and layout new emails are written in. Each email keeps the brand it was written in: open one
+          The font, colors and layout new emails are written in. Each email keeps the brand it was written in: open one
           and choose Apply brand to bring it up to date.
         </CardDescription>
       </CardHeader>
@@ -72,7 +79,7 @@ function BrandForm({projectId, canEdit, initial}: {projectId: string; canEdit: b
     (brand.backgroundColor === null || normalizeHexColor(brand.backgroundColor) !== null);
   // A width set outside these options (through the API) stays selectable
   const widths = brand.contentWidth ? {...WIDTHS, [String(brand.contentWidth)]: `${brand.contentWidth} px`} : WIDTHS;
-  const framed = brand.backgroundColor !== null || brand.contentWidth !== null;
+  const framed = isFramedBrand(brand);
 
   const save = async () => {
     setSaving(true);
@@ -156,7 +163,7 @@ function BrandForm({projectId, canEdit, initial}: {projectId: string; canEdit: b
         <div className="flex items-center justify-end gap-3 border-t border-neutral-200 pt-4">
           {canEdit ? (
             <>
-              <Button type="button" variant="outline" onClick={() => setBrand({...brand, ...BRAND_DEFAULTS})}>
+              <Button type="button" variant="outline" onClick={() => setBrand(toProjectBrand({}))}>
                 Reset
               </Button>
               <Button type="button" onClick={save} disabled={!valid || saving}>
@@ -174,7 +181,7 @@ function BrandForm({projectId, canEdit, initial}: {projectId: string; canEdit: b
         <iframe
           title="Brand preview"
           sandbox=""
-          srcDoc={wrapEmailWithStyles(sample(brand), toProjectBrand(brand))}
+          srcDoc={wrapEmailWithStyles(sample(brand), toProjectBrand(brand)).replace(EMAIL_FOOTER_SLOT, SAMPLE_FOOTER)}
           className="h-[480px] w-full rounded border border-neutral-200 bg-white"
         />
       </div>

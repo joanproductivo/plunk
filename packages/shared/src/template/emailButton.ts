@@ -85,10 +85,12 @@ export function toButtonStyle(value: unknown): ButtonStyle {
   const data = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const known = <T extends string>(table: Record<T, unknown>, key: unknown): key is T =>
     typeof key === 'string' && Object.hasOwn(table, key);
+  // Only strings: String() of an object that cannot convert would throw
+  const hex = (color: unknown) => normalizeHexColor(typeof color === 'string' ? color : '');
 
   return {
-    backgroundColor: normalizeHexColor(String(data.backgroundColor ?? '')) ?? BUTTON_DEFAULTS.backgroundColor,
-    textColor: normalizeHexColor(String(data.textColor ?? '')) ?? BUTTON_DEFAULTS.textColor,
+    backgroundColor: hex(data.backgroundColor) ?? BUTTON_DEFAULTS.backgroundColor,
+    textColor: hex(data.textColor) ?? BUTTON_DEFAULTS.textColor,
     shape: known(BUTTON_RADIUS, data.shape) ? data.shape : BUTTON_DEFAULTS.shape,
     size: known(BUTTON_PADDING, data.size) ? data.size : BUTTON_DEFAULTS.size,
     fullWidth: typeof data.fullWidth === 'boolean' ? data.fullWidth : BUTTON_DEFAULTS.fullWidth,

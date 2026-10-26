@@ -385,7 +385,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger]);
+  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger, JSON.stringify(emailBrand.look)]);
 
   return (
     <div className="border border-neutral-200 rounded-lg bg-white">

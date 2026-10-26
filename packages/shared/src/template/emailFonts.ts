@@ -1,3 +1,5 @@
+import type {EmailBrand} from './brand.js';
+
 /**
  * Fonts an email can use: its own font, and stacks that degrade well across email clients, from
  * usewaypoint/email-builder-js (MIT). Shared by the email's brand and its buttons.
@@ -18,3 +20,8 @@ export const EMAIL_FONTS: Record<EmailFont, string> = {
   'book-serif': "'Iowan Old Style', 'Palatino Linotype', 'URW Palladio L', P052, serif",
   'monospace': "'Nimbus Mono PS', 'Courier New', 'Cutive Mono', monospace",
 };
+
+/** The font stack of an email in `brand`. */
+export function emailFontFamily(brand: EmailBrand): string {
+  return brand.font ? EMAIL_FONTS[brand.font] : EMAIL_FONT_FAMILY;
+}

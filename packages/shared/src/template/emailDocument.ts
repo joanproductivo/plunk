@@ -89,6 +89,24 @@ export function detectCustomHtmlPatterns(html: string): boolean {
 /** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
 export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
 
+// WCAG relative luminance of a `#rrggbb` colour
+function luminance(hex: string): number {
+  const [r, g, b] = [1, 3, 5].map(at => {
+    const channel = parseInt(hex.slice(at, at + 2), 16) / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+}
+
+/**
+ * Whether the unsubscribe footer, whose text is #404040 (see EmailService.compile), reads on
+ * `color` at WCAG's 4.5:1. On a darker content colour it gets a white background of its own:
+ * however the brand looks, the way out of the list stays legible.
+ */
+export function footerReadableOn(color: string): boolean {
+  return (luminance(color) + 0.05) / (luminance('#404040') + 0.05) >= 4.5;
+}
+
 /**
  * A full email document around visual editor content. `styleBlock` is for the preview, and as a
  * fallback when sending cannot inline it.
@@ -96,7 +114,7 @@ export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
  * In a framed brand the content sits in a centred column on the background, as MJML lays emails
  * out (MIT): the background on an outer table, since Gmail drops <body>'s styles; the width as the
  * column's max-width, which narrower screens shrink, and as an Outlook-only table, since Outlook
- * for Windows ignores max-width.
+ * for Windows ignores max-width. The footer goes at the end of the column, under the content.
  */
 export function emailDocument(htmlBody: string, brand: EmailBrand = BRAND_DEFAULTS, styleBlock?: string): string {
   const head = `<!DOCTYPE html>
@@ -131,8 +149,8 @@ export function emailDocument(htmlBody: string, brand: EmailBrand = BRAND_DEFAUL
           <div class="prose prose-sm max-w-none">
             ${htmlBody}
           </div>
+          ${footerReadableOn(contentColor) ? EMAIL_FOOTER_SLOT : `<div style="background-color: #ffffff; padding: 8px 16px;">${EMAIL_FOOTER_SLOT}</div>`}
         </div>${width ? '\n        <!--[if mso]></td></tr></table><![endif]-->' : ''}
-        ${EMAIL_FOOTER_SLOT}
       </td>
     </tr>
   </table>

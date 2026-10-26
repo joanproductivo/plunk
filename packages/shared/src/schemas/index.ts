@@ -622,7 +622,7 @@ export const MembershipSchemas = {
  * toProjectBrand's allowlist, keeping only known fonts, colours and widths.
  */
 export const BrandSchemas = {
-  update: z.custom<ProjectBrand>(
+  update: z.custom<Partial<ProjectBrand>>(
     value => typeof value === 'object' && value !== null && !Array.isArray(value),
     'The brand must be an object',
   ),

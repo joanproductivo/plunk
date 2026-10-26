@@ -1,10 +1,5 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
-import {EMAIL_FONT_FAMILY, EMAIL_FONTS} from './emailFonts.js';
-
-/** The font stack of an email in `brand`. */
-export function emailFontFamily(brand: EmailBrand): string {
-  return brand.font ? EMAIL_FONTS[brand.font] : EMAIL_FONT_FAMILY;
-}
+import {emailFontFamily} from './emailFonts.js';
 
 /**
  * Typography for visual editor emails in `brand`. Sending moves it into style attributes,

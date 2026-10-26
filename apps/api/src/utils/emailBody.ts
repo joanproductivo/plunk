@@ -119,7 +119,13 @@ function convertSpacers($: CheerioAPI): void {
  */
 function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: string): string {
   try {
-    const $ = load(emailDocument(htmlBody, brand), {xml: {xmlMode: false, decodeEntities: false}});
+    // A framed email's content goes in as a fragment of its own, so whatever it holds (an unclosed
+    // comment, closing tags from contact data) cannot close the frame or swallow the footer's slot
+    const framed = isFramedBrand(brand);
+    const $ = load(emailDocument(framed ? '' : htmlBody, brand), {xml: {xmlMode: false, decodeEntities: false}});
+    if (framed) {
+      $('div.prose').first().html(htmlBody);
+    }
     // Browsers serialise quoted font names in a style attribute as &quot;, which juice, reading
     // the text undecoded, would take for the end of a declaration
     $('[style]').each((_, element) => {

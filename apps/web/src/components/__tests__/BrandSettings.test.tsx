@@ -72,6 +72,19 @@ describe('BrandSettings', () => {
     expect(toast.success).toHaveBeenCalledWith('Brand saved');
   });
 
+  it('shows the unsubscribe footer in the preview of a framed brand', async () => {
+    vi.mocked(network.fetch).mockResolvedValueOnce(STORED);
+    await render(true);
+
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('#brand-has-background')!.click();
+    });
+
+    const preview = document.querySelector('iframe')!.getAttribute('srcdoc')!;
+    expect(preview).toContain('Update your preferences');
+    expect(preview).not.toContain('plunk:footer');
+  });
+
   it('does not offer saving to members who are not admins', async () => {
     await render(false);
 

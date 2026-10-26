@@ -10,7 +10,7 @@ import {EMAIL_FONTS, type EmailFont} from './emailFonts.js';
 export interface EmailBrand {
   /** null keeps the email's own font (EMAIL_FONT_FAMILY). */
   font: EmailFont | null;
-  /** Body text, lists and quotes' surroundings. */
+  /** Body text and lists; quotes, code and tables keep their own colour. */
   textColor: string;
   /** Headings and bold text. */
   headingColor: string;
@@ -39,12 +39,12 @@ export const BRAND_DEFAULTS: EmailBrand = {
   contentWidth: null,
 };
 
-export const BRAND_MIN_WIDTH = 480;
-export const BRAND_MAX_WIDTH = 800;
+const MIN_WIDTH = 480;
+const MAX_WIDTH = 800;
 
 function toWidth(value: unknown): number | null {
   const width = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
-  return typeof width === 'number' && Number.isInteger(width) && width >= BRAND_MIN_WIDTH && width <= BRAND_MAX_WIDTH
+  return typeof width === 'number' && Number.isInteger(width) && width >= MIN_WIDTH && width <= MAX_WIDTH
     ? width
     : null;
 }
@@ -56,14 +56,16 @@ function toWidth(value: unknown): number | null {
  */
 export function toEmailBrand(value: unknown): EmailBrand {
   const data = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
-  const color = (key: string, fallback: string) => normalizeHexColor(String(data[key] ?? '')) ?? fallback;
+  // Only strings: String() of an object that cannot convert would throw
+  const hex = (key: string) => normalizeHexColor(typeof data[key] === 'string' ? data[key] : '');
+  const color = (key: string, fallback: string) => hex(key) ?? fallback;
 
   return {
     font: typeof data.font === 'string' && Object.hasOwn(EMAIL_FONTS, data.font) ? (data.font as EmailFont) : null,
     textColor: color('textColor', BRAND_DEFAULTS.textColor),
     headingColor: color('headingColor', BRAND_DEFAULTS.headingColor),
     linkColor: color('linkColor', BRAND_DEFAULTS.linkColor),
-    backgroundColor: normalizeHexColor(String(data.backgroundColor ?? '')),
+    backgroundColor: hex('backgroundColor'),
     contentColor: color('contentColor', BRAND_DEFAULTS.contentColor),
     contentWidth: toWidth(data.contentWidth),
   };
@@ -82,38 +84,4 @@ export function isFramedBrand(brand: EmailBrand): boolean {
 /** Whether two brands give an email the same look. */
 export function sameEmailBrand(a: EmailBrand, b: EmailBrand): boolean {
   return (Object.keys(BRAND_DEFAULTS) as (keyof EmailBrand)[]).every(key => a[key] === b[key]);
-}
-
-// The marker's keys, short so that every email carries few bytes
-const MARKER_KEYS = {
-  font: 'font',
-  textColor: 'text',
-  headingColor: 'heading',
-  linkColor: 'link',
-  backgroundColor: 'background',
-  contentColor: 'content',
-  contentWidth: 'width',
-} as const satisfies Record<keyof EmailBrand, string>;
-
-/** A brand as the text of its marker: `key=value` pairs, leaving out what is null. */
-export function brandToMarkerText(brand: EmailBrand): string {
-  return (Object.keys(MARKER_KEYS) as (keyof EmailBrand)[])
-    .filter(key => brand[key] !== null)
-    .map(key => `${MARKER_KEYS[key]}=${brand[key]}`)
-    .join(';');
-}
-
-/** The brand a marker's text describes; anything unknown or invalid takes the default. */
-export function markerTextToBrand(text: string): EmailBrand {
-  const values = new Map(
-    text.split(';').map(pair => {
-      const at = pair.indexOf('=');
-      return [pair.slice(0, at), pair.slice(at + 1)] as const;
-    }),
-  );
-  const data: Record<string, unknown> = {};
-  for (const [key, name] of Object.entries(MARKER_KEYS)) {
-    if (values.has(name)) data[key] = values.get(name);
-  }
-  return toEmailBrand(data);
 }

@@ -22,6 +22,15 @@ async function render({initial = null, defaultStyle}: {initial?: ButtonAttrs | n
   });
 }
 
+// Types into a React-controlled input as a user would
+async function type(selector: string, text: string) {
+  const input = document.querySelector<HTMLInputElement>(selector)!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+}
+
 const background = () => document.querySelector<HTMLInputElement>('#button-background')!.value;
 
 beforeEach(() => {
@@ -57,10 +66,22 @@ describe('ButtonDialog', () => {
     expect(background()).toBe('#e11d48');
   });
 
-  it('remembers nothing in the browser', async () => {
+  it('inserts a button without remembering its look in the browser', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
-    await render({defaultStyle: BRAND_BUTTON});
+    const onSubmit = vi.fn();
+    await act(async () => {
+      root.render(
+        <ButtonDialog open onOpenChange={vi.fn()} onSubmit={onSubmit} initial={null} defaultStyle={BRAND_BUTTON} />,
+      );
+    });
 
+    await type('#button-text', 'Shop now');
+    await type('#button-href', 'https://a.com');
+    await act(async () => {
+      [...document.querySelectorAll('button')].find(button => button.textContent === 'Insert')!.click();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({...BRAND_BUTTON, text: 'Shop now'}));
     expect(setItem).not.toHaveBeenCalled();
   });
 });

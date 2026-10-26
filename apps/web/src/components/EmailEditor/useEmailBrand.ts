@@ -2,6 +2,7 @@ import {
   BRAND_DEFAULTS,
   type EmailBrand,
   emailFontFamily,
+  isFramedBrand,
   type ProjectBrand,
   sameEmailBrand,
   toEmailBrand,
@@ -46,7 +47,7 @@ export function editorAttributes(look: EmailBrand): Record<string, string> {
 
 /** The page around the editor in `look`: its background, and its column when it has a width. */
 export function canvasStyle(look: EmailBrand): {outer: CSSProperties; inner: CSSProperties} {
-  const framed = look.backgroundColor !== null || look.contentWidth !== null;
+  const framed = isFramedBrand(look);
   return {
     outer: {backgroundColor: look.backgroundColor ?? undefined, padding: framed ? 16 : undefined},
     inner: framed
