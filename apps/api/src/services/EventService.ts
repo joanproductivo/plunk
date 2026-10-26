@@ -47,6 +47,28 @@ export class EventService {
   }
 
   /**
+   * Track the same event for several contacts, one at a time to avoid database deadlocks.
+   * A failure is logged and the remaining contacts are still processed.
+   */
+  public static async trackEventsSequentially(
+    projectId: string,
+    eventName: string,
+    contactIds: string[],
+    data?: Record<string, unknown>,
+  ): Promise<void> {
+    for (const contactId of contactIds) {
+      try {
+        await this.trackEvent(projectId, eventName, contactId, undefined, data);
+      } catch (error) {
+        // Suppress logging in test environments to reduce noise from cleanup race conditions
+        if (process.env.NODE_ENV !== 'test') {
+          signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
+        }
+      }
+    }
+  }
+
+  /**
    * Invalidate the workflow cache for a project
    * Should be called when workflows are enabled/disabled or updated
    */

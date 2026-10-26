@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {
   type ImportedRow,
@@ -8,6 +8,7 @@ import {
   segmentKey,
   splitSegmentCell,
 } from '../ImportSegmentResolver.js';
+import {EventService} from '../EventService.js';
 import {SegmentService} from '../SegmentService.js';
 
 /**
@@ -26,7 +27,7 @@ describe('ImportSegmentResolver', () => {
 
   const rowFor = async (email: string, segments?: string): Promise<ImportedRow> => {
     const contact = await factories.createContact({projectId, email});
-    return {contactId: contact.id, email: contact.email, segments};
+    return {contactId: contact.id, segments};
   };
 
   const activeMembers = async (segmentId: string) =>
@@ -93,8 +94,8 @@ describe('ImportSegmentResolver', () => {
     const ana = await prisma.contact.findFirstOrThrow({where: {projectId, email: 'ana@example.com'}});
 
     await assign([
-      {contactId: ana.id, email: ana.email, segments: ''},
-      {contactId: ana.id, email: ana.email, segments: 'Other'},
+      {contactId: ana.id, segments: ''},
+      {contactId: ana.id, segments: 'Other'},
     ]);
 
     expect(await activeMembers(club.id)).toEqual(['ana@example.com']);
@@ -111,6 +112,22 @@ describe('ImportSegmentResolver', () => {
     const after = await prisma.segmentMembership.findFirstOrThrow({where: {segmentId: club.id}});
     expect(resolver.segmentAssignments).toBe(0);
     expect(after.enteredAt).toEqual(before.enteredAt);
+  });
+
+  it('fires no entry events, even for a segment that tracks membership', async () => {
+    const club = await SegmentService.create(projectId, {name: 'Club', type: 'STATIC', trackMembership: true});
+    const row = await rowFor('ana@example.com', 'Club');
+    const trackEvents = vi.spyOn(EventService, 'trackEventsSequentially');
+
+    expect((await assign([row])).segmentAssignments).toBe(1);
+    expect((await assign([row])).segmentAssignments).toBe(0);
+    await prisma.segmentMembership.updateMany({where: {segmentId: club.id}, data: {exitedAt: new Date()}});
+    expect((await assign([row])).segmentAssignments).toBe(1);
+
+    expect(await activeMembers(club.id)).toEqual(['ana@example.com']);
+    expect(trackEvents).not.toHaveBeenCalled();
+    trackEvents.mockRestore();
+    expect(await prisma.event.count({where: {projectId, name: {startsWith: 'segment.'}}})).toBe(0);
   });
 
   it('re-adds a contact who had left the segment', async () => {
