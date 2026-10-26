@@ -11,7 +11,10 @@ export interface AlertSettings {
  */
 export interface FailureAlert {
   id: string;
-  /** `workflow:<id>`, `campaign:<id>`, `transactional` or `project` */
+  /**
+   * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
+   * `security:critical` or `domain:<id>` for conditions (see `isFailureNotice` in `@plunk/shared`)
+   */
   sourceKey: string;
   label: string;
   count: number;

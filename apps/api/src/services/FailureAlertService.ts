@@ -1,4 +1,4 @@
-import {escapeHtml, FAILURE_ALERTS_OPEN_MAX} from '@plunk/shared';
+import {escapeHtml, FAILURE_ALERTS_OPEN_MAX, isFailureNotice} from '@plunk/shared';
 import type {AlertSettings, FailureAlert} from '@plunk/types';
 import signale from 'signale';
 
@@ -13,7 +13,10 @@ import {failureSourceFor} from './failureSources.js';
 
 /** One failure, as the place it happened knows it */
 export interface FailureReport {
-  /** `workflow:<id>`, `campaign:<id>`, `transactional` or `project` */
+  /**
+   * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
+   * `security:critical` or `domain:<id>` for conditions the project should hear about
+   */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
   label: string;
@@ -38,6 +41,12 @@ const ALERTS_PER_HOUR = 10;
 // Outside `Keys`, which is Plunk's: these keys are Plunk Lite's own
 const TEST_KEY = (projectId: string) => `plunk-lite:alerts:test:${projectId}`;
 const SENT_KEY = (projectId: string) => `plunk-lite:alerts:sent:${projectId}`;
+const REPUTATION_KEY = (projectId: string, level: ReputationLevel) =>
+  `plunk-lite:alerts:reputation:${projectId}:${level}`;
+// The same reputation conditions are recorded again after this long, however many events arrive
+const REPUTATION_REPEAT_SECONDS = 86400;
+
+type ReputationLevel = 'warning' | 'critical';
 
 const COPY = {
   en: {
@@ -46,12 +55,19 @@ const COPY = {
         ? `Workflow "${label}"`
         : sourceKey.startsWith('campaign:')
           ? `Campaign "${label}"`
-          : sourceKey === 'project'
-            ? 'The project'
-            : 'Transactional emails',
+          : sourceKey.startsWith('security:')
+            ? label
+            : sourceKey.startsWith('domain:')
+              ? `Domain "${label}"`
+              : sourceKey === 'project'
+                ? 'The project'
+                : 'Transactional emails',
     subject: (project: string, source: string) => `[${project}] Failed: ${source}`,
+    noticeSubject: (project: string, source: string) => `[${project}] Needs attention: ${source}`,
     times: (count: number, since: string) => `Failed ${count} ${count === 1 ? 'time' : 'times'} since ${since}.`,
+    seen: (count: number, since: string) => `Seen ${count} ${count === 1 ? 'time' : 'times'} since ${since}.`,
     lastError: 'Last error',
+    details: 'Details',
     contact: 'Last contact',
     review: 'Review it in Plunk',
     footer: 'You get at most one alert per source an hour. Change who gets these in Settings → Alerts.',
@@ -63,12 +79,21 @@ const COPY = {
         ? `Workflow «${label}»`
         : sourceKey.startsWith('campaign:')
           ? `Campaña «${label}»`
-          : sourceKey === 'project'
-            ? 'El proyecto'
-            : 'Emails transaccionales',
+          : sourceKey === 'security:critical'
+            ? 'Reputación de envío: crítico'
+            : sourceKey.startsWith('security:')
+              ? 'Reputación de envío: aviso'
+              : sourceKey.startsWith('domain:')
+                ? `Dominio «${label}»`
+                : sourceKey === 'project'
+                  ? 'El proyecto'
+                  : 'Emails transaccionales',
     subject: (project: string, source: string) => `[${project}] Ha fallado: ${source}`,
+    noticeSubject: (project: string, source: string) => `[${project}] Requiere atención: ${source}`,
     times: (count: number, since: string) => `Ha fallado ${count} ${count === 1 ? 'vez' : 'veces'} desde ${since}.`,
+    seen: (count: number, since: string) => `Detectado ${count} ${count === 1 ? 'vez' : 'veces'} desde ${since}.`,
     lastError: 'Último error',
+    details: 'Detalle',
     contact: 'Último contacto',
     review: 'Revisarlo en Plunk',
     footer: 'Recibes como mucho un aviso por origen cada hora. Elige quién los recibe en Settings → Alerts.',
@@ -77,17 +102,22 @@ const COPY = {
 } as const;
 
 /**
- * Failures a project should hear about (Plunk Lite). Each one is recorded under its source, the
- * dashboard shows the sources not reviewed since their last failure, and the addresses in the
- * project's alert settings get an email the first time a source fails and then at most once an
- * hour while it keeps failing.
+ * Failures a project should hear about (Plunk Lite), and conditions that make its emails fail: its
+ * sending reputation past a threshold, a domain that stopped being verified. Each one is recorded
+ * under its source, the dashboard shows the sources not reviewed since their last failure, and the
+ * addresses in the project's alert settings get an email the first time a source fails and then at
+ * most once an hour while it keeps failing.
  *
  * Recording and alerting never throw: they run on the path of a failure that is already being
  * handled, and must leave it as it was.
  */
 export class FailureAlertService {
-  /** Records a failure under its source and alerts the project if it is the source's turn. */
-  public static async record(projectId: string, report: FailureReport): Promise<void> {
+  /**
+   * Records a failure under its source and alerts the project if it is the source's turn. True when
+   * it was, so the alert is on its way; false when the source was alerted on within the hour, or
+   * the failure could not be recorded.
+   */
+  public static async record(projectId: string, report: FailureReport): Promise<boolean> {
     try {
       const error = report.error.slice(0, ERROR_MAX);
       // A source reviewed since its last failure opens again: its count starts over and it gets
@@ -122,8 +152,10 @@ export class FailureAlertService {
         // Not awaited: the alert waits on SES, and the failure path it started from should not.
         void this.alertOrRelease(projectId, row!, claimed.notifiedAt);
       }
+      return Boolean(claimed);
     } catch (recordError) {
       signale.warn(`[ALERTS] Could not record a failure of ${report.sourceKey} in project ${projectId}:`, recordError);
+      return false;
     }
   }
 
@@ -222,6 +254,53 @@ export class FailureAlertService {
     }
   }
 
+  /**
+   * Bounce or complaint rates past a threshold: warnings, or critical ones that did not disable the
+   * project. All-time rates can stay past one for months while every bounce or complaint checks them
+   * again, so once an alert about some conditions is sent they are not recorded again for a day,
+   * unless a condition not among them comes up.
+   */
+  public static async recordReputation(projectId: string, level: ReputationLevel, conditions: string[]): Promise<void> {
+    // Each condition without its numbers: a rate moving within the same threshold is no news
+    const shapes = conditions.map(condition => condition.replace(/\d+(\.\d+)?/g, '#'));
+    const key = REPUTATION_KEY(projectId, level);
+    try {
+      const alerted = (await redis.get(key))?.split('\n');
+      if (alerted && shapes.every(shape => alerted.includes(shape))) {
+        return;
+      }
+    } catch (redisError) {
+      // Recorded anyway: an alert too many beats one missed
+      signale.warn(`[ALERTS] Could not check the last reputation alert of project ${projectId}:`, redisError);
+    }
+
+    const alerting = await this.record(projectId, {
+      sourceKey: `security:${level}`,
+      label: level === 'critical' ? 'Sending reputation: critical' : 'Sending reputation: warning',
+      error: conditions.join('; '),
+    });
+    // Only once an alert goes out: until then, the next bounce or complaint records them again, and
+    // the first one past the hourly limit sends it
+    if (alerting) {
+      await redis.set(key, shapes.join('\n'), 'EX', REPUTATION_REPEAT_SECONDS).catch((redisError: unknown) => {
+        signale.warn(`[ALERTS] Could not keep the last reputation alert of project ${projectId}:`, redisError);
+      });
+    }
+  }
+
+  /** A domain SES stopped verifying, so the project's emails from it fail */
+  public static async recordDomainUnverified(
+    projectId: string,
+    domain: {id: string; domain: string},
+    status: string,
+  ): Promise<void> {
+    await this.record(projectId, {
+      sourceKey: `domain:${domain.id}`,
+      label: domain.domain,
+      error: `SES reports the domain as ${status}: emails from ${domain.domain} fail until its DNS records are back.`,
+    });
+  }
+
   /** The sources with failures since they were last reviewed, latest first */
   public static async listOpen(projectId: string): Promise<FailureAlert[]> {
     const rows = await prisma.$queryRaw<FailureRow[]>`
@@ -283,7 +362,10 @@ export class FailureAlertService {
     return data;
   }
 
-  /** Sends a sample alert to the saved addresses. Throws what SES says, so the dashboard can show it. */
+  /**
+   * Sends a sample alert to the saved addresses, from the saved sender, which must be on a verified
+   * domain. Throws what SES says, so the dashboard can show it.
+   */
   public static async sendTest(projectId: string): Promise<void> {
     if (!(await this.getSettings(projectId))) {
       throw new HttpException(400, 'Add at least one address first');
@@ -318,6 +400,8 @@ export class FailureAlertService {
    *
    * Sent with `sendRawEmail` from the project's own domain, like a campaign's test send: Plunk's
    * platform emails (`sendPlatformEmail`) need PLUNK_API_KEY, which these installations do not set.
+   * While the saved sender's domain is not verified, an alert goes from another verified domain of
+   * the project (see `senderFor`); with none, and for a test, it throws.
    * Each address gets its own email, so a rejected one (an SES sandbox) does not stop the others;
    * what SES said for each rejected one is thrown together.
    */
@@ -334,7 +418,15 @@ export class FailureAlertService {
       return false;
     }
 
-    await DomainService.verifyEmailDomain(settings.fromEmail, projectId);
+    const fromEmail = await this.senderFor(projectId, settings.fromEmail, {fallback: !test});
+    if (!fromEmail) {
+      throw new HttpException(
+        403,
+        test
+          ? `The domain of ${settings.fromEmail} is not verified`
+          : 'The project has no verified domain to send alerts from',
+      );
+    }
 
     const sent = await redis.incr(SENT_KEY(projectId));
     if (sent === 1) {
@@ -350,7 +442,11 @@ export class FailureAlertService {
 
     const copy = project.language.toLowerCase().startsWith('es') ? COPY.es : COPY.en;
     const source = copy.source(failure.sourceKey, failure.label);
-    const subject = test ? `[${project.name}] ${copy.test}` : copy.subject(project.name, source);
+    const subject = test
+      ? `[${project.name}] ${copy.test}`
+      : isFailureNotice(failure.sourceKey)
+        ? copy.noticeSubject(project.name, source)
+        : copy.subject(project.name, source);
     const html = test ? `<p>${escapeHtml(copy.test)}</p>` : this.alertBody(copy, source, failure);
 
     // One email per address, so no one sees who else gets them
@@ -358,7 +454,7 @@ export class FailureAlertService {
     for (const recipient of settings.recipients) {
       try {
         await sendRawEmail({
-          from: {name: settings.fromName || project.name, email: settings.fromEmail},
+          from: {name: settings.fromName || project.name, email: fromEmail},
           to: [recipient],
           content: {subject, html},
           // Out-of-office replies to an hourly alert would come back every hour
@@ -375,12 +471,35 @@ export class FailureAlertService {
     return true;
   }
 
+  /**
+   * The address alerts go from: the saved one while its domain is verified for the project;
+   * otherwise (the very failure being reported, perhaps) the same name on the oldest other verified
+   * domain of it, unless `fallback` is off. Null when there is none.
+   */
+  private static async senderFor(
+    projectId: string,
+    fromEmail: string,
+    {fallback}: {fallback: boolean},
+  ): Promise<string | null> {
+    const [name, domain] = fromEmail.split('@');
+    if (!name || !domain) {
+      return null;
+    }
+    const verified = await DomainService.getVerifiedDomains(projectId);
+    if (verified.some(candidate => candidate.domain === domain)) {
+      return fromEmail;
+    }
+    const [oldest] = verified.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    return fallback && oldest ? `${name}@${oldest.domain}` : null;
+  }
+
   private static alertBody(copy: (typeof COPY)[keyof typeof COPY], source: string, failure: FailureRow): string {
     const since = failure.firstAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    const notice = isFailureNotice(failure.sourceKey);
     const lines = [
       `<p><strong>${escapeHtml(source)}</strong></p>`,
-      `<p>${escapeHtml(copy.times(failure.count, since))}</p>`,
-      `<p>${escapeHtml(copy.lastError)}: ${escapeHtml(failure.lastError)}</p>`,
+      `<p>${escapeHtml(notice ? copy.seen(failure.count, since) : copy.times(failure.count, since))}</p>`,
+      `<p>${escapeHtml(notice ? copy.details : copy.lastError)}: ${escapeHtml(failure.lastError)}</p>`,
     ];
     if (failure.lastContactEmail) {
       lines.push(`<p>${escapeHtml(copy.contact)}: ${escapeHtml(failure.lastContactEmail)}</p>`);
@@ -402,6 +521,10 @@ export class FailureAlertService {
         return `/campaigns/${encodeURIComponent(id ?? '')}`;
       case 'project':
         return '/settings';
+      case 'security':
+        return '/settings?tab=security';
+      case 'domain':
+        return '/settings?tab=domains';
       default:
         return '/activity';
     }

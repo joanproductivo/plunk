@@ -4,11 +4,16 @@ import {SecurityService} from '../SecurityService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {redis} from '../../database/redis';
 
+const flags = vi.hoisted(() => ({autoProjectDisable: true}));
+
 vi.mock('../../app/constants.js', async () => {
   const actual = await vi.importActual('../../app/constants.js');
   return {
     ...actual,
-    AUTO_PROJECT_DISABLE: true,
+    // A getter, so a test can turn auto-disable off
+    get AUTO_PROJECT_DISABLE() {
+      return flags.autoProjectDisable;
+    },
   };
 });
 
@@ -40,6 +45,7 @@ describe('SecurityService', () => {
 
     // Clear redis cache
     await redis.flushdb();
+    flags.autoProjectDisable = true;
   });
 
   /**
@@ -202,6 +208,26 @@ describe('SecurityService', () => {
       expect(await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'project'}})).toMatchObject({
         label: 'Project disabled',
       });
+      // The disabled project is the alert; no reputation alert besides it
+      expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: 'security:critical'}})).toBe(0);
+    });
+
+    it('records a critical rate as a reputation alert when auto-disable is off', async () => {
+      flags.autoProjectDisable = false;
+      const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      await prisma.project.update({where: {id: projectId}, data: {createdAt: oldDate}});
+      // Critical 7-day bounce rate
+      await createEmails(100, {bouncedCount: 11});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+
+      const project = await prisma.project.findUnique({where: {id: projectId}, select: {disabled: true}});
+      expect(project?.disabled).toBe(false);
+      const failure = await prisma.plunkLiteFailure.findFirstOrThrow({
+        where: {projectId, sourceKey: 'security:critical'},
+      });
+      expect(failure.label).toBe('Sending reputation: critical');
+      expect(failure.lastError).toContain('7-day bounce rate');
     });
 
     it('should NOT disable project when only warnings exist', async () => {
@@ -220,6 +246,10 @@ describe('SecurityService', () => {
         select: {disabled: true},
       });
       expect(project?.disabled).toBe(false);
+      // Plunk Lite: the dashboard's failure alerts show the warning
+      expect(
+        await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'security:warning'}}),
+      ).toMatchObject({label: 'Sending reputation: warning'});
     });
   });
 

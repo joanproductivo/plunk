@@ -4,8 +4,15 @@ import {describeFailure, parseRecipients, shortError} from '../failureAlerts';
 
 describe('failure alerts', () => {
   it('says how often a source failed and since when', () => {
-    expect(describeFailure({count: 1, firstAt: '2026-10-26T10:42:00.000Z'}, 'en-GB')).toMatch(/^Failed 1 time since /);
-    expect(describeFailure({count: 3, firstAt: '2026-10-26T10:42:00.000Z'}, 'en-GB')).toMatch(/^Failed 3 times since /);
+    const failure = {sourceKey: 'transactional', firstAt: '2026-10-26T10:42:00.000Z'};
+    expect(describeFailure({...failure, count: 1}, 'en-GB')).toMatch(/^Failed 1 time since /);
+    expect(describeFailure({...failure, count: 3}, 'en-GB')).toMatch(/^Failed 3 times since /);
+  });
+
+  it('says how often a condition was seen, for the reputation and domains', () => {
+    const since = {count: 2, firstAt: '2026-10-26T10:42:00.000Z'};
+    expect(describeFailure({...since, sourceKey: 'security:warning'}, 'en-GB')).toMatch(/^Seen 2 times since /);
+    expect(describeFailure({...since, sourceKey: 'domain:d1'}, 'en-GB')).toMatch(/^Seen 2 times since /);
   });
 
   it('keeps an error to one short line', () => {

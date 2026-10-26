@@ -73,7 +73,7 @@ describe('FailureBanner', () => {
     failures = [1, 2, 3, 4, 5].map(failure);
     await render();
 
-    expect(container.textContent).toContain('Something failed and needs review');
+    expect(container.textContent).toContain('Something needs review');
     expect(container.querySelectorAll('li')).toHaveLength(3);
     expect(container.textContent).toContain('Workflow 1');
     expect(container.textContent).toContain('Error 3');

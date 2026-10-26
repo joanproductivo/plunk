@@ -24,8 +24,9 @@ export function FailureAlertSettings(props: FailureAlertSettingsProps) {
       <CardHeader>
         <CardTitle>Failure alerts</CardTitle>
         <CardDescription>
-          When a workflow, a campaign or an email fails, the dashboard shows it until someone marks it reviewed, and
-          these addresses get an email: the first time a source fails, then at most once an hour while it keeps failing.
+          When a workflow, a campaign or an email fails, bounce or complaint rates pass a threshold, or a domain stops
+          being verified, the dashboard shows it until someone marks it reviewed, and these addresses get an email: the
+          first time, then at most once an hour while it goes on (once a day for the same reputation warnings).
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -116,7 +117,10 @@ function AlertSettingsForm({projectId, canEdit, saved}: FailureAlertSettingsProp
             placeholder="alerts@yourdomain.com"
             onChange={e => setFromEmail(e.target.value)}
           />
-          <p className="mt-1 text-xs text-neutral-500">On one of this project&apos;s verified domains.</p>
+          <p className="mt-1 text-xs text-neutral-500">
+            On one of this project&apos;s verified domains. If that domain stops being verified, alerts go from the same
+            name on another one.
+          </p>
         </div>
         <div>
           <Label htmlFor="alert-from-name" className="text-sm font-medium mb-2 block">

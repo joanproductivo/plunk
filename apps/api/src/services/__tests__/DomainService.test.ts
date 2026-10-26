@@ -354,6 +354,19 @@ describe('DomainService', () => {
 
       const updated = await prisma.domain.findUnique({where: {id: domain.id}});
       expect(updated?.verified).toBe(false);
+      // Plunk Lite: the dashboard's failure alerts show it, once
+      expect(await prisma.plunkLiteFailure.findFirst({where: {sourceKey: `domain:${domain.id}`}})).toMatchObject({
+        projectId: project.id,
+        label: 'pending-domain.com',
+      });
+
+      vi.spyOn(SESService, 'getDomainVerificationAttributes').mockResolvedValueOnce({
+        status: 'Pending',
+        tokens: ['token1', 'token2', 'token3'],
+      });
+      await DomainService.checkVerification(domain.id);
+      const failure = await prisma.plunkLiteFailure.findFirstOrThrow({where: {sourceKey: `domain:${domain.id}`}});
+      expect(failure).toMatchObject({count: 1});
     });
 
     it('should throw error for non-existent domain', async () => {

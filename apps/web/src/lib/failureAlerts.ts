@@ -1,3 +1,4 @@
+import {isFailureNotice} from '@plunk/shared';
 import type {FailureAlert} from '@plunk/types';
 
 /** The URL a project's open failures are read from */
@@ -8,15 +9,22 @@ export const alertSettingsUrl = (projectId: string) => `/projects/${projectId}/a
 
 const ERROR_SHOWN = 140;
 
-/** How often a source failed and since when, e.g. "Failed 3 times since 26 Oct, 10:42" */
-export function describeFailure(failure: Pick<FailureAlert, 'count' | 'firstAt'>, locale?: string): string {
+/**
+ * How often a source failed and since when, e.g. "Failed 3 times since 26 Oct, 10:42"; for a
+ * condition such as the sending reputation, how often it was seen
+ */
+export function describeFailure(
+  failure: Pick<FailureAlert, 'sourceKey' | 'count' | 'firstAt'>,
+  locale?: string,
+): string {
   const since = new Date(failure.firstAt).toLocaleString(locale, {
     day: 'numeric',
     month: 'short',
     hour: '2-digit',
     minute: '2-digit',
   });
-  return `Failed ${failure.count} ${failure.count === 1 ? 'time' : 'times'} since ${since}`;
+  const verb = isFailureNotice(failure.sourceKey) ? 'Seen' : 'Failed';
+  return `${verb} ${failure.count} ${failure.count === 1 ? 'time' : 'times'} since ${since}`;
 }
 
 /** The last error, cut to what fits on the banner */
