@@ -7,6 +7,8 @@ declare module '@tiptap/core' {
   interface EditorEvents {
     /** A block in the editor was double-clicked, to open its dialog (see useBlockDialog). */
     editBlock: {pos: number};
+    /** A new block of `type` was asked for outside the toolbar, such as from the slash menu. */
+    newBlock: {type: string};
   }
 }
 
@@ -60,8 +62,9 @@ export interface BlockDialogProps<Attrs> {
 /**
  * Wires a block's dialog to an editor. The toolbar edits the selected block of `type`; with none
  * selected, it inserts one with its defaults (`insertDirectly`, for blocks that need nothing
- * filled in) or opens the dialog to fill in a new one. Double-clicking a block of `type` opens
- * the dialog for it. New blocks go after the selection (see insertBlock).
+ * filled in) or opens the dialog to fill in a new one, as it does when the slash menu asks for
+ * one (`newBlock`). Double-clicking a block of `type` opens the dialog for it. New blocks go after the
+ * selection (see insertBlock).
  */
 export function useBlockDialog<Attrs extends object>(editor: Editor | null, type: string, insertDirectly = false) {
   // The dialog edits the block at `pos`, or fills in a new one when it is null
@@ -72,9 +75,15 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
     const edit = ({pos}: {pos: number}) => {
       if (editor.state.doc.nodeAt(pos)?.type.name === type) setState({open: true, pos});
     };
+    // Blocks inserted straight away need no dialog; the slash menu inserts those itself
+    const add = ({type: asked}: {type: string}) => {
+      if (asked === type) setState({open: true, pos: null});
+    };
     editor.on('editBlock', edit);
+    editor.on('newBlock', add);
     return () => {
       editor.off('editBlock', edit);
+      editor.off('newBlock', add);
     };
   }, [editor, type]);
 
