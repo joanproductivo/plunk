@@ -559,6 +559,7 @@ export default function ContactsPage() {
                 <FilterPill
                   title="Segment"
                   multiple={false}
+                  capitalize={false}
                   options={staticSegments.map(segment => ({value: segment.id, label: segment.name}))}
                   selected={segmentFilter ? [segmentFilter] : []}
                   onChange={next => handleSegmentChange(next[0] ?? '')}

@@ -87,6 +87,7 @@ export function FilterPill({
   selected,
   onChange,
   multiple = true,
+  capitalize = true,
   disabledReason,
 }: {
   title: string;
@@ -94,14 +95,16 @@ export function FilterPill({
   selected: string[];
   onChange: (next: string[]) => void;
   multiple?: boolean;
+  /** Capitalise the labels, for fixed values like statuses. Off for names people typed. */
+  capitalize?: boolean;
   /** When set, the pill stays in place but is inert, and this explains why */
   disabledReason?: string;
 }) {
   const labels = options.filter(o => selected.includes(o.value)).map(o => o.label);
   const value =
     labels.length === 0 ? undefined : (
-      // Option labels are capitalised in the menu too, so a pill reads the same as its list
-      <span className="capitalize">
+      // The pill capitalises its labels exactly when the menu does, so both read the same
+      <span className={capitalize ? 'capitalize' : undefined}>
         {labels.slice(0, VISIBLE_VALUES).map((label, i) => (
           <span key={i}>
             {i > 0 && ', '}
@@ -136,6 +139,7 @@ export function FilterPill({
               selected={selected}
               onChange={onChange}
               multiple={multiple}
+              capitalize={capitalize}
             />
           </PopoverContent>
         </Popover>
