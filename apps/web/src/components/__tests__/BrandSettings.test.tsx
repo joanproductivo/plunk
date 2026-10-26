@@ -18,7 +18,8 @@ const STORED: ProjectBrand = {...BRAND_DEFAULTS, textColor: '#222222', button: B
 
 let root: Root;
 let container: HTMLDivElement;
-const fetcher = vi.fn(async (): Promise<ProjectBrand> => STORED);
+// The project's footers come from their own URL; this project has none of its own
+const fetcher = vi.fn(async (url: string): Promise<unknown> => (url.endsWith('/footers') ? {} : STORED));
 
 async function render(canEdit: boolean) {
   await act(async () => {
@@ -50,6 +51,7 @@ describe('BrandSettings', () => {
     await render(true);
 
     expect(fetcher).toHaveBeenCalledWith('/projects/project-1/brand');
+    expect(fetcher).toHaveBeenCalledWith('/projects/project-1/footers');
     expect(document.querySelector<HTMLInputElement>('#brand-text')!.value).toBe('#222222');
     expect(document.querySelector('iframe')!.getAttribute('srcdoc')).toContain('color: #222222;');
   });

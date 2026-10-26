@@ -1,10 +1,12 @@
 import {
   type BrandSchemas,
   buttonStyle,
+  footerParagraph,
   isFramedBrand,
   normalizeHexColor,
-  plunkFooterParagraph,
   type ProjectBrand,
+  type ProjectFooters,
+  resolveFooterLanguage,
   toProjectBrand,
 } from '@plunk/shared';
 import {Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Checkbox, Label} from '@plunk/ui';
@@ -17,6 +19,7 @@ import {network} from '../lib/network';
 import {ColorField, FontSelect, OptionSelect} from './EmailEditor/BlockFields';
 import {ButtonStyleFields} from './EmailEditor/ButtonDialog';
 import {brandUrl} from './EmailEditor/useEmailBrand';
+import {footersUrl} from './FooterSettings';
 
 const FULL_WIDTH = 'full';
 const WIDTHS = {[FULL_WIDTH]: 'Full width', '560': '560 px', '600': '600 px', '640': '640 px'};
@@ -37,6 +40,9 @@ interface BrandSettingsProps {
 
 export function BrandSettings({projectId, projectName, language, canEdit}: BrandSettingsProps) {
   const {data, error} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
+  // The footer the project's emails end with, in its language: its own text or Plunk's
+  const {data: footers} = useSWR<ProjectFooters>(footersUrl(projectId), {revalidateOnFocus: false});
+  const footer = footerParagraph({language: resolveFooterLanguage(null, language), projectName, href: '#', footers});
 
   return (
     <Card>
@@ -54,12 +60,7 @@ export function BrandSettings({projectId, projectName, language, canEdit}: Brand
           <p className="text-sm text-neutral-500">Loading…</p>
         ) : (
           // Mounted once the brand loads, so the form starts from it
-          <BrandForm
-            projectId={projectId}
-            footer={plunkFooterParagraph(language, projectName, '#')}
-            canEdit={canEdit}
-            initial={data}
-          />
+          <BrandForm projectId={projectId} footer={footer} canEdit={canEdit} initial={data} />
         )}
       </CardContent>
     </Card>
