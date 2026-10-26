@@ -1,4 +1,4 @@
-import {type Contact, Prisma, type Segment} from '@plunk/db';
+import {type CampaignStatus, type Contact, Prisma, type Segment} from '@plunk/db';
 import {segmentEventName} from '@plunk/shared';
 import type {FilterCondition, FilterGroup, PaginatedResponse, SegmentFilter, SegmentType} from '@plunk/types';
 import {fromPrismaJson, toPrismaJson} from '@plunk/types';
@@ -13,6 +13,11 @@ import {NtfyService} from './NtfyService.js';
 import {SegmentMembershipService} from './SegmentMembershipService.js';
 
 export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
+
+/** Campaigns in these states still send to their segment, so it cannot be deleted. */
+const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = ['DRAFT', 'SCHEDULED', 'SENDING'];
+/** Most blocked segments a refused bulk delete names; the rest are counted. */
+const MAX_BLOCKED_SEGMENTS_LISTED = 5;
 
 export class SegmentService {
   /**
@@ -262,28 +267,20 @@ export class SegmentService {
       throw new HttpException(404, 'Segment not found');
     }
 
-    // Check if segment is used in any active campaigns
-    const campaignsUsingSegment = await prisma.campaign.count({
-      where: {
-        segmentId,
-        status: {
-          in: ['DRAFT', 'SCHEDULED', 'SENDING'],
-        },
-      },
-    });
+    const blockers = (await this.deletionBlockers(prisma, projectId, [segmentId])).get(segmentId);
 
-    if (campaignsUsingSegment > 0) {
+    // Check if segment is used in any active campaigns
+    if (blockers?.campaigns) {
       throw new HttpException(
         409,
-        `Cannot delete segment: it is currently used in ${campaignsUsingSegment} active campaign(s). Remove it from campaigns first or wait for them to complete.`,
+        `Cannot delete segment: it is currently used in ${blockers.campaigns} active campaign(s). Remove it from campaigns first or wait for them to complete.`,
       );
     }
 
-    const workflows = await this.workflowsUsingSegment(projectId, segmentId);
-    if (workflows.length > 0) {
+    if (blockers?.workflows.length) {
       throw new HttpException(
         409,
-        `Cannot delete segment: it is used by the workflow(s) ${workflows.map(name => `"${name}"`).join(', ')}. Remove it from their Update contact and Condition steps first.`,
+        `Cannot delete segment: it is used by the workflow(s) ${blockers.workflows.map(name => `"${name}"`).join(', ')}. Remove it from their Update contact and Condition steps first.`,
       );
     }
 
@@ -296,24 +293,113 @@ export class SegmentService {
   }
 
   /**
-   * Names of the project's workflows with an Update contact step that adds or removes the
-   * segment, or a Condition step on its `segment.<id>` field. Triggers and waits on its
-   * `segment.<slug>.*` events are not tracked: the slug follows the name and is not unique.
+   * Apply a bulk operation to several segments. Only `delete` exists: it deletes all of them or,
+   * when any is missing or still used by an active campaign or a workflow, none.
    */
-  private static async workflowsUsingSegment(projectId: string, segmentId: string): Promise<string[]> {
-    const steps = await prisma.workflowStep.findMany({
-      where: {
-        workflow: {projectId},
-        OR: [
-          {type: 'CONDITION', config: {path: ['field'], equals: `segment.${segmentId}`}},
-          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'add'], array_contains: [segmentId]}},
-          {type: 'UPDATE_CONTACT', config: {path: ['segments', 'remove'], array_contains: [segmentId]}},
-        ],
-      },
-      select: {workflow: {select: {name: true}}},
+  public static async bulkUpdate(
+    projectId: string,
+    options: {ids: string[]; delete?: boolean},
+  ): Promise<{deleted?: number; updated?: number}> {
+    const ids = Array.from(new Set(options.ids));
+    if (!options.delete || ids.length === 0) {
+      return {updated: 0};
+    }
+
+    const {deleted, projectName} = await prisma.$transaction(async tx => {
+      const segments = await tx.segment.findMany({
+        where: {id: {in: ids}, projectId},
+        select: {id: true, name: true, project: {select: {name: true}}},
+      });
+      if (segments.length !== ids.length) {
+        throw new HttpException(404, 'One or more segments not found in this project');
+      }
+
+      const blockers = await this.deletionBlockers(tx, projectId, ids);
+      const reasons = segments.flatMap(segment => {
+        const blocker = blockers.get(segment.id);
+        const uses = [
+          blocker?.campaigns ? `${blocker.campaigns} active campaign(s)` : null,
+          blocker?.workflows.length ? `the workflow(s) ${blocker.workflows.map(name => `"${name}"`).join(', ')}` : null,
+        ].filter(Boolean);
+        return uses.length > 0 ? [`"${segment.name}" is used by ${uses.join(' and ')}`] : [];
+      });
+      if (reasons.length > 0) {
+        const shown = reasons.slice(0, MAX_BLOCKED_SEGMENTS_LISTED);
+        const more = reasons.length - shown.length;
+        throw new HttpException(
+          409,
+          `Nothing was deleted. ${shown.join('; ')}${more > 0 ? `; and ${more} more` : ''}. Remove them from those first.`,
+        );
+      }
+
+      await tx.segment.deleteMany({where: {id: {in: ids}, projectId}});
+      return {deleted: segments, projectName: segments[0]!.project.name};
     });
 
-    return [...new Set(steps.map(step => step.workflow.name))].sort((a, b) => a.localeCompare(b));
+    for (const segment of deleted) {
+      await NtfyService.notifySegmentDeleted(segment.name, projectName, projectId);
+    }
+
+    return {deleted: deleted.length};
+  }
+
+  /**
+   * What keeps each segment from being deleted: how many active campaigns send to it, and the
+   * names of the workflows with an Update contact step that adds or removes it or a Condition step
+   * on its `segment.<id>` field. Triggers and waits on its `segment.<slug>.*` events are not
+   * tracked: the slug follows the name and is not unique. Segments nothing uses are left out.
+   */
+  private static async deletionBlockers(
+    db: Prisma.TransactionClient,
+    projectId: string,
+    segmentIds: string[],
+  ): Promise<Map<string, {campaigns: number; workflows: string[]}>> {
+    const blockers = new Map<string, {campaigns: number; workflows: Set<string>}>();
+    const blockerFor = (segmentId: string) => {
+      let blocker = blockers.get(segmentId);
+      if (!blocker) {
+        blocker = {campaigns: 0, workflows: new Set()};
+        blockers.set(segmentId, blocker);
+      }
+      return blocker;
+    };
+
+    const campaigns = await db.campaign.groupBy({
+      by: ['segmentId'],
+      where: {segmentId: {in: segmentIds}, status: {in: ACTIVE_CAMPAIGN_STATUSES}},
+      _count: {_all: true},
+    });
+    for (const {segmentId, _count} of campaigns) {
+      if (segmentId) blockerFor(segmentId).campaigns = _count._all;
+    }
+
+    // One query whatever the number of segments; which segment each step uses is worked out here.
+    const wanted = new Set(segmentIds);
+    const steps = await db.workflowStep.findMany({
+      where: {workflow: {projectId}, type: {in: ['CONDITION', 'UPDATE_CONTACT']}},
+      select: {type: true, config: true, workflow: {select: {name: true}}},
+    });
+    for (const step of steps) {
+      const config = step.config as {field?: unknown; segments?: {add?: unknown; remove?: unknown}} | null;
+      const used =
+        step.type === 'CONDITION'
+          ? typeof config?.field === 'string' && config.field.startsWith('segment.')
+            ? [config.field.slice('segment.'.length)]
+            : []
+          : [config?.segments?.add, config?.segments?.remove].flatMap(list =>
+              Array.isArray(list) ? list.filter((id): id is string => typeof id === 'string') : [],
+            );
+      for (const segmentId of used) {
+        if (wanted.has(segmentId)) blockerFor(segmentId).workflows.add(step.workflow.name);
+      }
+    }
+
+    return new Map(
+      [...blockers].map(([segmentId, {campaigns, workflows}]) => [
+        segmentId,
+        {campaigns, workflows: [...workflows].sort((a, b) => a.localeCompare(b))},
+      ]),
+    );
   }
 
   /**

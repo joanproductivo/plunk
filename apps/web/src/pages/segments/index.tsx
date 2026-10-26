@@ -1,16 +1,19 @@
-import {Badge, Button, Card, CardContent, ConfirmDialog, EmptyState, IconSpinner} from '@plunk/ui';
+import {Badge, Button, Card, CardContent, Checkbox, ConfirmDialog, EmptyState, IconSpinner} from '@plunk/ui';
 import type {Segment} from '@plunk/db';
+import type {SegmentSchemas} from '@plunk/shared';
 import {
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
   type ColumnDef,
+  type RowSelectionState,
   type SortingState,
   type VisibilityState,
 } from '@tanstack/react-table';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {SegmentRuleSummary, segmentRuleText} from '../../components/SegmentRuleSummary';
 import {
+  BulkActionBar,
   DataTable,
   DataTableColumnHeader,
   DataTableViewOptions,
@@ -26,10 +29,11 @@ import {network} from '../../lib/network';
 import {formatRelativeTime} from '../../lib/dateUtils';
 import {useColumnVisibility} from '../../lib/hooks/useColumnVisibility';
 import {usePersistentState} from '../../lib/hooks/usePersistentState';
+import {useShiftClickSelection} from '../../lib/hooks/useShiftClickSelection';
 import {Filter, Plus, RefreshCw, Trash2} from 'lucide-react';
 import {NextSeo} from 'next-seo';
 import Link from 'next/link';
-import {useMemo, useState} from 'react';
+import {useEffect, useMemo, useState} from 'react';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 import dayjs from 'dayjs';
@@ -40,6 +44,7 @@ const VIEW_STORAGE_KEY = 'plunk:segments:view';
 const COLUMNS_STORAGE_KEY = 'plunk:segments:columns';
 
 const DEFAULT_COLUMN_VISIBILITY: VisibilityState = {
+  select: true,
   name: true,
   rules: true,
   type: true,
@@ -47,6 +52,9 @@ const DEFAULT_COLUMN_VISIBILITY: VisibilityState = {
   updatedAt: true,
   actions: true,
 };
+
+/** Most segments one bulk delete accepts (`SegmentSchemas.bulkUpdate`). */
+const MAX_BULK_DELETE = 1000;
 
 const TYPE_OPTIONS = [
   {value: 'DYNAMIC', label: 'Dynamic'},
@@ -80,6 +88,10 @@ export default function SegmentsPage() {
   const [view, setView] = usePersistentState<DataTableView>(VIEW_STORAGE_KEY, 'card', isDataTableView);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useColumnVisibility(COLUMNS_STORAGE_KEY, DEFAULT_COLUMN_VISIBILITY);
+  // Row selection drives the BulkActionBar; it exists in the table view only.
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+  const [bulkDeleteStatus, setBulkDeleteStatus] = useState<'idle' | 'loading'>('idle');
 
   // Resolves "member of segment" filters to names. The list endpoint returns every segment in the
   // project, so this is complete.
@@ -98,17 +110,66 @@ export default function SegmentsPage() {
     });
   }, [segments, searchInput, typeFilter, segmentNames]);
 
+  // Only visible segments stay selected: one hidden by a filter, or deleted elsewhere, must not be
+  // deleted (or block the delete) without the user seeing it.
+  const visibleIds = useMemo(() => new Set(filteredSegments.map(s => s.id)), [filteredSegments]);
+  useEffect(() => {
+    setRowSelection(current => {
+      const kept = Object.fromEntries(Object.entries(current).filter(([id]) => visibleIds.has(id)));
+      return Object.keys(kept).length === Object.keys(current).length ? current : kept;
+    });
+  }, [visibleIds]);
+  useEffect(() => {
+    setRowSelection({});
+  }, [view]);
+
+  const selectedIds = useMemo(
+    () => Object.keys(rowSelection).filter(id => rowSelection[id] && visibleIds.has(id)),
+    [rowSelection, visibleIds],
+  );
+
   const handleDelete = async () => {
     if (!segmentToDelete) return;
 
     try {
       await network.fetch('DELETE', `/segments/${segmentToDelete}`);
       toast.success('Segment deleted');
+      setRowSelection(current => {
+        const next = {...current};
+        delete next[segmentToDelete];
+        return next;
+      });
       void mutate();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Couldn’t delete the segment. Try again.');
     } finally {
       setSegmentToDelete(null);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) return;
+    if (selectedIds.length > MAX_BULK_DELETE) {
+      toast.error(`Select at most ${MAX_BULK_DELETE.toLocaleString()} segments to delete at once.`);
+      return;
+    }
+    setBulkDeleteStatus('loading');
+    try {
+      const result = await network.fetch<{deleted?: number}, typeof SegmentSchemas.bulkUpdate>(
+        'POST',
+        '/segments/bulk-update',
+        {ids: selectedIds, delete: true},
+      );
+      const count = result?.deleted ?? selectedIds.length;
+      toast.success(`${count} segment${count === 1 ? '' : 's'} deleted`);
+      setRowSelection({});
+      void mutate();
+    } catch (error) {
+      // The selection stays, so the user can untick what the message names and try again.
+      toast.error(error instanceof Error ? error.message : 'Couldn’t delete those segments. Try again.');
+    } finally {
+      // ConfirmDialog closes itself after onConfirm resolves.
+      setBulkDeleteStatus('idle');
     }
   };
 
@@ -126,6 +187,32 @@ export default function SegmentsPage() {
 
   const columns = useMemo<Array<ColumnDef<Segment, unknown>>>(
     () => [
+      {
+        id: 'select',
+        enableSorting: false,
+        enableHiding: false,
+        meta: {label: 'Select', headClassName: 'w-10', cellClassName: 'w-10'} satisfies DataTableColumnMeta,
+        header: ({table}) => (
+          <Checkbox
+            aria-label="Select all segments"
+            checked={
+              table.getIsAllPageRowsSelected() ? true : table.getIsSomePageRowsSelected() ? 'indeterminate' : false
+            }
+            onCheckedChange={value => table.toggleAllPageRowsSelected(!!value)}
+          />
+        ),
+        cell: ({row}) => (
+          <Checkbox
+            aria-label={`Select ${row.original.name}`}
+            checked={row.getIsSelected()}
+            onClick={e => {
+              e.stopPropagation();
+              shiftSelect.onClick(e);
+            }}
+            onCheckedChange={value => shiftSelect.onCheckedChange(row, value)}
+          />
+        ),
+      },
       {
         id: 'name',
         accessorKey: 'name',
@@ -205,21 +292,27 @@ export default function SegmentsPage() {
         cell: ({row}) => <div className="flex justify-end">{deleteButton(row.original)}</div>,
       },
     ],
+    // `shiftSelect` comes from the table these columns build. The table instance and the hook's refs
+    // never change, so an earlier render's handlers stay valid (as on the templates page).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [segmentNames],
   );
 
   const table = useReactTable<Segment>({
     data: filteredSegments,
     columns,
-    state: {sorting, columnVisibility},
+    state: {sorting, columnVisibility, rowSelection},
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
+    onRowSelectionChange: setRowSelection,
+    enableRowSelection: true,
     enableMultiSort: false,
     // Every segment is already loaded, so sorting happens client-side.
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getRowId: row => row.id,
   });
+  const shiftSelect = useShiftClickSelection(table);
 
   const hasSegments = !!segments && segments.length > 0;
   const hasActiveFilters = searchInput.trim() !== '' || typeFilter !== 'ALL';
@@ -268,11 +361,28 @@ export default function SegmentsPage() {
                 selected={typeFilter === 'ALL' ? [] : [typeFilter]}
                 onChange={next => setTypeFilter((next[0] as TypeFilter) ?? 'ALL')}
               />
-              {view === 'table' && <DataTableViewOptions table={table} lockedColumnIds={['name', 'actions']} />}
+              {view === 'table' && (
+                <DataTableViewOptions table={table} lockedColumnIds={['select', 'name', 'actions']} />
+              )}
               <span className="hidden sm:block h-5 w-px bg-neutral-200" aria-hidden="true" />
               <DataTableViewSwitcher view={view} onChange={setView} />
             </div>
           </div>
+
+          {view === 'table' && (
+            <BulkActionBar selectedCount={selectedIds.length} itemNoun="segment" onClear={() => setRowSelection({})}>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowBulkDeleteDialog(true)}
+                disabled={bulkDeleteStatus === 'loading'}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete selected
+              </Button>
+            </BulkActionBar>
+          )}
 
           {/* Segments */}
           {isLoading ? (
@@ -371,6 +481,17 @@ export default function SegmentsPage() {
           description="The contacts in it are kept. Only the segment is deleted."
           confirmText="Delete segment"
           variant="destructive"
+        />
+
+        <ConfirmDialog
+          open={showBulkDeleteDialog}
+          onOpenChange={setShowBulkDeleteDialog}
+          onConfirm={handleBulkDelete}
+          title={`Delete ${selectedIds.length} segment${selectedIds.length === 1 ? '' : 's'}?`}
+          description="The contacts in them are kept. A segment used by an active campaign or a workflow can't be deleted — if your selection includes one, nothing will be deleted."
+          confirmText="Delete segments"
+          variant="destructive"
+          status={bulkDeleteStatus}
         />
       </DashboardLayout>
     </>

@@ -334,6 +334,102 @@ describe('Workflow segment actions', () => {
       await SegmentService.delete(projectId, unused.id);
       expect(await prisma.segment.findUnique({where: {id: unused.id}})).toBeNull();
     });
+
+    describe('several at once', () => {
+      const remaining = async (ids: string[]) =>
+        (await prisma.segment.findMany({where: {id: {in: ids}}, select: {name: true}})).map(s => s.name).sort();
+
+      it('deletes every segment and its memberships', async () => {
+        const first = await staticSegment('First', false);
+        const second = await staticSegment('Second', false);
+        const contact = await factories.createContact({projectId});
+        await join(first.id, contact.id);
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: [first.id, second.id, first.id], delete: true}),
+        ).resolves.toEqual({deleted: 2});
+
+        expect(await remaining([first.id, second.id])).toEqual([]);
+        expect(await prisma.segmentMembership.count({where: {segmentId: first.id}})).toBe(0);
+      });
+
+      it('deletes none when any is in use, naming each segment and what uses it', async () => {
+        const added = await staticSegment('Added', false);
+        const removed = await staticSegment('Removed', false);
+        const checked = await staticSegment('Checked', false);
+        const sent = await staticSegment('Sent', false);
+        const unused = await staticSegment('Unused', false);
+        await workflow(
+          'Onboarding',
+          'test.start',
+          [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [added.id]}}}],
+          [['trigger', 'add']],
+        );
+        await workflow(
+          'Cleanup',
+          'test.start',
+          [{key: 'remove', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {remove: [removed.id]}}}],
+          [['trigger', 'remove']],
+        );
+        await workflow(
+          'Router',
+          'test.start',
+          [
+            {
+              key: 'check',
+              type: WorkflowStepType.CONDITION,
+              config: {field: `segment.${checked.id}`, operator: 'exists'},
+            },
+          ],
+          [['trigger', 'check']],
+        );
+        await factories.createCampaign({projectId, segmentId: sent.id});
+        const ids = [added.id, removed.id, checked.id, sent.id, unused.id];
+
+        const refusal = SegmentService.bulkUpdate(projectId, {ids, delete: true});
+
+        await expect(refusal).rejects.toMatchObject({code: 409});
+        const {message} = (await refusal.catch((error: unknown) => error)) as Error;
+        expect(message).toContain('Nothing was deleted');
+        expect(message).toContain('"Added" is used by the workflow(s) "Onboarding"');
+        expect(message).toContain('"Removed" is used by the workflow(s) "Cleanup"');
+        expect(message).toContain('"Checked" is used by the workflow(s) "Router"');
+        expect(message).toContain('"Sent" is used by 1 active campaign(s)');
+        expect(message).not.toContain('Unused');
+        expect(await remaining(ids)).toEqual(['Added', 'Checked', 'Removed', 'Sent', 'Unused']);
+      });
+
+      it('names five blocked segments and counts the rest', async () => {
+        const segments = await Promise.all(Array.from({length: 7}, (_, n) => staticSegment(`Blocked ${n}`, false)));
+        for (const segment of segments) {
+          await factories.createCampaign({projectId, segmentId: segment.id});
+        }
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: segments.map(s => s.id), delete: true}),
+        ).rejects.toMatchObject({code: 409, message: expect.stringContaining('; and 2 more.')});
+      });
+
+      it('deletes none when one is not in the project', async () => {
+        const mine = await staticSegment('Mine', false);
+        const {
+          project: {id: otherProjectId},
+        } = await factories.createUserWithProject();
+        const theirs = await prisma.segment.create({data: {projectId: otherProjectId, name: 'Theirs', type: 'STATIC'}});
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: [mine.id, theirs.id], delete: true}),
+        ).rejects.toMatchObject({code: 404});
+        expect(await remaining([mine.id, theirs.id])).toEqual(['Mine', 'Theirs']);
+      });
+
+      it('does nothing without delete', async () => {
+        const kept = await staticSegment('Kept', false);
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids: [kept.id]})).resolves.toEqual({updated: 0});
+        expect(await remaining([kept.id])).toEqual(['Kept']);
+      });
+    });
   });
 
   describe('workflow fields', () => {

@@ -202,6 +202,11 @@ export const SegmentSchemas = {
     condition: filterConditionSchema.optional(),
     trackMembership: z.boolean().optional(),
   }),
+  // Same shape as `TemplateSchemas.bulkUpdate`; SegmentService.bulkUpdate deletes all or none.
+  bulkUpdate: z.object({
+    ids: z.array(uuid).min(1).max(1000),
+    delete: z.boolean().optional(),
+  }),
   members: z.object({
     // No format check: contacts are matched by their stored email, and imports accept addresses
     // a strict validator would reject
