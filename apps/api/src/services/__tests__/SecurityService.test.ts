@@ -198,6 +198,10 @@ describe('SecurityService', () => {
         select: {disabled: true},
       });
       expect(project?.disabled).toBe(true);
+      // Plunk Lite: the dashboard's failure alerts show it
+      expect(await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'project'}})).toMatchObject({
+        label: 'Project disabled',
+      });
     });
 
     it('should NOT disable project when only warnings exist', async () => {

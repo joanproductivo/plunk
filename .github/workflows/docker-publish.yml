@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - next
+      # Plunk Lite branch (a Plunk release + the fork's changes); has no release tag, so it is
+      # published as sha-<commit>, and as latest since it always holds the newest Plunk Lite
+      - plunk-lite
 
 jobs:
   # Prepare metadata and tags for all builds
@@ -70,9 +73,12 @@ jobs:
             TAGS="${VERSION},${MAJOR}.${MINOR},${MAJOR},latest"
             echo "Building RELEASE with tags: $TAGS"
           else
-            # Regular commit: use SHA tags only (no latest)
+            # Regular commit: use SHA tags only (no latest), except on the Plunk Lite branch
             SHORT_SHA="${GITHUB_SHA:0:7}"
             TAGS="sha-${SHORT_SHA}"
+            if [[ "${{ github.ref_name }}" == "plunk-lite" ]]; then
+              TAGS="${TAGS},latest"
+            fi
             echo "Building COMMIT with tags: $TAGS"
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT

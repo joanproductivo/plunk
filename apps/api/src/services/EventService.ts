@@ -41,9 +41,34 @@ export class EventService {
     await this.triggerWorkflows(projectId, eventName, contactId, data);
 
     // Resume workflows waiting for this event
-    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data);
+    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
 
     return event;
+  }
+
+  /**
+   * Track the same event for several contacts, one at a time to avoid database deadlocks.
+   * A failure is logged and the remaining contacts are still processed. `onTracked` runs after
+   * each contact, failed or not, with how many are done; if it throws, the loop stops.
+   */
+  public static async trackEventsSequentially(
+    projectId: string,
+    eventName: string,
+    contactIds: string[],
+    data?: Record<string, unknown>,
+    {onTracked}: {onTracked?: (done: number) => Promise<void>} = {},
+  ): Promise<void> {
+    for (const [index, contactId] of contactIds.entries()) {
+      try {
+        await this.trackEvent(projectId, eventName, contactId, undefined, data);
+      } catch (error) {
+        // Suppress logging in test environments to reduce noise from cleanup race conditions
+        if (process.env.NODE_ENV !== 'test') {
+          signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
+        }
+      }
+      await onTracked?.(index + 1);
+    }
   }
 
   /**

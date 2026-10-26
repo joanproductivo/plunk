@@ -17,7 +17,15 @@ import {
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
-import type {ContactSubscriptionStatus, CursorPaginatedResponse} from '@plunk/types';
+import type {
+  BulkContactActionSelector,
+  BulkContactOperation,
+  ContactImportResult,
+  ContactListFilter,
+  ContactSubscriptionStatus,
+  CursorPaginatedResponse,
+} from '@plunk/types';
+import {SEGMENT_IMPORT_ERROR_ROW} from '@plunk/types';
 import {
   getCoreRowModel,
   useReactTable,
@@ -27,6 +35,9 @@ import {
   type VisibilityState,
 } from '@tanstack/react-table';
 import {DashboardLayout} from '../../components/DashboardLayout';
+import {ExportContactsButton} from '../../components/ExportContactsButton';
+import {BulkActionsDialog} from '../../components/contacts/BulkActionsDialog';
+import {useSegments} from '../../components/segments/SegmentPicker';
 import {
   BulkActionBar,
   DataTable,
@@ -49,18 +60,17 @@ import {useColumnVisibility} from '../../lib/hooks/useColumnVisibility';
 import {usePersistentState} from '../../lib/hooks/usePersistentState';
 import {
   AlertTriangle,
-  Check,
   CheckCircle,
   ChevronLeft,
   ChevronRight,
   Edit,
   EyeOff,
   FileUp,
-  Loader2,
+  ListMinus,
+  ListPlus,
   Mail,
   MailCheck,
   MailX,
-  Minus,
   Plus,
   Trash2,
   Upload,
@@ -106,6 +116,8 @@ export default function ContactsPage() {
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  // Static segment id, or '' for no segment filter
+  const [segmentFilter, setSegmentFilter] = useState('');
   const [view, setView] = usePersistentState<DataTableView>(VIEW_STORAGE_KEY, 'table', isDataTableView);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useColumnVisibility(COLUMNS_STORAGE_KEY, DEFAULT_COLUMN_VISIBILITY);
@@ -118,21 +130,43 @@ export default function ContactsPage() {
   const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [excludedContacts, setExcludedContacts] = useState<Set<string>>(new Set());
   const [showBulkActionsDialog, setShowBulkActionsDialog] = useState(false);
-  const [bulkOperation, setBulkOperation] = useState<'subscribe' | 'unsubscribe' | 'delete' | null>(null);
+  const [bulkOperation, setBulkOperation] = useState<BulkContactOperation | null>(null);
   const pageSize = 50;
 
-  // Backend is authoritative for sorting + status filtering
-  // (?sort=&dir=, ?status=); the client only mirrors the active state.
+  // Only static segments have members you can filter by and change by hand
+  const {data: segments} = useSegments();
+  const staticSegments = useMemo(() => (segments ?? []).filter(s => s.type === 'STATIC'), [segments]);
+
+  // The active list filters, as the API's selector takes them. The list below is fetched from
+  // these too, so the list, its count, "select all matching", the bulk actions and the export
+  // always see the same contacts.
+  const listFilter = useMemo<ContactListFilter>(
+    () => ({
+      ...(search ? {search} : {}),
+      ...(statusFilter !== 'ALL' ? {status: statusFilter} : {}),
+      ...(segmentFilter ? {segmentId: segmentFilter} : {}),
+    }),
+    [search, statusFilter, segmentFilter],
+  );
+
+  // Backend is authoritative for sorting + filtering (?sort=&dir=, ?status=, ?segmentId=); the
+  // client only mirrors the active state.
   const sortParam = sorting[0]?.id ?? '';
   const dirParam = sorting[0] ? (sorting[0].desc ? 'desc' : 'asc') : '';
-  const statusParam = statusFilter === 'ALL' ? '' : statusFilter;
+  const listQuery = [
+    `limit=${pageSize}`,
+    cursor ? `cursor=${cursor}` : '',
+    listFilter.search ? `search=${encodeURIComponent(listFilter.search)}` : '',
+    listFilter.status ? `status=${listFilter.status}` : '',
+    listFilter.segmentId ? `segmentId=${listFilter.segmentId}` : '',
+    sortParam ? `sort=${sortParam}&dir=${dirParam}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
 
-  const {data, mutate, isLoading} = useSWR<CursorPaginatedResponse<Contact>>(
-    `/contacts?limit=${pageSize}${cursor ? `&cursor=${cursor}` : ''}${
-      search ? `&search=${encodeURIComponent(search)}` : ''
-    }${statusParam ? `&status=${statusParam}` : ''}${sortParam ? `&sort=${sortParam}&dir=${dirParam}` : ''}`,
-    {revalidateOnFocus: false},
-  );
+  const {data, mutate, isLoading} = useSWR<CursorPaginatedResponse<Contact>>(`/contacts?${listQuery}`, {
+    revalidateOnFocus: false,
+  });
 
   useEffect(() => {
     if (data) {
@@ -143,7 +177,7 @@ export default function ContactsPage() {
     }
   }, [data, cursor]);
 
-  // Reset the cursor stack — used whenever the query (search/status) or the
+  // Reset the cursor stack — used whenever the query (search/status/segment) or the
   // ordering changes, since cursors are tied to a specific filter + sort.
   const resetPagination = () => {
     setCursor(undefined);
@@ -160,6 +194,12 @@ export default function ContactsPage() {
 
   const handleStatusChange = (next: StatusFilter) => {
     setStatusFilter(next);
+    resetPagination();
+    clearSelection();
+  };
+
+  const handleSegmentChange = (next: string) => {
+    setSegmentFilter(next);
     resetPagination();
     clearSelection();
   };
@@ -272,7 +312,21 @@ export default function ContactsPage() {
     ? Math.max(0, totalCount - excludedContacts.size)
     : selectedContacts.size;
 
-  const handleBulkAction = (operation: 'subscribe' | 'unsubscribe' | 'delete') => {
+  // What a bulk action targets. "Select all matching" mirrors the active list filters so it
+  // reaches exactly the rows the user is looking at, minus the ones they unticked.
+  const bulkSelector = useMemo<BulkContactActionSelector>(
+    () =>
+      selectAllMatching
+        ? {mode: 'query', filter: listFilter, excludeIds: Array.from(excludedContacts)}
+        : {mode: 'ids', contactIds: Array.from(selectedContacts)},
+    [selectAllMatching, listFilter, excludedContacts, selectedContacts],
+  );
+
+  // The export takes the selection when there is one, and the whole filtered list otherwise.
+  const exportSelector: BulkContactActionSelector =
+    effectiveSelectionCount > 0 ? bulkSelector : {mode: 'query', filter: listFilter};
+
+  const handleBulkAction = (operation: BulkContactOperation) => {
     setBulkOperation(operation);
     setShowBulkActionsDialog(true);
   };
@@ -304,16 +358,17 @@ export default function ContactsPage() {
 
   const hasData = contacts.length > 0;
 
-  // Whether any search/status filter is narrowing the list — drives the
+  // Whether any search/status/segment filter is narrowing the list — drives the
   // "no results vs first-run empty" distinction below.
-  const hasActiveFilters = search !== '' || statusFilter !== 'ALL';
+  const hasActiveFilters = search !== '' || statusFilter !== 'ALL' || segmentFilter !== '';
 
-  // Reset everything that can hide rows (search + status + pagination) so the
+  // Reset everything that can hide rows (search + status + segment + pagination) so the
   // user can recover from a filter combination that matched nothing.
   const clearFilters = () => {
     setSearchInput('');
     setSearch('');
     setStatusFilter('ALL');
+    setSegmentFilter('');
     resetPagination();
     clearSelection();
   };
@@ -467,6 +522,7 @@ export default function ContactsPage() {
                 <span className="hidden sm:inline">Import CSV</span>
                 <span className="sm:hidden">Import</span>
               </Button>
+              <ExportContactsButton selector={exportSelector} selectionCount={effectiveSelectionCount} />
               <Button onClick={() => setShowCreateDialog(true)} className="flex-1 sm:flex-none">
                 <Plus className="h-4 w-4" />
                 <span className="hidden sm:inline">Add contact</span>
@@ -478,6 +534,7 @@ export default function ContactsPage() {
           {/* Control row. One aligned cluster of 32px-tall controls:
               - Search input: always present (both views).
               - Status filter: a FilterPill, the same in both views.
+              - Segment filter: a FilterPill of the static segments, when there are any.
               - Columns selector: TABLE VIEW ONLY.
               - A hairline divider separates the data controls from the view switcher. */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -500,6 +557,16 @@ export default function ContactsPage() {
                 selected={statusFilter === 'ALL' ? [] : [statusFilter]}
                 onChange={next => handleStatusChange((next[0] as StatusFilter) ?? 'ALL')}
               />
+              {staticSegments.length > 0 && (
+                <FilterPill
+                  title="Segment"
+                  multiple={false}
+                  capitalize={false}
+                  options={staticSegments.map(segment => ({value: segment.id, label: segment.name}))}
+                  selected={segmentFilter ? [segmentFilter] : []}
+                  onChange={next => handleSegmentChange(next[0] ?? '')}
+                />
+              )}
               {view === 'table' && (
                 <DataTableViewOptions table={table} lockedColumnIds={['select', 'email', 'actions']} />
               )}
@@ -539,6 +606,18 @@ export default function ContactsPage() {
                 <MailX className="h-4 w-4" />
                 Unsubscribe
               </Button>
+              {staticSegments.length > 0 && (
+                <>
+                  <Button variant="outline" size="sm" onClick={() => handleBulkAction('addToSegment')}>
+                    <ListPlus className="h-4 w-4" />
+                    Add to segment
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => handleBulkAction('removeFromSegment')}>
+                    <ListMinus className="h-4 w-4" />
+                    Remove from segment
+                  </Button>
+                </>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -565,7 +644,7 @@ export default function ContactsPage() {
               <Card>
                 <CardContent>
                   {hasActiveFilters ? (
-                    // Items exist, but the active search/status filters matched
+                    // Items exist, but the active search/status/segment filters matched
                     // none — offer a one-click recovery.
                     <NoResultsState icon={Mail} itemNoun="contacts" onClear={clearFilters} />
                   ) : (
@@ -733,21 +812,10 @@ export default function ContactsPage() {
           open={showBulkActionsDialog}
           onOpenChange={setShowBulkActionsDialog}
           operation={bulkOperation}
-          selector={
-            selectAllMatching
-              ? {
-                  mode: 'query',
-                  // Mirror the active list filters so "select all matching"
-                  // targets exactly the rows the user is looking at.
-                  filter: {
-                    ...(search ? {search} : {}),
-                    ...(statusFilter !== 'ALL' ? {subscribed: statusFilter === 'subscribed'} : {}),
-                  },
-                  excludeIds: Array.from(excludedContacts),
-                }
-              : {mode: 'ids', contactIds: Array.from(selectedContacts)}
-          }
+          selector={bulkSelector}
           targetCount={effectiveSelectionCount}
+          segments={staticSegments}
+          filteredSegmentId={segmentFilter}
           onSuccess={() => {
             mutate();
             clearSelection();
@@ -868,22 +936,13 @@ interface ImportContactsDialogProps {
   onSuccess: () => void;
 }
 
-interface ImportResult {
-  totalRows: number;
-  successCount: number;
-  createdCount: number;
-  updatedCount: number;
-  failureCount: number;
-  errors: Array<{row: number; email: string; error: string}>;
-}
-
 function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDialogProps) {
   const [file, setFile] = useState<File | null>(null);
   const [, setJobId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<'idle' | 'uploading' | 'processing' | 'completed' | 'failed'>('idle');
-  const [result, setResult] = useState<ImportResult | null>(null);
+  const [result, setResult] = useState<ContactImportResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -947,7 +1006,7 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
         id: string;
         state: string;
         progress: number;
-        result: ImportResult | null;
+        result: ContactImportResult | null;
         failedReason?: string;
       }>('GET', `/contacts/import/${jobId}`);
 
@@ -963,11 +1022,15 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
 
         // Show success message
         if (response.result) {
-          const {createdCount, updatedCount, failureCount} = response.result;
+          const {createdCount, updatedCount, failureCount, segmentsCreated, errors, warnings} = response.result;
+          const segmentIssues = errors.filter(error => error.row === SEGMENT_IMPORT_ERROR_ROW).length;
           const parts = [];
           if (createdCount > 0) parts.push(`${createdCount} created`);
           if (updatedCount > 0) parts.push(`${updatedCount} updated`);
           if (failureCount > 0) parts.push(`${failureCount} failed`);
+          if (segmentsCreated?.length) parts.push(`${segmentsCreated.length} segments created`);
+          if (segmentIssues > 0) parts.push(`${segmentIssues} segment issues`);
+          if (warnings?.length) parts.push(`${warnings.length} warning${warnings.length === 1 ? '' : 's'}`);
 
           toast.success(`Import completed: ${parts.join(', ')}`);
         }
@@ -1053,6 +1116,17 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
             {/* Instructions */}
             <div className="text-sm text-neutral-500 space-y-1">
               <p>Required column: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">email</code>. Optional: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">subscribed</code> (true/false) and any custom fields. Max 5MB.</p>
+              <p>
+                A <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">segments</code> column
+                adds contacts to the static segments it names (separated by ; or ,), creating missing ones; nobody is
+                removed from a segment, and those segments fire no entry events. An ISO 8601{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">createdAt</code> dates new
+                contacts; without{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">subscribed</code>, a{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">status</code> such as
+                confirmed or unsubscribed decides it, and an unknown one leaves new contacts unsubscribed. Exported
+                files import back as they are.
+              </p>
             </div>
 
             {/* File Upload */}
@@ -1113,6 +1187,26 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
                     )}
                   </span>
                 </div>
+                {(!!result.segmentAssignments || !!result.segmentsCreated?.length) && (
+                  <p className="text-sm text-neutral-600">
+                    <span className="text-neutral-900">{result.segmentAssignments ?? 0}</span> added to segments
+                    {!!result.segmentsCreated?.length && <> · created {result.segmentsCreated.join(', ')}</>}
+                  </p>
+                )}
+
+                {/* Warnings: rows imported, but not quite as the file said */}
+                {!!result.warnings?.length && (
+                  <div className="max-h-32 overflow-y-auto border border-amber-200 bg-amber-50 rounded-md">
+                    <div className="space-y-0 text-xs text-amber-800">
+                      {result.warnings.map((warning, idx) => (
+                        <div key={idx} className="flex gap-3 px-3 py-2 border-b border-amber-100 last:border-0">
+                          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 flex-shrink-0 mt-px" />
+                          <span>{warning}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Error Details */}
                 {result.errors && result.errors.length > 0 && (
@@ -1120,8 +1214,14 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
                     <div className="space-y-0 text-xs text-neutral-600">
                       {result.errors.slice(0, 10).map((error, idx) => (
                         <div key={idx} className="flex gap-3 px-3 py-2 border-b border-neutral-100 last:border-0">
-                          <span className="font-mono text-neutral-400 flex-shrink-0">Row {error.row}</span>
-                          <span className="text-red-600">{error.email || 'N/A'} — {error.error}</span>
+                          <span className="font-mono text-neutral-400 flex-shrink-0">
+                            {error.row === SEGMENT_IMPORT_ERROR_ROW ? 'Segment' : `Row ${error.row}`}
+                          </span>
+                          <span className="text-red-600">
+                            {error.row === SEGMENT_IMPORT_ERROR_ROW
+                              ? error.error
+                              : `${error.email || 'N/A'} — ${error.error}`}
+                          </span>
                         </div>
                       ))}
                       {result.errors.length > 10 && (
@@ -1179,498 +1279,3 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
     </>
   );
 }
-
-type BulkSelector =
-  | {mode: 'ids'; contactIds: string[]}
-  | {mode: 'query'; filter: {search?: string; subscribed?: boolean}; excludeIds: string[]};
-
-interface BulkActionsDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  operation: 'subscribe' | 'unsubscribe' | 'delete' | null;
-  selector: BulkSelector;
-  targetCount: number;
-  onSuccess: () => void;
-}
-
-interface BulkActionResult {
-  operation: 'subscribe' | 'unsubscribe' | 'delete';
-  totalRequested: number;
-  /** Contacts whose state was actually changed by this run. */
-  successCount: number;
-  /** Subscribe/unsubscribe only: contacts that were already in the target state. */
-  unchangedCount: number;
-  /** Contacts that errored or weren't found. */
-  failureCount: number;
-  errors: Array<{contactId: string; email: string; error: string}>;
-}
-
-function BulkActionsDialog({open, onOpenChange, operation, selector, targetCount, onSuccess}: BulkActionsDialogProps) {
-  const [, setJobId] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState<'idle' | 'processing' | 'completed' | 'failed'>('idle');
-  const [result, setResult] = useState<BulkActionResult | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const [showCloseConfirmDialog, setShowCloseConfirmDialog] = useState(false);
-
-  // Clean up polling on unmount or dialog close
-  useEffect(() => {
-    if (!open) {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      setTimeout(() => {
-        setJobId(null);
-        setProgress(0);
-        setStatus('idle');
-        setResult(null);
-        setErrorMessage(null);
-      }, 300);
-    }
-  }, [open]);
-
-  const pollJobStatus = async (jobId: string) => {
-    try {
-      const response = await network.fetch<{
-        id: string;
-        state: string;
-        progress: number;
-        result: BulkActionResult | null;
-        failedReason?: string;
-      }>('GET', `/contacts/bulk/${jobId}`);
-
-      setProgress(response.progress || 0);
-
-      if (response.state === 'completed') {
-        setStatus('completed');
-        setResult(response.result);
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = null;
-        }
-
-        if (response.result) {
-          toast.success(buildToastSummary(response.result));
-        }
-
-        onSuccess();
-      } else if (response.state === 'failed') {
-        setStatus('failed');
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = null;
-        }
-        const errorMsg = response.failedReason || 'Operation failed';
-        setErrorMessage(errorMsg);
-        toast.error(errorMsg);
-      } else if (response.state === 'active') {
-        setStatus('processing');
-      }
-    } catch (error) {
-      console.error('Failed to poll job status:', error);
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      setStatus('failed');
-      toast.error('Lost track of the job. It may still be running.');
-    }
-  };
-
-  const handleConfirm = async () => {
-    if (!operation) return;
-
-    setIsProcessing(true);
-    setStatus('processing');
-
-    try {
-      const endpoint = `/contacts/bulk-${operation}`;
-      const data = await network.fetch<{jobId: string; message: string}, typeof ContactSchemas.bulkAction>(
-        'POST',
-        endpoint,
-        selector,
-      );
-
-      setJobId(data.jobId);
-
-      // Start polling for job status
-      pollIntervalRef.current = setInterval(() => {
-        void pollJobStatus(data.jobId);
-      }, 1000);
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Couldn’t start the job. Try again.';
-      setErrorMessage(errorMsg);
-      toast.error(errorMsg);
-      setStatus('failed');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const handleClose = () => {
-    if (status === 'processing') {
-      setShowCloseConfirmDialog(true);
-      return;
-    }
-    onOpenChange(false);
-  };
-
-  const confirmClose = () => {
-    onOpenChange(false);
-  };
-
-  const copy = getOperationCopy(operation);
-
-  const isQueueing = status === 'processing' && progress === 0;
-  const dialogTitle =
-    status === 'completed'
-      ? copy.completedTitle
-      : status === 'processing'
-      ? copy.progressTitle
-      : status === 'failed'
-      ? copy.failedTitle
-      : copy.title;
-
-  const handleRetry = () => {
-    setErrorMessage(null);
-    setStatus('idle');
-    void handleConfirm();
-  };
-
-  return (
-    <>
-      <Dialog open={open} onOpenChange={handleClose}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="transition-colors">{dialogTitle}</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            {status === 'idle' && (
-              <div className="space-y-3 motion-safe:animate-in motion-safe:fade-in-50 motion-safe:duration-200">
-                <p className="text-sm text-neutral-700 leading-relaxed">
-                  {copy.confirmVerb}{' '}
-                  <span className="font-medium text-neutral-900 tabular-nums">
-                    {targetCount.toLocaleString()} contact{targetCount !== 1 ? 's' : ''}
-                  </span>
-                  ?
-                  {copy.skipNote && <span className="text-neutral-500"> {copy.skipNote}</span>}
-                </p>
-                {operation === 'delete' && (
-                  <div className="flex items-start gap-2.5 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
-                    <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
-                    <p className="leading-relaxed">
-                      <span className="font-medium">This action cannot be undone.</span> Contacts and their event history will be permanently removed.
-                    </p>
-                  </div>
-                )}
-                {selector.mode === 'query' && (
-                  <p className="text-xs text-neutral-500 leading-relaxed">
-                    Contacts are evaluated when the job runs — any added in the meantime may also be included.
-                  </p>
-                )}
-              </div>
-            )}
-
-            {status === 'processing' && (
-              <div className="space-y-3 py-1 motion-safe:animate-in motion-safe:fade-in-50 motion-safe:duration-200">
-                <div className="flex items-baseline justify-between text-sm">
-                  <span className="flex items-center gap-2 text-neutral-600">
-                    {isQueueing && <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-400" />}
-                    <span>
-                      {isQueueing
-                        ? 'Queued — starting up…'
-                        : `${copy.processingLabel} ${targetCount.toLocaleString()} contact${targetCount !== 1 ? 's' : ''}`}
-                    </span>
-                  </span>
-                  <span
-                    className={`tabular-nums font-medium transition-opacity ${
-                      isQueueing ? 'text-neutral-400' : 'text-neutral-900'
-                    }`}
-                  >
-                    {progress}%
-                  </span>
-                </div>
-                <div className="relative w-full bg-neutral-100 rounded-full h-1.5 overflow-hidden">
-                  {isQueueing ? (
-                    <div className="absolute inset-y-0 left-0 w-1/3 rounded-full bg-neutral-300 motion-safe:animate-[indeterminate_1.4s_ease-in-out_infinite]" />
-                  ) : (
-                    <div
-                      className="bg-neutral-900 h-full rounded-full transition-[width] duration-500 ease-out"
-                      style={{width: `${progress}%`}}
-                    />
-                  )}
-                </div>
-              </div>
-            )}
-
-            {status === 'completed' && result && <BulkResultSummary result={result} />}
-
-            {status === 'failed' && (
-              <div className="flex items-start gap-2.5 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 motion-safe:animate-in motion-safe:fade-in-50 motion-safe:duration-200">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.25} />
-                <p className="leading-relaxed">{errorMessage || 'Something went wrong. Please try again.'}</p>
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            {status === 'idle' ? (
-              <>
-                <Button type="button" variant="outline" onClick={handleClose}>
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handleConfirm}
-                  disabled={isProcessing}
-                  variant={operation === 'delete' ? 'destructive' : 'default'}
-                >
-                  {isProcessing ? 'Starting…' : copy.confirmButton}
-                </Button>
-              </>
-            ) : status === 'failed' ? (
-              <>
-                <Button type="button" variant="outline" onClick={handleClose}>
-                  Close
-                </Button>
-                <Button type="button" onClick={handleRetry} variant={operation === 'delete' ? 'destructive' : 'default'}>
-                  Try again
-                </Button>
-              </>
-            ) : (
-              <Button
-                type="button"
-                onClick={handleClose}
-                variant={status === 'completed' ? 'default' : 'outline'}
-              >
-                {status === 'completed' ? 'Done' : 'Hide'}
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <ConfirmDialog
-        open={showCloseConfirmDialog}
-        onOpenChange={setShowCloseConfirmDialog}
-        onConfirm={confirmClose}
-        title="Hide this dialog?"
-        description="The job keeps running and your contacts are still updated. You just won't see the result here."
-        cancelText="Keep watching"
-        confirmText="Hide"
-        icon={EyeOff}
-      />
-    </>
-  );
-}
-
-interface OperationCopy {
-  title: string;
-  progressTitle: string;
-  completedTitle: string;
-  failedTitle: string;
-  confirmVerb: string;
-  confirmButton: string;
-  processingLabel: string;
-  /** Past-tense verb used in result rows: "12 subscribed". */
-  changedVerb: string;
-  /** Result-state noun phrase: "contacts subscribed" — pluralisation handled separately. */
-  summaryNoun: string;
-  /** Past participle for "already X": "already subscribed". null = no skip case. */
-  alreadyState: string | null;
-  /** Note shown next to the confirm prompt for ops with skip semantics. */
-  skipNote: string | null;
-}
-
-function getOperationCopy(operation: 'subscribe' | 'unsubscribe' | 'delete' | null): OperationCopy {
-  switch (operation) {
-    case 'subscribe':
-      return {
-        title: 'Subscribe contacts',
-        progressTitle: 'Subscribing…',
-        completedTitle: 'Subscribed',
-        failedTitle: "Couldn't subscribe contacts",
-        confirmVerb: 'Subscribe',
-        confirmButton: 'Subscribe',
-        processingLabel: 'Subscribing',
-        changedVerb: 'subscribed',
-        summaryNoun: 'subscribed',
-        alreadyState: 'already subscribed',
-        skipNote: 'Already-subscribed contacts will be skipped.',
-      };
-    case 'unsubscribe':
-      return {
-        title: 'Unsubscribe contacts',
-        progressTitle: 'Unsubscribing…',
-        completedTitle: 'Unsubscribed',
-        failedTitle: "Couldn't unsubscribe contacts",
-        confirmVerb: 'Unsubscribe',
-        confirmButton: 'Unsubscribe',
-        processingLabel: 'Unsubscribing',
-        changedVerb: 'unsubscribed',
-        summaryNoun: 'unsubscribed',
-        alreadyState: 'already unsubscribed',
-        skipNote: 'Already-unsubscribed contacts will be skipped.',
-      };
-    case 'delete':
-      return {
-        title: 'Delete contacts',
-        progressTitle: 'Deleting…',
-        completedTitle: 'Deleted',
-        failedTitle: "Couldn't delete contacts",
-        confirmVerb: 'Permanently delete',
-        confirmButton: 'Delete',
-        processingLabel: 'Deleting',
-        changedVerb: 'deleted',
-        summaryNoun: 'removed',
-        alreadyState: null,
-        skipNote: null,
-      };
-    default:
-      return {
-        title: 'Process contacts',
-        progressTitle: 'Processing…',
-        completedTitle: 'Done',
-        failedTitle: 'Operation failed',
-        confirmVerb: 'Process',
-        confirmButton: 'Process',
-        processingLabel: 'Processing',
-        changedVerb: 'processed',
-        summaryNoun: 'processed',
-        alreadyState: null,
-        skipNote: null,
-      };
-  }
-}
-
-function buildToastSummary(result: BulkActionResult): string {
-  const copy = getOperationCopy(result.operation);
-  const parts: string[] = [];
-  if (result.successCount > 0) parts.push(`${result.successCount.toLocaleString()} ${copy.changedVerb}`);
-  if (result.unchangedCount > 0 && copy.alreadyState) {
-    parts.push(`${result.unchangedCount.toLocaleString()} ${copy.alreadyState}`);
-  }
-  if (result.failureCount > 0) parts.push(`${result.failureCount.toLocaleString()} failed`);
-  if (parts.length === 0) return 'No contacts to update';
-  return parts.join(' · ');
-}
-
-function BulkResultSummary({result}: {result: BulkActionResult}) {
-  const copy = getOperationCopy(result.operation);
-  const {successCount, unchangedCount, failureCount} = result;
-  const noChanges = successCount === 0 && failureCount === 0 && unchangedCount > 0;
-  const total = successCount + unchangedCount + failureCount;
-
-  // Build the row list. The "primary" row is the row that represents what the
-  // user actually got — usually the changed count, but when nothing changed we
-  // promote the "already in state" row so the summary still has a clear lead.
-  type Row = {
-    key: string;
-    label: string;
-    count: number;
-    primary?: boolean;
-    tone?: 'default' | 'danger';
-  };
-  const rows: Row[] = [];
-
-  if (noChanges && copy.alreadyState) {
-    rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount, primary: true});
-  } else {
-    rows.push({key: 'changed', label: copy.completedTitle, count: successCount, primary: true});
-    if (unchangedCount > 0 && copy.alreadyState) {
-      rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount});
-    }
-  }
-  if (failureCount > 0) {
-    rows.push({key: 'failed', label: 'Failed', count: failureCount, tone: 'danger'});
-  }
-
-  return (
-    <div className="space-y-3 motion-safe:animate-in motion-safe:fade-in-50 motion-safe:slide-in-from-bottom-1 motion-safe:duration-300">
-      <div className="rounded-lg border border-neutral-200 overflow-hidden divide-y divide-neutral-100">
-        {rows.map(row => {
-          const isPrimary = !!row.primary;
-          const isDanger = row.tone === 'danger';
-          return (
-            <div
-              key={row.key}
-              className={`flex items-center gap-3 px-4 ${isPrimary ? 'py-4' : 'py-2.5'}`}
-            >
-              {/* Status mark — only on the primary row. Subsequent rows leave the
-                  same column blank to keep the labels in a single visual track. */}
-              <div className="w-7 shrink-0 flex items-center">
-                {isPrimary && (
-                  <div
-                    className={`flex h-7 w-7 items-center justify-center rounded-full ${
-                      noChanges ? 'bg-neutral-100 text-neutral-500' : 'bg-neutral-900 text-white'
-                    }`}
-                  >
-                    {noChanges ? (
-                      <Minus className="h-3.5 w-3.5" />
-                    ) : (
-                      <Check className="h-3.5 w-3.5" strokeWidth={3} />
-                    )}
-                  </div>
-                )}
-              </div>
-              <div
-                className={`flex-1 first-letter:capitalize ${
-                  isPrimary
-                    ? 'text-sm font-medium text-neutral-900'
-                    : isDanger
-                    ? 'text-sm text-red-600'
-                    : 'text-sm text-neutral-500'
-                }`}
-              >
-                {row.label}
-              </div>
-              <div
-                className={`tabular-nums tracking-tight ${
-                  isPrimary
-                    ? 'text-2xl font-semibold text-neutral-900 leading-none'
-                    : isDanger
-                    ? 'text-sm font-medium text-red-700'
-                    : 'text-sm font-medium text-neutral-700'
-                }`}
-              >
-                {row.count.toLocaleString()}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {total > 1 && rows.length > 1 && (
-        <div className="px-4 flex items-baseline justify-between text-xs text-neutral-500">
-          <span>Total processed</span>
-          <span className="tabular-nums font-medium text-neutral-700">{total.toLocaleString()}</span>
-        </div>
-      )}
-
-      {result.errors && result.errors.length > 0 && (
-        <details className="group">
-          <summary className="cursor-pointer text-xs text-neutral-500 hover:text-neutral-700 select-none px-4">
-            Show error details ({result.errors.length.toLocaleString()})
-          </summary>
-          <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-neutral-200 divide-y divide-neutral-100 text-xs">
-            {result.errors.slice(0, 10).map((error, idx) => (
-              <div key={idx} className="px-3 py-2 text-red-700">
-                {error.error}
-              </div>
-            ))}
-            {result.errors.length > 10 && (
-              <div className="px-3 py-2 text-neutral-500">
-                +{(result.errors.length - 10).toLocaleString()} more
-              </div>
-            )}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-

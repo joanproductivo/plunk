@@ -1,7 +1,11 @@
 import {CampaignAudienceType, TemplateType, TrackingMode, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
 import type {FilterCondition, FilterGroup} from '@plunk/types';
-import {SNOOZE_DURATIONS} from '@plunk/types';
+import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
+
+import {SEGMENT_MEMBERS_MAX, WORKFLOW_SEGMENT_CHANGES_MAX} from '../segments.js';
+import type {ProjectBrand} from '../template/brand.js';
+import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
 const literalSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.date()]);
 type Literal = z.infer<typeof literalSchema>;
@@ -98,28 +102,34 @@ export const ProjectSchemas = {
   }),
 } as const;
 
+const bulkAction = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('ids'),
+    contactIds: z.array(uuid).min(1).max(1000),
+  }),
+  z.object({
+    mode: z.literal('query'),
+    filter: z
+      .object({
+        search: z.string().max(255).optional(),
+        status: z.enum(CONTACT_SUBSCRIPTION_STATUSES).optional(),
+        subscribed: z.boolean().optional(),
+        segmentId: uuid.optional(),
+      })
+      .default({}),
+    excludeIds: z.array(uuid).max(10000).optional(),
+  }),
+]);
+
 export const ContactSchemas = {
   create: z.object({
     email,
     subscribed: z.boolean().default(true),
     data: jsonSchema.optional(),
   }),
-  bulkAction: z.discriminatedUnion('mode', [
-    z.object({
-      mode: z.literal('ids'),
-      contactIds: z.array(uuid).min(1).max(1000),
-    }),
-    z.object({
-      mode: z.literal('query'),
-      filter: z
-        .object({
-          search: z.string().max(255).optional(),
-          subscribed: z.boolean().optional(),
-        })
-        .default({}),
-      excludeIds: z.array(uuid).max(10000).optional(),
-    }),
-  ]),
+  bulkAction,
+  /** Body of the bulk add-to / remove-from segment routes: a selector plus the static segment. */
+  bulkSegmentAction: bulkAction.and(z.object({targetSegmentId: uuid})),
   lookup: z.object({
     emails: z.array(z.string().email()).min(1).max(500),
   }),
@@ -193,7 +203,9 @@ export const SegmentSchemas = {
     trackMembership: z.boolean().optional(),
   }),
   members: z.object({
-    emails: z.array(z.string().email()).min(1).max(500),
+    // No format check: contacts are matched by their stored email, and imports accept addresses
+    // a strict validator would reject
+    emails: z.array(z.string().trim().min(1).max(320)).min(1).max(SEGMENT_MEMBERS_MAX),
     createMissing: z.boolean().optional(),
     subscribed: z.boolean().optional(),
   }),
@@ -341,8 +353,11 @@ export const WorkflowStepConfigSchemas = {
       },
     ),
   waitForEvent: z.object({
+    // "execution": count only emails this execution sent, for the events canScopeWaitToExecution accepts
+    scope: z.enum(['contact', 'execution']).optional(),
     eventName: z.string().min(1),
-    timeout: z.number().positive().max(31536000, 'Timeout cannot exceed 365 days (31,536,000 seconds)').optional(),
+    // 0 or omitted waits with no time limit
+    timeout: z.number().nonnegative().max(31536000, 'Timeout cannot exceed 365 days (31,536,000 seconds)').optional(),
   }),
   condition: z.union([
     // Legacy binary condition (if/else)
@@ -400,12 +415,23 @@ export const WorkflowStepConfigSchemas = {
     .object({
       updates: z.record(z.any()).optional(),
       subscriptionAction: z.enum(['none', 'subscribe', 'unsubscribe']).optional(),
+      /** Static segments to add the contact to and remove it from, by id */
+      segments: z
+        .object({
+          add: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+          remove: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+        })
+        .refine(value => !value.add.some(id => value.remove.includes(id)), {
+          message: 'A segment cannot be both added and removed',
+        })
+        .optional(),
     })
     .refine(
       value =>
         (value.updates && Object.keys(value.updates).length > 0) ||
-        (value.subscriptionAction && value.subscriptionAction !== 'none'),
-      {message: 'Provide at least one field to update or a subscription action'},
+        (value.subscriptionAction && value.subscriptionAction !== 'none') ||
+        (value.segments && value.segments.add.length + value.segments.remove.length > 0),
+      {message: 'Provide at least one field to update, a subscription action or a segment change'},
     ),
 };
 
@@ -612,5 +638,51 @@ export const MembershipSchemas = {
   }),
   updateRole: z.object({
     role: z.enum(['ADMIN', 'MEMBER']),
+  }),
+} as const;
+
+/**
+ * A project's brand as sent to the API: any object, which the API then reads through
+ * toProjectBrand's allowlist, keeping only known fonts, colours and widths.
+ */
+export const BrandSchemas = {
+  update: z.custom<Partial<ProjectBrand>>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The brand must be an object',
+  ),
+} as const;
+
+/**
+ * A project's own unsubscribe footers as sent to the API: any object, which the API then checks
+ * with toProjectFooters, answering 400 with the reasons for anything it cannot keep.
+ */
+export const FooterSchemas = {
+  update: z.custom<ProjectFooters>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The footers must be an object',
+  ),
+} as const;
+
+/** How many addresses a project's failure alerts can go to (Plunk Lite) */
+export const ALERT_RECIPIENTS_MAX = 10;
+
+/** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
+export const FAILURE_ALERTS_OPEN_MAX = 20;
+
+export const AlertSchemas = {
+  // An empty list turns the alert emails off; the dashboard banner stays.
+  settings: z.object({
+    recipients: z
+      .array(z.string().trim().toLowerCase().email())
+      .max(ALERT_RECIPIENTS_MAX, `At most ${ALERT_RECIPIENTS_MAX} addresses`),
+    fromEmail: z.string().trim().toLowerCase().email().optional(),
+    fromName: z.string().trim().max(100).optional(),
+  }),
+  // The failures the banner showed, each with the last failure it saw
+  review: z.object({
+    seen: z
+      .array(z.object({id: uuid, lastAt: z.string().datetime()}))
+      .min(1)
+      .max(FAILURE_ALERTS_OPEN_MAX),
   }),
 } as const;

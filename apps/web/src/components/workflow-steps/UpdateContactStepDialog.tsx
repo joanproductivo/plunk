@@ -1,10 +1,18 @@
+import type {UpdateContactSegmentChanges} from '@plunk/types';
 import {Label, RadioGroup, RadioGroupItem} from '@plunk/ui';
 import {useState} from 'react';
 import {toast} from 'sonner';
 
 import {KeyValueEditor} from '../KeyValueEditor';
 
-import {type EditStepDialogProps, getStepConfig, StepDialogShell, useStepUpdate} from './shared';
+import {SegmentActionsField} from './SegmentActionsField';
+import {
+  type EditStepDialogProps,
+  getStepConfig,
+  hasUpdateContactAction,
+  StepDialogShell,
+  useStepUpdate,
+} from './shared';
 
 type SubscriptionAction = 'none' | 'subscribe' | 'unsubscribe';
 
@@ -24,12 +32,18 @@ export function UpdateContactStepDialog({step, workflowId, open, onOpenChange, o
     config.subscriptionAction === 'subscribe' || config.subscriptionAction === 'unsubscribe'
       ? config.subscriptionAction
       : 'none';
+  const configSegments = (config.segments ?? {}) as Partial<UpdateContactSegmentChanges>;
+  const initialSegments: UpdateContactSegmentChanges = {
+    add: Array.isArray(configSegments.add) ? configSegments.add : [],
+    remove: Array.isArray(configSegments.remove) ? configSegments.remove : [],
+  };
 
   const [name, setName] = useState(step.name);
   const [contactUpdateData, setContactUpdateData] = useState<Record<string, string | number | boolean> | null>(
     initialUpdates,
   );
   const [subscriptionAction, setSubscriptionAction] = useState<SubscriptionAction>(initialSubscriptionAction);
+  const [segmentActions, setSegmentActions] = useState<UpdateContactSegmentChanges>(initialSegments);
 
   const {update, isSubmitting} = useStepUpdate(workflowId, step.id);
 
@@ -37,10 +51,8 @@ export function UpdateContactStepDialog({step, workflowId, open, onOpenChange, o
     e.preventDefault();
 
     const hasUpdates = contactUpdateData && Object.keys(contactUpdateData).length > 0;
-    const hasSubscriptionAction = subscriptionAction !== 'none';
-
-    if (!hasUpdates && !hasSubscriptionAction) {
-      toast.error('Add at least one field to update or choose a subscription action');
+    if (!hasUpdateContactAction({updates: contactUpdateData, subscriptionAction, segments: segmentActions})) {
+      toast.error('Add at least one field to update, a subscription action or a segment');
       return;
     }
 
@@ -49,6 +61,7 @@ export function UpdateContactStepDialog({step, workflowId, open, onOpenChange, o
       config: {
         updates: hasUpdates ? contactUpdateData : {},
         subscriptionAction,
+        segments: segmentActions,
       },
     });
 
@@ -90,6 +103,8 @@ export function UpdateContactStepDialog({step, workflowId, open, onOpenChange, o
           ))}
         </RadioGroup>
       </div>
+
+      <SegmentActionsField value={segmentActions} onChange={setSegmentActions} />
 
       <div className="space-y-2">
         <KeyValueEditor key={`edit-${step.id}`} initialData={contactUpdateData} onChange={setContactUpdateData} />

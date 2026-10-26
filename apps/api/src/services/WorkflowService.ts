@@ -1,6 +1,6 @@
 import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from '@plunk/db';
 import {Prisma, WorkflowExecutionStatus} from '@plunk/db';
-import type {PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
+import type {AvailableField, PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
@@ -1385,8 +1385,18 @@ export class WorkflowService {
       category: 'Event Data',
     }));
 
+    // Segments: whether the contact is in each one when the condition runs. Listed after the
+    // other fields, by name, since their `segment.<id>` field reads as noise.
+    const segments = await prisma.segment.findMany({where: {projectId}, select: {id: true, name: true}});
+    const segmentFields: AvailableField[] = segments
+      .map(segment => ({field: `segment.${segment.id}`, type: 'boolean', category: 'Segments', label: segment.name}))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
     // Combine all fields
-    const allFields = [...contactFields, ...eventFields].sort((a, b) => a.field.localeCompare(b.field));
+    const allFields: AvailableField[] = [
+      ...[...contactFields, ...eventFields].sort((a, b) => a.field.localeCompare(b.field)),
+      ...segmentFields,
+    ];
 
     // Also return legacy format for backwards compatibility
     const fieldNames = allFields.map(f => f.field);

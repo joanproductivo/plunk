@@ -135,6 +135,8 @@ Writing tools:
 | `plunk_send_campaign`              | Send or schedule a campaign *(destructive, irreversible)* |
 | `plunk_cancel_campaign`            | Stop a scheduled or in-flight campaign *(destructive)*    |
 | `plunk_create_segment`             | Create an audience segment                                |
+| `plunk_add_to_segment`             | Add contacts to a static segment by email                 |
+| `plunk_remove_from_segment`        | Remove contacts from a static segment by email            |
 | `plunk_create_workflow`            | Create a workflow, disabled, triggered by an event        |
 | `plunk_update_workflow`            | Rename, change the trigger event, or allow re-entry       |
 | `plunk_duplicate_workflow`         | Copy a workflow, disabled, e.g. for another language      |
@@ -188,7 +190,9 @@ Plunk's secret key is all-or-nothing over its project, so this server adds its o
   one recipient, ask you to confirm before anything goes out, and the prompt tells you how many people
   will receive it. Enabling a workflow that has email steps with `plunk_set_workflow_enabled` asks too,
   and names the trigger event. So do changing the trigger of an enabled workflow that sends email and
-  starting one for a contact with `plunk_start_workflow_execution`. Confirmation is not a tool argument, so the model cannot grant it to itself.
+  starting one for a contact with `plunk_start_workflow_execution`, and changing the members of a segment that
+  tracks membership with `plunk_add_to_segment` or `plunk_remove_from_segment`, since its entry and exit events
+  can start workflows. Confirmation is not a tool argument, so the model cannot grant it to itself.
   Clients that cannot show a prompt cannot send — set `PLUNK_ALLOW_UNCONFIRMED_SENDS=true` if you are
   running headless and accept that.
 - **Read-only mode is enforced by registration**, not by convention. With `PLUNK_READ_ONLY=true` the

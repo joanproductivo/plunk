@@ -36,7 +36,7 @@ const BARE_PATH = /^[A-Za-z_][\w .-]*$/;
 const RAW_TAG = /^\s*raw\s*$/;
 const END_RAW_TAG = /\{%-?\s*endraw\s*-?%\}/;
 
-function decodeEntities(source: string): string {
+export function decodeEntities(source: string): string {
   return source.includes('&') ? source.replace(ENTITY_PATTERN, entity => ENTITIES[entity] ?? entity) : source;
 }
 

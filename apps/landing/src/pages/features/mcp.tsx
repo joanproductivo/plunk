@@ -22,7 +22,7 @@ import {NextSeo} from 'next-seo';
 /**
  * Every tool @plunk/mcp registers, grouped the way the dashboard is. Names drop
  * the plunk_ prefix; the intro says so once rather than the chips repeating it
- * forty-two times. Read and write are kept apart because read-only mode
+ * forty-four times. Read and write are kept apart because read-only mode
  * registers the read tools and nothing else.
  */
 const toolGroups: ToolGroup[] = [
@@ -36,7 +36,7 @@ const toolGroups: ToolGroup[] = [
   {
     title: 'Contacts and segments',
     description:
-      'Look up, create, update and delete contacts. Subscribe and unsubscribe take an email address, so there is no ID lookup first.',
+      'Look up, create, update and delete contacts, and add them to or remove them from static segments. Subscribe, unsubscribe and segment membership take email addresses, so there is no ID lookup first.',
     read: ['list_contacts', 'get_contact', 'list_segments'],
     write: [
       'create_contact',
@@ -45,6 +45,8 @@ const toolGroups: ToolGroup[] = [
       'unsubscribe_contact',
       'delete_contact',
       'create_segment',
+      'add_to_segment',
+      'remove_from_segment',
     ],
   },
   {
@@ -212,7 +214,7 @@ export default function MCPFeature() {
         openGraph={{
           title: 'MCP Server - Plunk for AI Agents | Plunk',
           description:
-            'Connect Plunk to Claude, Cursor, and any MCP client. 42 tools for email, contacts, campaigns, segments, and workflows, with read-only mode and send confirmations built in.',
+            'Connect Plunk to Claude, Cursor, and any MCP client. 44 tools for email, contacts, campaigns, segments, and workflows, with read-only mode and send confirmations built in.',
           url: 'https://www.useplunk.com/features/mcp',
           images: [
             {
@@ -236,7 +238,9 @@ export default function MCPFeature() {
               an email platform.
             </>
           }
-          subtitle={'Forty-two tools for email, contacts, segments, campaigns and workflows. Sends still ask you first.'}
+          subtitle={
+            'Forty-four tools for email, contacts, segments, campaigns and workflows. Sends still ask you first.'
+          }
           docsHref={`${WIKI_URI}/guides/mcp-server`}
           docsLabel={'MCP docs'}
           artifact={<AgentSnippet copy={exchange} />}
@@ -247,7 +251,7 @@ export default function MCPFeature() {
         <FeatureSection
           title={'What your agent can do'}
           intro={
-            'Forty-two tools, grouped the way the dashboard is. Each is prefixed plunk_ in your client. Read-only mode registers the read column and nothing else.'
+            'Forty-four tools, grouped the way the dashboard is. Each is prefixed plunk_ in your client. Read-only mode registers the read column and nothing else.'
           }
         >
           <ToolGroups groups={toolGroups} writeNote={'off in read-only mode'} />

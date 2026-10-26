@@ -1,5 +1,6 @@
 import type {
   Contact,
+  Email,
   Prisma,
   Template,
   Workflow,
@@ -8,8 +9,9 @@ import type {
   WorkflowStepExecution,
 } from '@plunk/db';
 import {StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
+import type {SegmentChangesResult, UpdateContactSegmentChanges} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
-import {renderTemplate, WorkflowStepConfigSchemas} from '@plunk/shared';
+import {canScopeWaitToExecution, renderTemplate, WorkflowStepConfigSchemas} from '@plunk/shared';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import signale from 'signale';
@@ -18,9 +20,15 @@ import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
 import {DASHBOARD_URI} from '../app/constants.js';
 
+import {RECIPIENT_OVERRIDE_HEADER} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+
+// A failing step is rethrown through the catch of every step before it in the same run, so this
+// set keeps the errors already recorded for the project's alerts, to count each once.
+const recordedFailures = new WeakSet<object>();
 
 type StepConfig = Prisma.JsonValue;
 type StepResult = Record<string, unknown>;
@@ -130,13 +138,14 @@ export class WorkflowExecutionService {
     let execution = initialExecution;
     if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
       signale.info(`[WORKFLOW] Setting execution ${executionId} from WAITING to RUNNING`);
-      await prisma.workflowExecution.update({
-        where: {id: executionId},
-        data: {
+      if (
+        !(await this.updateUnlessCancelled(executionId, {
           status: WorkflowExecutionStatus.RUNNING,
           currentStepId: stepId,
-        },
-      });
+        }))
+      ) {
+        return;
+      }
 
       // Re-fetch the execution with the updated status
       const updatedExecution = await prisma.workflowExecution.findUnique({
@@ -285,6 +294,17 @@ export class WorkflowExecutionService {
         },
       });
 
+      const isObject = typeof error === 'object' && error !== null;
+      if (!isObject || !recordedFailures.has(error)) {
+        if (isObject) recordedFailures.add(error);
+        await FailureAlertService.record(failedExecution.workflow.project.id, {
+          sourceKey: `workflow:${failedExecution.workflowId}`,
+          label: failedExecution.workflow.name,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          contactEmail: failedExecution.contact.email,
+        });
+      }
+
       // Send notification about workflow execution failure
       await NtfyService.notifyWorkflowExecutionFailed(
         failedExecution.workflow.name,
@@ -324,13 +344,17 @@ export class WorkflowExecutionService {
     }
 
     // Only process if step is still waiting (event might have arrived before timeout)
-    if (stepExecution.status !== StepExecutionStatus.WAITING) {
+    // and the execution was not cancelled
+    if (
+      stepExecution.status !== StepExecutionStatus.WAITING ||
+      stepExecution.execution.status === WorkflowExecutionStatus.CANCELLED
+    ) {
       return;
     }
 
-    // Mark step as completed with timeout
-    await prisma.workflowStepExecution.update({
-      where: {id: stepExecution.id},
+    // Mark step as completed with timeout, unless the event claimed the wait since it was read
+    const {count} = await prisma.workflowStepExecution.updateMany({
+      where: {id: stepExecution.id, status: StepExecutionStatus.WAITING},
       data: {
         status: StepExecutionStatus.COMPLETED,
         completedAt: new Date(),
@@ -346,6 +370,10 @@ export class WorkflowExecutionService {
       },
     });
 
+    if (count === 0) {
+      return;
+    }
+
     // Continue workflow - find transitions with timeout/fallback logic
     const transitions = stepExecution.step.outgoingTransitions || [];
     const fallbackTransition = transitions.find(
@@ -359,29 +387,27 @@ export class WorkflowExecutionService {
 
     if (fallbackTransition) {
       // Follow timeout branch
-      await prisma.workflowExecution.update({
-        where: {id: stepExecution.executionId},
-        data: {
+      if (
+        await this.updateUnlessCancelled(stepExecution.executionId, {
           status: WorkflowExecutionStatus.RUNNING,
           currentStepId: fallbackTransition.toStep.id,
-        },
-      });
-
-      await this.processStepExecution(stepExecution.executionId, fallbackTransition.toStep.id);
+        })
+      ) {
+        await this.processStepExecution(stepExecution.executionId, fallbackTransition.toStep.id);
+      }
     } else if (transitions.length > 0) {
       // No timeout branch, follow first transition
       const firstTransition = transitions[0];
       if (firstTransition?.toStep) {
         const nextStep = firstTransition.toStep;
-        await prisma.workflowExecution.update({
-          where: {id: stepExecution.executionId},
-          data: {
+        if (
+          await this.updateUnlessCancelled(stepExecution.executionId, {
             status: WorkflowExecutionStatus.RUNNING,
             currentStepId: nextStep.id,
-          },
-        });
-
-        await this.processStepExecution(stepExecution.executionId, nextStep.id);
+          })
+        ) {
+          await this.processStepExecution(stepExecution.executionId, nextStep.id);
+        }
       }
     } else {
       // No transitions, complete workflow
@@ -403,13 +429,15 @@ export class WorkflowExecutionService {
     eventName: string,
     contactId?: string,
     data?: Record<string, unknown>,
+    emailId?: string,
   ): Promise<void> {
-    // Find workflows waiting for this event
+    // Find workflows waiting for this event (a cancelled execution keeps its wait step WAITING)
     const waitingExecutions = await prisma.workflowStepExecution.findMany({
       where: {
         status: StepExecutionStatus.WAITING,
         execution: {
           workflow: {projectId},
+          status: {not: WorkflowExecutionStatus.CANCELLED},
           ...(contactId ? {contactId} : {}),
         },
         step: {
@@ -434,13 +462,35 @@ export class WorkflowExecutionService {
       },
     });
 
+    // The email behind the event, loaded at most once and only for a wait scoped to its execution
+    let sourceEmail: Pick<Email, 'workflowExecutionId' | 'headers'> | null | undefined;
+
     for (const stepExecution of waitingExecutions) {
       const config = stepExecution.step.config;
 
       if (config && typeof config === 'object' && 'eventName' in config && config.eventName === eventName) {
-        // Event matches, resume execution
-        await prisma.workflowStepExecution.update({
-          where: {id: stepExecution.id},
+        // A wait scoped to its execution counts only the emails that execution sent to the contact
+        if ('scope' in config && config.scope === 'execution' && canScopeWaitToExecution(eventName)) {
+          if (sourceEmail === undefined) {
+            sourceEmail = emailId
+              ? await prisma.email.findUnique({
+                  where: {id: emailId},
+                  select: {workflowExecutionId: true, headers: true},
+                })
+              : null;
+          }
+
+          if (!this.sentByExecution(sourceEmail, stepExecution.executionId)) {
+            continue;
+          }
+        }
+
+        // Event matches. Claim the wait before resuming it: the list above can be stale by now,
+        // as the same event may be delivered twice at once (SES notifications, repeated clicks)
+        // or tracked again while an earlier wait of this loop was resumed. Whoever moves the
+        // step out of WAITING resumes it; everyone else leaves it alone.
+        const {count} = await prisma.workflowStepExecution.updateMany({
+          where: {id: stepExecution.id, status: StepExecutionStatus.WAITING},
           data: {
             status: StepExecutionStatus.COMPLETED,
             completedAt: new Date(),
@@ -452,13 +502,41 @@ export class WorkflowExecutionService {
           },
         });
 
-        // Cancel any pending timeout job
-        await QueueService.cancelWorkflowTimeout(stepExecution.id);
+        if (count === 0) {
+          continue;
+        }
+
+        // Cancel any pending timeout job. Best effort: a timeout job that is already running
+        // cannot be removed, and it will find the wait claimed and stop. Failing here would
+        // leave the claimed execution with nobody to move it on.
+        try {
+          await QueueService.cancelWorkflowTimeout(stepExecution.id);
+        } catch (error) {
+          signale.warn(`[WORKFLOW] Could not cancel the timeout of step execution ${stepExecution.id}:`, error);
+        }
 
         // Continue workflow
         await this.processNextSteps(stepExecution.execution, stepExecution.step, {eventReceived: true});
       }
     }
+  }
+
+  /**
+   * Whether an email was sent to the contact by the given execution. An email a step sent to a
+   * custom recipient is recorded under the contact too, but it is not the contact's engagement.
+   */
+  private static sentByExecution(
+    email: Pick<Email, 'workflowExecutionId' | 'headers'> | null,
+    executionId: string,
+  ): boolean {
+    if (email?.workflowExecutionId !== executionId) {
+      return false;
+    }
+
+    const headers =
+      email.headers && typeof email.headers === 'object' && !Array.isArray(email.headers) ? email.headers : {};
+
+    return !(RECIPIENT_OVERRIDE_HEADER in headers);
   }
 
   /**
@@ -637,13 +715,8 @@ export class WorkflowExecutionService {
       },
     });
 
-    // Update workflow execution to waiting
-    await prisma.workflowExecution.update({
-      where: {id: _execution.id},
-      data: {
-        status: WorkflowExecutionStatus.WAITING,
-      },
-    });
+    // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
+    await this.updateUnlessCancelled(_execution.id, {status: WorkflowExecutionStatus.WAITING});
 
     // Find next steps to queue
     const transitions = await prisma.workflowTransition.findMany({
@@ -691,13 +764,8 @@ export class WorkflowExecutionService {
       },
     });
 
-    // Update workflow execution to waiting
-    await prisma.workflowExecution.update({
-      where: {id: _execution.id},
-      data: {
-        status: WorkflowExecutionStatus.WAITING,
-      },
-    });
+    // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
+    await this.updateUnlessCancelled(_execution.id, {status: WorkflowExecutionStatus.WAITING});
 
     // Queue timeout handler if timeout is specified
     if (timeout && timeout > 0) {
@@ -737,6 +805,7 @@ export class WorkflowExecutionService {
     // - data.firstName, data.lastName, etc.
     // - workflow.* (execution context - alias for event data)
     // - event.* (event data that triggered the workflow)
+    // - segment.<id> (whether the contact is in that segment now; see conditionValue)
     const fieldData = {
       contact: {
         email: contact.email,
@@ -749,7 +818,7 @@ export class WorkflowExecutionService {
 
     // Multi-branch mode (switch/case)
     if ('mode' in parsed && parsed.mode === 'multi') {
-      const actualValue = this.resolveField(parsed.field, fieldData);
+      const actualValue = await this.conditionValue(parsed.field, fieldData, execution);
 
       for (const branch of parsed.branches) {
         if (this.evaluateCondition(actualValue, branch.operator, branch.value)) {
@@ -777,7 +846,7 @@ export class WorkflowExecutionService {
     const field = parsed.field;
     const operator = 'operator' in parsed ? parsed.operator : 'equals';
     const value = 'value' in parsed ? parsed.value : undefined;
-    const actualValue = this.resolveField(field, fieldData);
+    const actualValue = await this.conditionValue(field, fieldData, execution);
     const result = this.evaluateCondition(actualValue, operator, value);
 
     return {
@@ -809,14 +878,11 @@ export class WorkflowExecutionService {
         ? config.reason
         : 'exit_step';
 
-    // Mark workflow as exited
-    await prisma.workflowExecution.update({
-      where: {id: execution.id},
-      data: {
-        status: WorkflowExecutionStatus.EXITED,
-        exitReason: reason || undefined,
-        completedAt: new Date(),
-      },
+    // Mark workflow as exited (a cancelled one stays cancelled, so nothing after this step runs)
+    await this.updateUnlessCancelled(execution.id, {
+      status: WorkflowExecutionStatus.EXITED,
+      exitReason: reason || undefined,
+      completedAt: new Date(),
     });
 
     return {
@@ -1132,7 +1198,12 @@ export class WorkflowExecutionService {
   }
 
   /**
-   * UPDATE_CONTACT step - Update contact data
+   * UPDATE_CONTACT step - Update contact data, subscription and static segments.
+   *
+   * Applied in a fixed order -- data, subscription, segment removals, segment additions -- and
+   * segment events are tracked before the step returns, so a workflow they start (which runs
+   * right away, in this same call) already sees the contact's new data. A segment that no longer
+   * exists or is not static is skipped and reported, and the step carries on (D2).
    */
   private static async executeUpdateContact(
     _step: WorkflowStep,
@@ -1140,7 +1211,7 @@ export class WorkflowExecutionService {
     _stepExecution: WorkflowStepExecution,
     config: StepConfig,
   ): Promise<StepResult> {
-    const {updates, subscriptionAction} = WorkflowStepConfigSchemas.updateContact.parse(config);
+    const {updates, subscriptionAction, segments} = WorkflowStepConfigSchemas.updateContact.parse(config);
 
     const contact = execution.contact;
     const currentData =
@@ -1185,13 +1256,67 @@ export class WorkflowExecutionService {
       );
     }
 
+    const segmentChanges = await this.applySegmentChanges(
+      execution.workflow.projectId,
+      contact.id,
+      segments ?? {add: [], remove: []},
+    );
+
     return {
-      updated: hasDataUpdates || subscriptionChanging,
+      updated:
+        hasDataUpdates ||
+        subscriptionChanging ||
+        segmentChanges.segmentsAdded.length + segmentChanges.segmentsRemoved.length > 0,
       updates,
       newData,
       subscriptionAction,
       subscribed: desiredSubscribed ?? contact.subscribed,
+      ...segmentChanges,
     };
+  }
+
+  /**
+   * Remove the contact from, then add it to, static segments. Adding counts as an entry even
+   * for a current member (D1).
+   */
+  private static async applySegmentChanges(
+    projectId: string,
+    contactId: string,
+    segments: UpdateContactSegmentChanges,
+  ): Promise<SegmentChangesResult> {
+    const {SegmentMembershipService} = await import('./SegmentMembershipService.js');
+    const result: SegmentChangesResult = {segmentsAdded: [], segmentsRemoved: [], skippedSegments: []};
+
+    // Removals first. Repeated ids are dropped: each add is an entry of its own, so a repeated
+    // id would fire the segment's entry, and start its workflows, once per repetition.
+    const changes = [
+      ...[...new Set(segments.remove)].map(segmentId => ({segmentId, add: false})),
+      ...[...new Set(segments.add)].map(segmentId => ({segmentId, add: true})),
+    ];
+
+    for (const {segmentId, add} of changes) {
+      try {
+        if (add) {
+          const {added} = await SegmentMembershipService.addMembers(projectId, segmentId, [contactId], {mode: 'await'});
+          if (added > 0) result.segmentsAdded.push(segmentId);
+        } else {
+          const {removed} = await SegmentMembershipService.removeMembers(projectId, segmentId, [contactId], {
+            mode: 'await',
+          });
+          if (removed > 0) result.segmentsRemoved.push(segmentId);
+        }
+      } catch (error) {
+        // A missing, foreign or dynamic segment is a 404/400 from getStaticSegment: skip it (D2).
+        // Anything else, such as a database error, fails the step as usual.
+        if (!(error instanceof HttpException) || (error.code !== 404 && error.code !== 400)) {
+          throw error;
+        }
+        signale.warn(`[WORKFLOW] Skipping segment ${segmentId} in an Update contact step: ${error.message}`);
+        result.skippedSegments.push(segmentId);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1264,17 +1389,39 @@ export class WorkflowExecutionService {
     }
 
     // Update current step and continue execution
-    await prisma.workflowExecution.update({
-      where: {id: execution.id},
-      data: {
+    if (
+      !(await this.updateUnlessCancelled(execution.id, {
         currentStepId: nextStep.id,
         status: WorkflowExecutionStatus.RUNNING,
-      },
-    });
+      }))
+    ) {
+      return;
+    }
 
     // Process the next step
     // All steps are processed immediately - DELAY and WAIT_FOR_EVENT will pause the workflow internally
     await this.processStepExecution(execution.id, nextStep.id);
+  }
+
+  /**
+   * Helper: Update an execution unless it has been cancelled
+   * Returns false for a cancelled (or deleted) execution, so a cancel that lands while a step runs
+   * is never undone by the engine moving on
+   */
+  private static async updateUnlessCancelled(
+    executionId: string,
+    data: Prisma.WorkflowExecutionUncheckedUpdateManyInput,
+  ): Promise<boolean> {
+    const {count} = await prisma.workflowExecution.updateMany({
+      where: {id: executionId, status: {not: WorkflowExecutionStatus.CANCELLED}},
+      data,
+    });
+
+    if (count === 0) {
+      signale.info(`[WORKFLOW] Execution ${executionId} was cancelled or no longer exists, leaving it as it is`);
+    }
+
+    return count > 0;
   }
 
   /**
@@ -1283,6 +1430,26 @@ export class WorkflowExecutionService {
    */
   private static renderTemplate(template: string, variables: Record<string, unknown>): string {
     return renderTemplate(template, variables);
+  }
+
+  /**
+   * The value a condition compares: `segment.<id>` is whether the contact is in that segment
+   * right now (a boolean); any other field is read from the contact and event data.
+   */
+  private static async conditionValue(
+    field: string,
+    fieldData: Record<string, unknown>,
+    execution: WorkflowExecutionWithRelations,
+  ): Promise<unknown> {
+    if (field.startsWith('segment.')) {
+      const {SegmentService} = await import('./SegmentService.js');
+      return SegmentService.isMember(
+        execution.workflow.projectId,
+        field.slice('segment.'.length),
+        execution.contact.id,
+      );
+    }
+    return this.resolveField(field, fieldData);
   }
 
   /**

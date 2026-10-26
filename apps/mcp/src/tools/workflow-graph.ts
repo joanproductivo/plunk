@@ -40,6 +40,9 @@ export const WEBHOOK_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as cons
 
 export const SUBSCRIPTION_ACTIONS = ['none', 'subscribe', 'unsubscribe'] as const;
 
+/** Most segments one UPDATE_CONTACT step can add to, and remove from, each. */
+export const MAX_SEGMENT_CHANGES = 20;
+
 const UNIT_SECONDS: Record<(typeof DELAY_UNITS)[number], number> = {minutes: 60, hours: 3600, days: 86400};
 
 /** Upper bound the API enforces on a DELAY step (`WorkflowStepConfigSchemas.delay`). */
@@ -97,6 +100,24 @@ function needsValue(data: {operator: string; value?: unknown}): boolean {
 
 const VALUE_REQUIRED = {message: 'A value is required unless the operator is exists or notExists'};
 
+/** A `segment.<id>` field is true or false: anything but equals / notEquals a boolean always takes one path. */
+function segmentComparisonOk(field: string, data: {operator: string; value?: unknown}): boolean {
+  return (
+    !field.startsWith('segment.') ||
+    ((data.operator === 'equals' || data.operator === 'notEquals') && typeof data.value === 'boolean')
+  );
+}
+
+const SEGMENT_COMPARISON = {
+  message: 'A segment.<id> field is true or false: compare it with equals or notEquals and a boolean value',
+};
+
+/** Segment IDs as the API stores them: UUIDs, at most MAX_SEGMENT_CHANGES, none repeated. */
+const segmentIds = z
+  .array(z.string().uuid('Segment IDs are UUIDs (see plunk_list_segments)'))
+  .max(MAX_SEGMENT_CHANGES)
+  .refine(ids => new Set(ids).size === ids.length, {message: 'A segment is listed twice'});
+
 const STEP_CONFIG_SCHEMAS: Record<BuildableStepType, z.ZodType> = {
   SEND_EMAIL: z.object({
     templateId: z.string().min(1),
@@ -111,41 +132,52 @@ const STEP_CONFIG_SCHEMAS: Record<BuildableStepType, z.ZodType> = {
     .object({amount: z.number().positive(), unit: z.enum(DELAY_UNITS)})
     .refine((data) => data.amount <= MAX_DELAY[data.unit], {message: 'Delay cannot exceed 365 days'}),
   WAIT_FOR_EVENT: z.object({
+    scope: z.enum(['contact', 'execution']).optional(),
     eventName: z.string().min(1),
-    timeout: z.number().positive().max(MAX_WAIT_SECONDS, 'Timeout cannot exceed 365 days').optional(),
+    timeout: z.number().nonnegative().max(MAX_WAIT_SECONDS, 'Timeout cannot exceed 365 days').optional(),
   }),
   CONDITION: z.union([
     z
       .object({field: z.string().min(1), operator: conditionOperator, value: z.unknown().optional()})
-      .refine(needsValue, VALUE_REQUIRED),
-    z.object({
-      mode: z.literal('multi'),
-      field: z.string().min(1),
-      branches: z
-        .array(
-          z
-            .object({
-              id: z.string().min(1),
-              name: z.string().min(1),
-              operator: conditionOperator,
-              value: z.unknown().optional(),
-            })
-            .refine(needsValue, VALUE_REQUIRED),
-        )
-        .min(1)
-        .max(20),
-    }),
+      .refine(needsValue, VALUE_REQUIRED)
+      .refine(data => segmentComparisonOk(data.field, data), SEGMENT_COMPARISON),
+    z
+      .object({
+        mode: z.literal('multi'),
+        field: z.string().min(1),
+        branches: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1),
+                name: z.string().min(1),
+                operator: conditionOperator,
+                value: z.unknown().optional(),
+              })
+              .refine(needsValue, VALUE_REQUIRED),
+          )
+          .min(1)
+          .max(20),
+      })
+      .refine(data => data.branches.every(branch => segmentComparisonOk(data.field, branch)), SEGMENT_COMPARISON),
   ]),
   UPDATE_CONTACT: z
     .object({
       updates: z.record(z.string(), z.unknown()).optional(),
       subscriptionAction: z.enum(SUBSCRIPTION_ACTIONS).optional(),
+      segments: z
+        .object({add: segmentIds.default([]), remove: segmentIds.default([])})
+        .refine(value => !value.add.some(id => value.remove.includes(id)), {
+          message: 'A segment cannot be both added and removed',
+        })
+        .optional(),
     })
     .refine(
       (value) =>
         (value.updates && Object.keys(value.updates).length > 0) ||
-        (value.subscriptionAction && value.subscriptionAction !== 'none'),
-      {message: 'Provide at least one field to update or a subscription action'},
+        (value.subscriptionAction && value.subscriptionAction !== 'none') ||
+        (value.segments && value.segments.add.length + value.segments.remove.length > 0),
+      {message: 'Provide at least one field to update, a subscription action or a segment change'},
     ),
   WEBHOOK: z.object({
     url: z.string().url(),
@@ -197,6 +229,7 @@ export interface StepParams {
   branches?: BranchInput[];
   updates?: Record<string, unknown>;
   subscriptionAction?: (typeof SUBSCRIPTION_ACTIONS)[number];
+  segments?: {add?: string[]; remove?: string[]};
   url?: string;
   method?: (typeof WEBHOOK_METHODS)[number];
   headers?: Record<string, string>;
@@ -210,7 +243,7 @@ const PARAMS_BY_TYPE: Record<BuildableStepType, (keyof StepParams)[]> = {
   DELAY: ['amount', 'unit'],
   WAIT_FOR_EVENT: ['eventName', 'amount', 'unit'],
   CONDITION: ['field', 'operator', 'value', 'branches'],
-  UPDATE_CONTACT: ['updates', 'subscriptionAction'],
+  UPDATE_CONTACT: ['updates', 'subscriptionAction', 'segments'],
   WEBHOOK: ['url', 'method', 'headers', 'body'],
   EXIT: ['reason'],
 };
@@ -425,6 +458,14 @@ export function buildStepConfig(
       if (params.subscriptionAction !== undefined) {
         config.subscriptionAction = params.subscriptionAction;
       }
+      if (params.segments !== undefined) {
+        // A list left out keeps what the step already has; pass [] to clear it.
+        const current = asRecord(config.segments);
+        config.segments = {
+          add: params.segments.add ?? (Array.isArray(current.add) ? current.add : []),
+          remove: params.segments.remove ?? (Array.isArray(current.remove) ? current.remove : []),
+        };
+      }
       break;
     }
 
@@ -464,16 +505,19 @@ export function buildStepConfig(
 /**
  * The executor resolves a condition field against
  * `{contact: {email, subscribed}, data, event, workflow}` (and rewrites the
- * legacy `contact.data.X` to `data.X`). Any other path is always undefined, so
- * the condition would silently take the same branch for everyone.
+ * legacy `contact.data.X` to `data.X`), and `segment.<id>` to whether the
+ * contact is in that segment. Any other path is always undefined, so the
+ * condition would silently take the same branch for everyone.
  */
 export function fieldProblem(field: string): string | undefined {
-  if (/^(contact\.(email|subscribed)$|contact\.data\.|data\.|event\.|workflow\.)/.test(field)) {
+  if (
+    /^(contact\.(email|subscribed)$|contact\.data\.|data\.|event\.|workflow\.|segment\.[0-9a-f-]{36}$)/i.test(field)
+  ) {
     return undefined;
   }
 
   return (
-    `The condition field "${field}" never resolves. Use contact.email, contact.subscribed, ` +
+    `The condition field "${field}" never resolves. Use contact.email, contact.subscribed, segment.<segmentId>, ` +
     'data.<field> for contact data, or event.<field> for data of the event that started the workflow.'
   );
 }
@@ -663,7 +707,8 @@ export function stepSummary(step: WorkflowStep): string {
     case 'DELAY':
       return `wait ${String(config.amount ?? '?')} ${unitLabel(config.amount, config.unit)}`;
     case 'WAIT_FOR_EVENT': {
-      const timeout = typeof config.timeout === 'number' ? ` (timeout ${humanSeconds(config.timeout)})` : '';
+      const timeout =
+        typeof config.timeout === 'number' && config.timeout > 0 ? ` (timeout ${humanSeconds(config.timeout)})` : '';
       return `wait for "${String(config.eventName ?? '?')}"${timeout}`;
     }
     case 'CONDITION': {
@@ -681,7 +726,18 @@ export function stepSummary(step: WorkflowStep): string {
       if (config.subscriptionAction && config.subscriptionAction !== 'none') {
         parts.push(String(config.subscriptionAction));
       }
-      return `set ${parts.join(', ') || '?'}`;
+      const phrases = parts.length > 0 ? [`set ${parts.join(', ')}`] : [];
+      const segments = asRecord(config.segments);
+      for (const [key, verb] of [
+        ['remove', 'remove from'],
+        ['add', 'add to'],
+      ] as const) {
+        const ids = Array.isArray(segments[key]) ? (segments[key] as unknown[]) : [];
+        if (ids.length > 0) {
+          phrases.push(`${verb} segment${ids.length > 1 ? 's' : ''} ${ids.map(String).join(', ')}`);
+        }
+      }
+      return phrases.join('; ') || 'set ?';
     }
     case 'WEBHOOK':
       return `${String(config.method ?? 'POST')} ${String(config.url ?? '?')}`;
