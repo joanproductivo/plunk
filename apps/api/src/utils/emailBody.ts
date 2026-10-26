@@ -19,6 +19,8 @@ import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
 
+import {convertBoxes, recolourBoxes, spanFullWidthBoxes} from './emailBoxes.js';
+
 // juice's main entry pulls in full cheerio (parse5, undici) and web-resource-inliner, ~28 MB of
 // resident memory per process. Its inliner core on cheerio's htmlparser2 build costs ~2 MB.
 const juice = makeJuiceClient({});
@@ -175,6 +177,12 @@ function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: stri
       applyHeightAttributes: false,
       applyAttributesTableElements: false,
     });
+    try {
+      recolourBoxes($);
+    } catch (error) {
+      // Boxes keep the colours the prose styles gave their headings, legible on light backgrounds
+      warnAtMostEveryMinute('box', `[EMAIL] Failed to colour boxes${emailId ? ` of email ${emailId}` : ''}:`, error);
+    }
     // Apple Mail styles <blockquote> as quoted reply text and overrides its margins, even inline,
     // so a quote from the editor goes out as a <div> with the same styles
     $('blockquote').each((_, element) => {
@@ -205,6 +213,13 @@ function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: stri
     } catch (error) {
       // A video at its poster's size still shows everywhere but Outlook for Windows
       warnAtMostEveryMinute('video', `[EMAIL] Failed to size videos${emailId ? ` of email ${emailId}` : ''}:`, error);
+    }
+    try {
+      convertBoxes($, brand);
+      spanFullWidthBoxes($, brand);
+    } catch (error) {
+      // An unconverted box is a div with its background and padding inlined, unpadded only in Outlook
+      warnAtMostEveryMinute('box', `[EMAIL] Failed to convert boxes${emailId ? ` of email ${emailId}` : ''}:`, error);
     }
     return $.html();
   } catch (error) {
