@@ -991,6 +991,27 @@ describe('SES header serialization', () => {
     expect(headerSection.endsWith('\n')).toBe(false);
     expect(headerSection).toContain('Content-Type:');
   });
+
+  it('sends non-ASCII subjects and names as ASCII encoded-words', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Café Sabaï', email: 'sender@example.com'},
+      to: [{name: 'Doe, Jane', email: 'jane@example.com'}],
+      content: {subject: '¡Novedades de otoño!', html: '<p>Hola</p>'},
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+    const [headerSection] = rawMessage.split('\n\n');
+
+    expect(headerSection).toMatch(/^[\x20-\x7E\n]*$/);
+    expect(headerSection).toContain('From: =?UTF-8?Q?Caf=C3=A9_Saba=C3=AF?= <sender@example.com>');
+    expect(headerSection).toContain('To: "Doe, Jane" <jane@example.com>');
+    expect(headerSection).toContain('Subject: =?UTF-8?Q?=C2=A1Novedades_de_oto=C3=B1o!?=');
+    // SES does not support SMTPUTF8, so the envelope sender needs the same encoding.
+    expect(callArgs.Source).toBe('=?UTF-8?Q?Caf=C3=A9_Saba=C3=AF?= <sender@example.com>');
+  });
 });
 
 /**

@@ -10,7 +10,7 @@ import {
   SES_CONFIGURATION_SET_NO_TRACKING,
   TRACKING_TOGGLE_ENABLED,
 } from '../app/constants.js';
-import {encodeQuotedPrintable, htmlToPlainText} from '../utils/mime.js';
+import {encodeHeaderValue, encodeQuotedPrintable, formatMailbox, htmlToPlainText} from '../utils/mime.js';
 
 /**
  * AWS SES Client
@@ -92,14 +92,11 @@ export async function sendRawEmail({
 
   // Format To header with names if provided
   const toHeader = to
-    .map(recipient => {
-      if (typeof recipient === 'string') {
-        return recipient;
-      } else {
-        return recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
-      }
-    })
+    .map(recipient => (typeof recipient === 'string' ? recipient : formatMailbox(recipient.name, recipient.email)))
     .join(', ');
+
+  // Also passed to SES as Source, which takes non-ASCII names only as encoded-words.
+  const fromHeader = formatMailbox(from.name, from.email);
 
   // Extract just email addresses for Destinations (SES requirement)
   const destinations = to.map(recipient => (typeof recipient === 'string' ? recipient : recipient.email));
@@ -120,10 +117,10 @@ export async function sendRawEmail({
   const extraHeaders = extraHeaderLines.length > 0 ? `\n${extraHeaderLines.join('\n')}` : '';
 
   // Build raw MIME message
-  let rawMessage = `From: ${from.name} <${from.email}>
+  let rawMessage = `From: ${fromHeader}
 To: ${toHeader}
 Reply-To: ${reply || from.email}
-Subject: ${content.subject}
+Subject: ${encodeHeaderValue(content.subject)}
 MIME-Version: 1.0
 Content-Type: ${rootContentType}${extraHeaders}
 
@@ -212,7 +209,7 @@ ${breakLongLines(attachment.content, 76)}`;
     RawMessage: {
       Data: new TextEncoder().encode(rawMessage),
     },
-    Source: `${from.name} <${from.email}>`,
+    Source: fromHeader,
   });
 
   if (!response.MessageId) {
