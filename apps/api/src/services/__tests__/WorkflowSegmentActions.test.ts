@@ -10,7 +10,7 @@ import {WorkflowService} from '../WorkflowService';
 /**
  * Segments in workflows: an Update contact step that removes from and adds to static segments,
  * a Condition on `segment.<id>`, and the guards against deleting segments (one or several at once)
- * that a step or an active campaign uses.
+ * that a step, an active campaign or another segment uses.
  */
 describe('Workflow segment actions', () => {
   const prisma = getPrismaClient();
@@ -336,6 +336,54 @@ describe('Workflow segment actions', () => {
       expect(await prisma.segment.findUnique({where: {id: unused.id}})).toBeNull();
     });
 
+    /** A condition that uses `segment.<id>` one group deep, under a plain email filter. */
+    const nestedOn = (segmentId: string) => ({
+      logic: 'OR',
+      groups: [
+        {
+          filters: [{field: 'email', operator: 'contains', value: '@'}],
+          conditions: {
+            logic: 'AND',
+            groups: [{filters: [{field: `segment.${segmentId}`, operator: 'notMemberOfSegment'}]}],
+          },
+        },
+      ],
+    });
+
+    async function dynamicSegment(name: string, usedId: string) {
+      return prisma.segment.create({
+        data: {projectId, name, type: 'DYNAMIC', condition: toPrismaJson(nestedOn(usedId))},
+      });
+    }
+
+    async function filteredCampaign(name: string, usedId: string, status: CampaignStatus) {
+      const campaign = await factories.createCampaign({projectId, name, status});
+      await prisma.campaign.update({
+        where: {id: campaign.id},
+        data: {audienceType: 'FILTERED', audienceCondition: toPrismaJson(nestedOn(usedId))},
+      });
+    }
+
+    it('is refused while another segment or an active filtered campaign uses it, naming them', async () => {
+      const filtered = await staticSegment('Filtered', false);
+      const targeted = await staticSegment('Targeted', false);
+      const done = await staticSegment('Done', false);
+      await dynamicSegment('Lapsed', filtered.id);
+      await filteredCampaign('Winback', targeted.id, CampaignStatus.SCHEDULED);
+      await filteredCampaign('Old news', done.id, CampaignStatus.SENT);
+
+      await expect(SegmentService.delete(projectId, filtered.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('the condition of the segment(s) "Lapsed"'),
+      });
+      await expect(SegmentService.delete(projectId, targeted.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('the active campaign(s) "Winback"'),
+      });
+      await SegmentService.delete(projectId, done.id);
+      expect(await prisma.segment.findUnique({where: {id: done.id}})).toBeNull();
+    });
+
     describe('several at once', () => {
       const remaining = async (ids: string[]) =>
         (await prisma.segment.findMany({where: {id: {in: ids}}, select: {name: true}})).map(s => s.name).sort();
@@ -399,6 +447,36 @@ describe('Workflow segment actions', () => {
         expect(message).toContain('"Sent" is used by 1 active campaign(s)');
         expect(message).not.toContain('Unused');
         expect(await remaining(ids)).toEqual(['Added', 'Checked', 'Removed', 'Sent', 'Unused']);
+      });
+
+      it('deletes none when a segment outside them or an active filtered campaign uses one, naming them', async () => {
+        const filtered = await staticSegment('Filtered', false);
+        const targeted = await staticSegment('Targeted', false);
+        await dynamicSegment('Lapsed', filtered.id);
+        await dynamicSegment('Churned', filtered.id);
+        await filteredCampaign('Winback', targeted.id, CampaignStatus.DRAFT);
+        await factories.createCampaign({projectId, segmentId: targeted.id, status: CampaignStatus.SENDING});
+        const ids = [filtered.id, targeted.id];
+
+        const refusal = SegmentService.bulkUpdate(projectId, {ids, delete: true});
+
+        await expect(refusal).rejects.toMatchObject({code: 409});
+        const {message} = (await refusal.catch((error: unknown) => error)) as Error;
+        expect(message).toContain('"Filtered" is used by the condition of the segment(s) "Churned", "Lapsed"');
+        expect(message).toContain(
+          '"Targeted" is used by 1 active campaign(s) and the audience filter of the active campaign(s) "Winback"',
+        );
+        expect(await remaining(ids)).toEqual(['Filtered', 'Targeted']);
+      });
+
+      it('deletes a segment together with the segments that use it', async () => {
+        const base = await staticSegment('Base', false);
+        const middle = await dynamicSegment('Middle', base.id);
+        const top = await dynamicSegment('Top', middle.id);
+        const ids = [base.id, middle.id, top.id];
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids, delete: true})).resolves.toEqual({deleted: 3});
+        expect(await remaining(ids)).toEqual([]);
       });
 
       it('names five blocked segments and counts the rest', async () => {
