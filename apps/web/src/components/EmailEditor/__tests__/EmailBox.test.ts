@@ -2,11 +2,11 @@
 import {BOX_DEFAULTS, detectCustomHtmlPatterns} from '@plunk/shared';
 import {Editor} from '@tiptap/core';
 import {Link} from '@tiptap/extension-link';
-import {TextSelection} from '@tiptap/pm/state';
+import {AllSelection, NodeSelection, TextSelection} from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import {afterEach, describe, expect, it} from 'vitest';
 
-import {boxAtSelection, unwrapBox, updateBox, wrapInBox} from '../boxCommands';
+import {boxAtSelection, insertBox, unwrapBox, updateBox, wrapInBox} from '../boxCommands';
 import {EmailBox, EmailDocument} from '../EmailBox';
 import {EmailButton} from '../EmailButton';
 import {EmailDivider} from '../EmailDivider';
@@ -14,6 +14,7 @@ import {EmailSpacer} from '../EmailSpacer';
 import {EmailTextAlign} from '../EmailTextAlign';
 import {EmailVideo} from '../EmailVideo';
 import {ResizableImage} from '../ResizableImage';
+import {slashItems} from '../SlashCommand';
 import {insertBlockAfterSelection} from '../useBlockDialog';
 
 /**
@@ -159,13 +160,45 @@ describe('EmailBox', () => {
     });
   });
 
-  it('removes a box from inside any of its blocks, keeping them all, whole and in order', () => {
+  it('removes a box from inside any of its blocks, keeping them all, whole and in order, the cursor too', () => {
     createEditor(`<p>a</p>${box('<p>one</p><ul><li><p>two</p></li></ul><p>three</p>')}<p>b</p>`);
-    placeCursorIn('two');
+    placeCursorIn('two', 1);
 
     editor.commands.command(unwrapBox(boxAtSelection(editor)!));
 
     expect(editor.getHTML()).toBe('<p>a</p><p>one</p><ul><li><p>two</p></li></ul><p>three</p><p>b</p>');
+    const {$from} = editor.state.selection;
+    expect($from.parent.textContent).toBe('two');
+    expect($from.parentOffset).toBe(1);
+  });
+
+  it('finds a box selected as a whole, as well as one the cursor is in', () => {
+    createEditor(`<p>a</p>${box('<p>inside</p>')}`);
+    editor.view.dispatch(editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 3)));
+
+    expect(boxAtSelection(editor)).toBe(3);
+  });
+
+  it('adds an empty box where there is nothing to wrap, the cursor in it', () => {
+    createEditor(`<p>a</p>${box('<p>inside</p>')}`);
+    editor.view.dispatch(editor.state.tr.setSelection(new AllSelection(editor.state.doc)));
+
+    expect(editor.commands.command(wrapInBox(DARK))).toBe(false);
+    editor.commands.command(insertBox(DARK));
+
+    expect(boxes()).toHaveLength(2);
+    expect(editor.getHTML()).toBe(`<p>a</p>${box('<p>inside</p>')}<p></p>${box('<p></p>')}<p></p>`);
+    expect(boxAtSelection(editor)).not.toBeNull();
+  });
+
+  it('is offered by the slash menu outside boxes only', () => {
+    createEditor(`<p>out</p>${box('<p>in</p>')}`);
+    const offered = () => slashItems(editor, 'box', {canInsertImages: () => true}).map(item => item.label);
+
+    placeCursorIn('out');
+    expect(offered()).toContain('Box');
+    placeCursorIn('in');
+    expect(offered()).not.toContain('Box');
   });
 
   it('updates a box from inside it, leaving the cursor in the text', () => {
@@ -198,6 +231,20 @@ describe('EmailBox', () => {
 
       expect(boxes()).toHaveLength(1);
       expect(editor.getHTML()).toBe(`${box('<p>one</p><p></p><p></p><p>two</p>')}<p></p>`);
+    });
+
+    it('in an empty heading, moves out at the end and adds a paragraph in the middle, never splitting', () => {
+      createEditor(`${box('<h2>Title</h2><h2></h2><p>two</p>')}<p>after</p>`);
+      editor.commands.setTextSelection(9);
+
+      pressEnter();
+      expect(boxes()).toHaveLength(1);
+
+      createEditor(`${box('<p>one</p><h2></h2>')}<p>after</p>`);
+      editor.commands.setTextSelection(7);
+
+      pressEnter();
+      expect(editor.getHTML()).toBe(`${box('<p>one</p>')}<p></p><p>after</p>`);
     });
 
     it('in the only, empty paragraph of a box, keeps the box and moves into the paragraph after it', () => {

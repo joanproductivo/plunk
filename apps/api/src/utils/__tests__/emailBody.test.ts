@@ -359,7 +359,7 @@ describe('renderBody', () => {
       expect(html).toContain('<table role="presentation" data-plunk-box="inset" width="100%"');
       expect(html).toContain('<td bgcolor="#111827"');
       expect(cellStyle(html)).toMatch(
-        /^background-color: #111827; color: #ffffff; padding: 16px; border-radius: 12px; font-family: ui-sans-serif.*; font-size: 14px; line-height: 1\.7142857;$/,
+        /^background-color: #111827; color: #ffffff; padding: 16px; border-radius: 12px; font-family: ui-sans-serif.*; font-size: 0\.875rem; line-height: 1\.7142857;$/,
       );
       expect(html).toMatch(/<p style="margin-top: 0; margin-bottom: 0;">Inside<\/p>/);
     });
@@ -377,6 +377,23 @@ describe('renderBody', () => {
       expect(styleOf(html, 'a')).toContain('color: #3b82f6');
       // The quote, sent as a div, with its text and border in the box's colour
       expect(html).toMatch(/<div style="[^"]*color: #ffffff; border-left-color: #ffffff">/);
+    });
+
+    it('keeps the colour of what is around them, as inherit does: links, code blocks, coloured text', () => {
+      const html = renderBody(
+        box(
+          '<p><a href="https://a.com"><strong>Linked</strong></a> <span style="color: rgb(225, 29, 72);"><strong>Red</strong></span></p>' +
+            '<pre><code>const a = 1;</code></pre>',
+          {style: 'background-color: #f3f4f6; color: #374151;'},
+        ),
+      );
+
+      expect(html).toMatch(/<a [^>]*><strong style="[^"]*color: #3b82f6">Linked<\/strong><\/a>/);
+      expect(html).toMatch(
+        /<span style="color: rgb\(225, 29, 72\);"><strong style="[^"]*color: #e11d48">Red<\/strong>/,
+      );
+      // A code block's code stays light on its dark background
+      expect(html).toMatch(/<pre style="[^"]*"><code style="[^"]*color: #e5e7eb">/);
     });
 
     it('writes colours as read from the box, never copied from it', () => {
@@ -412,6 +429,39 @@ describe('renderBody', () => {
       expect(html).toMatch(/<\/table>\s*<div style="padding: 0 24px;">\s*<p[^>]*>After<\/p>\s*<\/div>/);
       // The footer stays in its slot, in the column, with the content's padding
       expect(html).toMatch(/<div style="padding: 0 24px;"><p>Unsubscribe<\/p><\/div>\s*<\/div>\s*<!--\[if mso\]>/);
+    });
+
+    it('keeps the footer on its white box, padded, in a dark framed column with a full-width box', () => {
+      const html = renderBody(
+        framed(box('<p>Band</p>', {full: true}), {backgroundColor: '#111827', contentColor: '#1f2937'}),
+        undefined,
+        '<p>Unsubscribe</p>',
+      );
+
+      expect(html).toContain(
+        '<div style="padding: 0 24px;"><div style="background-color: #ffffff; padding: 8px 16px;"><p>Unsubscribe</p></div></div>',
+      );
+    });
+
+    it('adds no space above or below the box from its first or last block, an image included', () => {
+      const html = renderBody(
+        box(
+          '<p><img src="https://x.example/a.png" class="email-image"></p><p>Text</p><p><img src="https://x.example/b.png" class="email-image"></p>',
+        ),
+      );
+
+      // After the prose styles' `margin: 16px 0`, so it wins
+      expect(html).toMatch(/a\.png"[^>]*style="[^"]*margin: 16px 0; margin-top: 0;"/);
+      expect(html).toMatch(/b\.png"[^>]*style="[^"]*margin: 16px 0; margin-bottom: 0;"/);
+    });
+
+    it('spaces lists inside a box as lists outside one', () => {
+      const list = '<ul><li><p>One</p></li><li><p>Two</p></li></ul>';
+      const itemStyle = (html: string) => html.match(/<li [^>]*>\s*<p style="([^"]*)">Two/)?.[1];
+
+      expect(itemStyle(renderBody(box(`<p>a</p>${list}<p>b</p>`)))).toBe(
+        itemStyle(renderBody(`<p>a</p>${list}<p>b</p>`)),
+      );
     });
 
     it('leaves a framed column as it is around inset boxes', () => {

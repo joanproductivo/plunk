@@ -7,6 +7,7 @@
 
 import {contrastRatio} from './color.js';
 import {normalizeHexColor} from './emailButton.js';
+import {EMAIL_COLUMN_PADDING, EMAIL_COLUMN_RADIUS} from './emailDocument.js';
 import {declarations} from './inlineStyle.js';
 
 export interface BoxStyle {
@@ -18,19 +19,25 @@ export interface BoxStyle {
 
 export const BOX_DEFAULTS: BoxStyle = {backgroundColor: '#f3f4f6', textColor: '#374151', fullWidth: false};
 
-export const BOX_CLASS = 'email-box';
-export const BOX_FULL_WIDTH_CLASS = 'email-box-full';
+const BOX_CLASS = 'email-box';
+const BOX_FULL_WIDTH_CLASS = 'email-box-full';
 
 /** Rounding of an inset box, in px, as the framed column's; Outlook for Windows squares it. */
-export const BOX_RADIUS = 12;
+export const BOX_RADIUS = EMAIL_COLUMN_RADIUS;
 
 /**
  * Padding inside a box, in px: a full-width one keeps its text in line with the column's, an inset
  * one leaves more room for it on a phone.
  */
-export const BOX_PADDING = {fullWidth: 24, inset: 16} as const;
+export const BOX_PADDING = {fullWidth: EMAIL_COLUMN_PADDING, inset: 16} as const;
 
 export const boxPadding = (fullWidth: boolean) => (fullWidth ? BOX_PADDING.fullWidth : BOX_PADDING.inset);
+
+/**
+ * What the prose styles colour, and takes the colour it is in inside a box instead, as `inherit`
+ * would: headings, bold text, code and quotes.
+ */
+export const BOX_INHERITED_COLOUR = ['h1', 'h2', 'h3', 'h4', 'strong', 'code', 'blockquote'] as const;
 
 /** The class a box is saved with. */
 export const boxClass = (fullWidth: boolean) => (fullWidth ? `${BOX_CLASS} ${BOX_FULL_WIDTH_CLASS}` : BOX_CLASS);

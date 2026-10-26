@@ -103,7 +103,7 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
     const edit = ({pos}: {pos: number}) => {
       if (editor.state.doc.nodeAt(pos)?.type.name === type) setState({open: true, pos});
     };
-    // A new block asked for outside the toolbar (the slash menu only asks for blocks that need a dialog)
+    // A new block of this type asked for outside the toolbar, as the slash menu asks
     const add = ({type: asked}: {type: string}) => {
       if (asked === type) setState({open: true, pos: null});
     };

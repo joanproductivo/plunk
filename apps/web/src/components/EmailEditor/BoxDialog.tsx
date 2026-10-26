@@ -13,7 +13,7 @@ import {Button, Checkbox, Dialog, DialogContent, DialogHeader, DialogTitle, Labe
 import type {Editor} from '@tiptap/react';
 import {useEffect, useRef, useState} from 'react';
 
-import {BOX, boxAtSelection, unwrapBox, updateBox, wrapInBox} from './boxCommands';
+import {BOX, boxAtSelection, insertBox, unwrapBox, updateBox, wrapInBox} from './boxCommands';
 import {ColorField, OptionSelect} from './BlockFields';
 import {useFollowBlock} from './useBlockDialog';
 
@@ -23,15 +23,23 @@ const BUTTON_CONTRAST = 1.5;
 
 const WIDTHS = {inset: 'With margin, rounded', full: 'Full width'};
 
-/** A new box in `look`: a light grey one, its text in the brand's colour where it reads. */
-export function newBox(look: EmailBrand): BoxStyle {
+// A new box in `look`: a light grey one, its text in the brand's colour where it reads
+function newBox(look: EmailBrand): BoxStyle {
   return {...BOX_DEFAULTS, textColor: suggestedTextColor(BOX_DEFAULTS.backgroundColor, look.textColor)};
+}
+
+// Wraps the blocks the selection touches in a new box, or else adds an empty one
+function addBox(editor: Editor, look: EmailBrand): void {
+  const attrs = newBox(look);
+  if (!editor.chain().focus().command(wrapInBox(attrs)).run()) {
+    editor.chain().focus().command(insertBox(attrs)).run();
+  }
 }
 
 /**
  * Wires the box's settings to an editor. The toolbar opens the settings of the box the cursor is
- * in, or else wraps the blocks it touches in a new box, as the slash menu asks for one; a box's
- * settings button opens its own.
+ * in, or else wraps the blocks it touches in a new box (or adds an empty one), as the slash menu
+ * asks for one; a box's settings button opens its own.
  */
 export function useBoxDialog(editor: Editor | null, look: EmailBrand) {
   const [pos, setPos] = useState<number | null>(null);
@@ -47,12 +55,7 @@ export function useBoxDialog(editor: Editor | null, look: EmailBrand) {
       if (editor.state.doc.nodeAt(at)?.type.name === BOX) setPos(at);
     };
     const add = ({type}: {type: string}) => {
-      if (type === BOX)
-        editor
-          .chain()
-          .focus()
-          .command(wrapInBox(newBox(lookRef.current)))
-          .run();
+      if (type === BOX) addBox(editor, lookRef.current);
     };
     editor.on('editBlock', edit);
     editor.on('newBlock', add);
@@ -68,11 +71,7 @@ export function useBoxDialog(editor: Editor | null, look: EmailBrand) {
     if (!editor) return;
     const at = boxAtSelection(editor);
     if (at === null) {
-      editor
-        .chain()
-        .focus()
-        .command(wrapInBox(newBox(look)))
-        .run();
+      addBox(editor, look);
     } else {
       setPos(at);
     }

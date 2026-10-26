@@ -1,8 +1,8 @@
 import type {BoxStyle} from '@plunk/shared';
 import type {CommandProps, Editor} from '@tiptap/core';
-import {NodeRange, type ResolvedPos} from '@tiptap/pm/model';
-import {TextSelection} from '@tiptap/pm/state';
-import {findWrapping} from '@tiptap/pm/transform';
+import {NodeRange, type ResolvedPos, Slice} from '@tiptap/pm/model';
+import {NodeSelection, TextSelection} from '@tiptap/pm/state';
+import {findWrapping, ReplaceAroundStep} from '@tiptap/pm/transform';
 
 /**
  * Commands of the email editor's box (see EmailBox). Boxes only sit at the top of the document,
@@ -11,19 +11,20 @@ import {findWrapping} from '@tiptap/pm/transform';
 
 export const BOX = 'box';
 
-/** The depth of the box `$pos` is in, or null outside one. */
-export function boxDepth($pos: ResolvedPos): number | null {
+// The depth of the box `$pos` is in, or null outside one
+function boxDepth($pos: ResolvedPos): number | null {
   for (let depth = $pos.depth; depth > 0; depth--) {
     if ($pos.node(depth).type.name === BOX) return depth;
   }
   return null;
 }
 
-/** The position of the box the selection is in, or null outside one. */
+/** The position of the box the selection is in, or is, or null outside one. */
 export function boxAtSelection(editor: Editor): number | null {
-  const {$from} = editor.state.selection;
-  const depth = boxDepth($from);
-  return depth === null ? null : $from.before(depth);
+  const {selection} = editor.state;
+  if (selection instanceof NodeSelection && selection.node.type.name === BOX) return selection.from;
+  const depth = boxDepth(selection.$from);
+  return depth === null ? null : selection.$from.before(depth);
 }
 
 /**
@@ -46,6 +47,23 @@ export function wrapInBox(attrs: BoxStyle) {
   };
 }
 
+/**
+ * Inserts an empty box with `attrs` after the top-level block the selection ends in, or where it
+ * is between blocks, and puts the cursor in it: for when there is nothing to wrap.
+ */
+export function insertBox(attrs: BoxStyle) {
+  return ({state, tr, dispatch}: CommandProps): boolean => {
+    const {$to} = tr.selection;
+    const at = $to.depth > 0 ? $to.after(1) : $to.pos;
+    const box = state.schema.nodes[BOX]!.create(attrs, state.schema.nodes.paragraph!.create());
+    if (dispatch) {
+      tr.insert(at, box);
+      tr.setSelection(TextSelection.create(tr.doc, at + 2)).scrollIntoView();
+    }
+    return true;
+  };
+}
+
 /** Sets the box at `pos` to `attrs`, leaving the cursor where it was. */
 export function updateBox(pos: number, attrs: BoxStyle) {
   return ({tr, dispatch}: CommandProps): boolean => {
@@ -55,34 +73,29 @@ export function updateBox(pos: number, attrs: BoxStyle) {
   };
 }
 
-/** Removes the box at `pos`, all it held staying in its place, whole. */
+/** Removes the box at `pos`, all it held staying in its place, whole, and the cursor with it. */
 export function unwrapBox(pos: number) {
   return ({tr, dispatch}: CommandProps): boolean => {
     const box = tr.doc.nodeAt(pos);
     if (box?.type.name !== BOX) return false;
-    if (dispatch) tr.replaceWith(pos, pos + box.nodeSize, box.content);
+    const end = pos + box.nodeSize;
+    if (dispatch) tr.step(new ReplaceAroundStep(pos, end, pos + 1, end - 1, Slice.empty, 0, true));
     return true;
   };
 }
 
 /**
- * Enter in an empty paragraph of a box: at its end, the cursor moves out after the box, into the
- * empty paragraph there or a new one, the empty paragraph leaving the box unless it is all the box
- * holds; anywhere else, a new paragraph, where ProseMirror would split the box in two. Lists and
- * other blocks inside a box keep their own Enter.
+ * Enter in an empty paragraph or heading of a box: at its end, the cursor moves out after the box,
+ * into the empty paragraph there or a new one, the empty block leaving the box unless it is all
+ * the box holds; anywhere else, a new paragraph, where ProseMirror would split the box in two.
+ * Lists and other blocks inside a box keep their own Enter.
  */
 export function enterInBox({editor}: {editor: Editor}): boolean {
   const {selection} = editor.state;
   const {$from} = selection;
   const depth = boxDepth($from);
-  const paragraph = $from.parent;
-  if (
-    depth === null ||
-    !selection.empty ||
-    $from.depth !== depth + 1 ||
-    paragraph.type.name !== 'paragraph' ||
-    paragraph.content.size > 0
-  ) {
+  const block = $from.parent;
+  if (depth === null || !selection.empty || $from.depth !== depth + 1 || !block.isTextblock || block.content.size > 0) {
     return false;
   }
 
@@ -93,7 +106,7 @@ export function enterInBox({editor}: {editor: Editor}): boolean {
     if (!dispatch) return true;
     const after = $from.after(depth);
     const next = tr.doc.resolve(after).nodeAfter;
-    // A box keeps at least one block: its only empty paragraph stays
+    // A box keeps at least one block: its only empty one stays
     if (box.childCount > 1) tr.delete($from.before(), $from.after());
     const outside = tr.mapping.map(after);
     if (!(next?.type.name === 'paragraph' && next.content.size === 0)) {

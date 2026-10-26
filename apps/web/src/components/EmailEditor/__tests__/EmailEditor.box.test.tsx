@@ -113,4 +113,19 @@ describe('EmailEditor boxes', () => {
     await click(button('Remove box'));
     expect(body()).toBe('<p>Hello</p><p>There</p>');
   });
+
+  it("opens a box's settings from its own button, and closes them if the box goes", async () => {
+    await render();
+    await act(async () => editor().commands.setTextSelection(2));
+    await click(button('Put in a box with a background'));
+
+    await click(document.querySelector('button[aria-label="Settings of this box"]')!);
+    expect(button('Remove box')).toBeDefined();
+
+    // Deleted meanwhile, say by an undo: the settings of a box that is gone close
+    await act(async () => {
+      editor().commands.undo();
+    });
+    expect(button('Remove box')).toBeUndefined();
+  });
 });

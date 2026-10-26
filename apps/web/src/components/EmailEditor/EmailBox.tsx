@@ -15,10 +15,6 @@ import {Palette} from 'lucide-react';
 import {BOX, enterInBox} from './boxCommands';
 import {emitEditBlock} from './useBlockDialog';
 
-// Everything a box can hold: every block but another box (see @plunk/shared emailBox)
-const BOX_CONTENT =
-  '(paragraph | heading | bulletList | orderedList | blockquote | codeBlock | horizontalRule | image | button | spacer | video)+';
-
 /**
  * The editor's document: blocks and boxes, boxes only at the top. Lists and quotes hold blocks, so
  * keeping boxes out of the `block` group is what stops them nesting, however they are inserted.
@@ -31,21 +27,22 @@ function BoxView({node, editor, getPos}: ReactNodeViewProps) {
   return (
     <NodeViewWrapper
       data-box=""
+      data-box-full={attrs.fullWidth ? '' : undefined}
       style={{
         position: 'relative',
         backgroundColor: attrs.backgroundColor,
         color: attrs.textColor,
         padding: boxPadding(attrs.fullWidth),
         borderRadius: attrs.fullWidth ? 0 : BOX_RADIUS,
-        // Across the column, past the editor's own side padding (px-4)
-        margin: attrs.fullWidth ? '1em -1rem' : '1em 0',
+        // Full width reaches past the editor's own padding in a framed column (see EmailEditor)
+        margin: '1em 0',
       }}
     >
       <button
         type="button"
         contentEditable={false}
-        title="Box settings"
-        aria-label="Box settings"
+        title="Settings of this box"
+        aria-label="Settings of this box"
         onMouseDown={e => e.preventDefault()}
         onClick={() => emitEditBlock(editor, getPos)}
         className="box-settings absolute right-2 top-2 rounded bg-white/90 p-1 text-neutral-700 shadow-sm"
@@ -66,7 +63,8 @@ function BoxView({node, editor, getPos}: ReactNodeViewProps) {
 export const EmailBox = Node.create({
   name: BOX,
   group: 'box',
-  content: BOX_CONTENT,
+  // Every block, which boxes are not: they never nest
+  content: 'block+',
   defining: true,
 
   addAttributes() {

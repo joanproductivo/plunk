@@ -59,8 +59,11 @@ function heading(level: 1 | 2 | 3): SlashItem {
   };
 }
 
-/** Rows whose block needs a dialog of the editor component (see useBlockDialog and EmailEditor). */
-function opensDialog(type: string) {
+/**
+ * Rows whose block the editor component makes: those that need a dialog (see useBlockDialog), and
+ * the box, made from the blocks around it (see useBoxDialog).
+ */
+function requestsBlock(type: string) {
   return (editor: Editor, range: Range) => {
     replaceQuery(editor, range).run();
     editor.emit('newBlock', {type});
@@ -97,25 +100,25 @@ const SLASH_ITEMS: SlashItem[] = [
     offered: takesBlocks,
     run: (editor, range) => replaceQuery(editor, range).toggleBlockquote().run(),
   },
-  {label: 'Button', aliases: ['cta', 'link'], offered: takesBlocks, run: opensDialog('button')},
+  {label: 'Button', aliases: ['cta', 'link'], offered: takesBlocks, run: requestsBlock('button')},
   {
     label: 'Image',
     aliases: ['picture', 'photo'],
     offered: (editor, options) => takesBlocks(editor) && options.canInsertImages(),
-    run: opensDialog('image'),
+    run: requestsBlock('image'),
   },
   {
     label: 'YouTube video',
     aliases: ['video', 'youtube'],
     offered: (editor, options) => takesBlocks(editor) && options.canInsertImages(),
-    run: opensDialog('video'),
+    run: requestsBlock('video'),
   },
   // Wraps the line it is typed on; boxes do not go inside boxes, lists or quotes
   {
     label: 'Box',
     aliases: ['background', 'section', 'card'],
     offered: editor => takesBlocks(editor) && !editor.isActive('box'),
-    run: opensDialog('box'),
+    run: requestsBlock('box'),
   },
   {
     label: 'Divider',

@@ -36,6 +36,7 @@ import {useEffect, useRef, useState} from 'react';
 import {
   BUTTON_DEFAULTS,
   detectCustomHtmlPatterns,
+  isFramedBrand,
   joinEmailMarkers,
   renderTemplate,
   splitEmailMarkers,
@@ -521,7 +522,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
-            <div style={canvas.inner}>
+            <div style={canvas.inner} data-framed={isFramedBrand(emailBrand.look) ? '' : undefined}>
               <EditorContent editor={editor} />
             </div>
           </div>
@@ -948,6 +949,11 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         }
         .ProseMirror [data-box] [data-node-view-content] > :last-child {
           margin-bottom: 0;
+        }
+        /* In a framed column, full width reaches past the editor's own side padding (px-4) */
+        [data-framed] .ProseMirror [data-box-full] {
+          margin-left: -1rem !important;
+          margin-right: -1rem !important;
         }
         .ProseMirror [data-box] .box-settings {
           opacity: 0.4;

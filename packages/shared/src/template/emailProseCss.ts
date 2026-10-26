@@ -1,5 +1,5 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
-import {BOX_PADDING, BOX_RADIUS} from './emailBox.js';
+import {BOX_INHERITED_COLOUR, BOX_PADDING, BOX_RADIUS} from './emailBox.js';
 import {EMAIL_COLUMN_PADDING} from './emailDocument.js';
 import {emailFontFamily} from './emailFonts.js';
 
@@ -349,16 +349,15 @@ export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = fal
   }
 }
 
-.prose .email-box > :first-child {
+.prose .email-box > :first-child, .prose .email-box > :first-child img {
   margin-top: 0;
 }
 
-.prose .email-box > :last-child {
+.prose .email-box > :last-child, .prose .email-box > :last-child img {
   margin-bottom: 0;
 }
 
-.prose .email-box h1, .prose .email-box h2, .prose .email-box h3, .prose .email-box h4,
-.prose .email-box strong, .prose .email-box code, .prose .email-box blockquote {
+${BOX_INHERITED_COLOUR.map(tag => `.prose .email-box ${tag}`).join(', ')} {
   color: inherit;
 }
 

@@ -13,3 +13,14 @@ export function declarations(style: string | null | undefined): Map<string, stri
   }
   return result;
 }
+
+/** `style` with `property` set to `value`, after the declarations it had, any earlier value of it dropped. */
+export function withDeclaration(style: string | null | undefined, property: string, value: string): string {
+  const others = [...declarations(style)].filter(([name]) => name !== property.toLowerCase());
+  return [...others, [property, value]].map(([name, given]) => `${name}: ${given}`).join('; ');
+}
+
+/** A size attribute as the editor writes it, a whole number of pixels, or 0 for anything else. */
+export function readPixels(value: string | null | undefined): number {
+  return value && /^\d{1,5}$/.test(value) ? Number(value) : 0;
+}

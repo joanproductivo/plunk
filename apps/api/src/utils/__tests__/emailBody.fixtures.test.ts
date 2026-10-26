@@ -40,8 +40,8 @@ describe('renderBody without a brand', () => {
 });
 
 /**
- * Emails in a framed brand, kept as files from before editor boxes: sending boxes rearranges a
- * framed column only when it holds a full-width one, so these must keep going out the same.
+ * Emails in a framed brand, kept as files from before boxes were sent as tables: sending boxes
+ * rearranges a framed column only when it holds a full-width one, so these must keep going out the same.
  */
 const FOOTER = '<p style="font-size: 12px;">Unsubscribe from Acme.</p>';
 const BRANDED: Record<string, Parameters<typeof toEmailBrand>[0]> = {
