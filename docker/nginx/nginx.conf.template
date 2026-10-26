@@ -1,29 +1,12 @@
 # Nginx Configuration for Plunk - Subdomain-based Routing
 # This configuration routes traffic based on subdomains:
 #   - api.example.com -> API server (port 8080)
-#   - app.example.com -> Web dashboard (port 3000)
-#   - www.example.com -> Landing page (port 4000)
-#   - docs.example.com -> Documentation (port 1000)
+#   - app.example.com -> Web dashboard (static files)
+# TLS and ACME challenges are handled by the reverse proxy in front of this container.
 
 # Upstream definitions
 upstream plunk_api {
     server 127.0.0.1:8080;
-}
-
-upstream plunk_web {
-    server 127.0.0.1:3000;
-}
-
-upstream plunk_landing {
-    server 127.0.0.1:4000;
-}
-
-upstream plunk_wiki {
-    server 127.0.0.1:1000;
-}
-
-upstream plunk_acme_challenge {
-    server 127.0.0.1:8888;
 }
 
 # API Server (also serves as default_server for unmatched domains)
@@ -32,16 +15,6 @@ server {
     server_name ${API_DOMAIN};
 
     client_max_body_size 10M;
-
-    # ACME challenges should be handled by SMTP server, not API
-    # This catches ALL ACME challenges, including for SMTP_DOMAIN
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://plunk_acme_challenge;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
 
     location / {
         proxy_pass http://plunk_api;
@@ -56,110 +29,34 @@ server {
     }
 }
 
-# Web Dashboard
+# Web Dashboard (static export)
 server {
     listen ${NGINX_PORT};
     server_name ${DASHBOARD_DOMAIN};
+    root /app/apps/web/out;
 
-    client_max_body_size 10M;
+    # Relative redirects: TLS ends at the proxy in front of this container
+    absolute_redirect off;
 
-    # ACME challenges fallback
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://plunk_acme_challenge;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+    # One URL per page: drop the trailing slash, as Next.js did
+    rewrite ^/(.+)/$ /$1 permanent;
+
+    # Hashed build assets never change
+    location ^~ /_next/static/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # Dynamic pages are exported once as <section>/[id].html and resolved in the browser
+    location ~ ^/(?<section>[^/]+)/[^/]+$ {
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri.html /$section/[id].html =404;
     }
 
     location / {
-        proxy_pass http://plunk_web;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-
-# Landing Page
-server {
-    listen ${NGINX_PORT};
-    server_name ${LANDING_DOMAIN};
-
-    client_max_body_size 10M;
-
-    # ACME challenges fallback
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://plunk_acme_challenge;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri.html $uri/index.html =404;
     }
 
-    location / {
-        proxy_pass http://plunk_landing;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-
-# Documentation (optional)
-server {
-    listen ${NGINX_PORT};
-    server_name ${WIKI_DOMAIN};
-
-    client_max_body_size 10M;
-
-    # ACME challenges fallback
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://plunk_acme_challenge;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location / {
-        proxy_pass http://plunk_wiki;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-
-# ACME Challenge Proxy (for SMTP domain certificate generation)
-# This proxies Let's Encrypt ACME HTTP-01 challenges to the SMTP server's challenge handler
-server {
-    listen ${NGINX_PORT};
-    server_name ${SMTP_DOMAIN};
-
-    # Proxy ACME challenges to SMTP server's internal challenge server
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://plunk_acme_challenge;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Deny all other requests to SMTP domain
-    location / {
-        return 404;
-    }
+    error_page 404 /404.html;
 }

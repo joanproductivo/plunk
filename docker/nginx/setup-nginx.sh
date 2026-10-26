@@ -19,7 +19,6 @@ export API_DOMAIN="${API_DOMAIN:-api.localhost}"
 export DASHBOARD_DOMAIN="${DASHBOARD_DOMAIN:-app.localhost}"
 export LANDING_DOMAIN="${LANDING_DOMAIN:-www.localhost}"
 export WIKI_DOMAIN="${WIKI_DOMAIN:-docs.localhost}"
-export SMTP_DOMAIN="${SMTP_DOMAIN:-smtp.localhost}"
 export NGINX_PORT="${NGINX_PORT:-80}"
 export USE_HTTPS="${USE_HTTPS:-false}"
 
@@ -48,13 +47,7 @@ export WIKI_URI="${WIKI_URI:-${PROTOCOL}://${WIKI_DOMAIN}}"
 # Generate nginx configuration from template
 echo "📝 Generating nginx configuration..."
 
-# If SMTP_DOMAIN is not set or empty, use a placeholder to prevent nginx config errors
-if [ -z "$SMTP_DOMAIN" ]; then
-    echo "⚠️  SMTP_DOMAIN not set - ACME challenge proxy will not be configured"
-    export SMTP_DOMAIN="_"  # nginx wildcard that won't match any real domain
-fi
-
-envsubst '${NGINX_PORT} ${API_DOMAIN} ${DASHBOARD_DOMAIN} ${LANDING_DOMAIN} ${WIKI_DOMAIN} ${SMTP_DOMAIN}' \
+envsubst '${NGINX_PORT} ${API_DOMAIN} ${DASHBOARD_DOMAIN}' \
     < /app/docker/nginx/nginx.conf.template \
     > "${NGINX_CONF_D}/plunk.conf"
 
@@ -96,10 +89,14 @@ http {
 }
 EOF
 
+# Stop the container on an invalid configuration: under PM2 a broken nginx would just
+# keep restarting while the API and worker run unreachable behind it
+if ! nginx -t; then
+    echo "❌ ERROR: invalid nginx configuration (see above)"
+    exit 1
+fi
+
 echo "✅ Nginx configuration complete!"
 echo "   Config file: ${NGINX_CONF_D}/plunk.conf"
 echo "   API Domain: ${API_DOMAIN}"
 echo "   Dashboard Domain: ${DASHBOARD_DOMAIN}"
-echo "   Landing Domain: ${LANDING_DOMAIN}"
-echo "   Wiki Domain: ${WIKI_DOMAIN}"
-echo "   SMTP Domain: ${SMTP_DOMAIN}"

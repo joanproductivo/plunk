@@ -39,6 +39,7 @@ import {
   Globe,
   KeyRound,
   Mail,
+  Palette,
   RotateCcw,
   Settings as SettingsIcon,
   Shield,
@@ -47,7 +48,9 @@ import {
 import type {z} from 'zod';
 import {useRouter} from 'next/router';
 import {DashboardLayout} from '../../components/DashboardLayout';
+import {BrandSettings} from '../../components/BrandSettings';
 import {DomainsSettings} from '../../components/DomainsSettings';
+import {FooterSettings} from '../../components/FooterSettings';
 import {BillingLimits} from '../../components/BillingLimits';
 import {BillingConsumption} from '../../components/BillingConsumption';
 import {BillingInvoices} from '../../components/BillingInvoices';
@@ -65,7 +68,7 @@ import {useUser} from '../../lib/hooks/useUser';
 import {useProjectSecurity} from '../../lib/hooks/useProjectSecurity';
 import useSWR from 'swr';
 
-type TabId = 'general' | 'billing' | 'domains' | 'smtp' | 'data' | 'team' | 'security';
+type TabId = 'general' | 'brand' | 'billing' | 'domains' | 'smtp' | 'data' | 'team' | 'security';
 
 interface Tab {
   id: TabId;
@@ -88,6 +91,7 @@ const buildTabs = (options: {billingEnabled: boolean; smtpEnabled: boolean}): Ta
   const {billingEnabled, smtpEnabled} = options;
   const allTabs: Tab[] = [
     {id: 'general', label: 'General', icon: SettingsIcon},
+    {id: 'brand', label: 'Brand', icon: Palette},
     {id: 'team', label: 'Team', icon: Users},
     {id: 'security', label: 'Security', icon: Shield},
     {id: 'billing', label: 'Billing', icon: CreditCard, condition: billingEnabled},
@@ -819,6 +823,24 @@ export default function Settings() {
                   </CardContent>
                 </Card>
               )}
+            </TabsContent>
+
+            {/* Brand Tab */}
+            <TabsContent value="brand">
+              <div className="space-y-6">
+                <BrandSettings
+                  projectId={activeProject.id}
+                  projectName={activeProject.name}
+                  language={activeProject.language}
+                  canEdit={currentUserRole !== 'MEMBER'}
+                />
+                <FooterSettings
+                  projectId={activeProject.id}
+                  projectName={activeProject.name}
+                  language={activeProject.language}
+                  canEdit={currentUserRole !== 'MEMBER'}
+                />
+              </div>
             </TabsContent>
 
             {/* Domains Tab */}

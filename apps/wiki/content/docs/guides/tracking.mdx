@@ -13,7 +13,8 @@ When open tracking is enabled, Plunk includes a small invisible tracking pixel a
 ### Considerations
 
 - Open tracking depends on the mail client loading remote images. If a contact has images disabled, no open is recorded.
-- Some clients (and corporate mail security gateways) pre-fetch images, which can produce false positive opens.
+- Gmail can fetch the tracking pixel as soon as an email is delivered, whether or not anyone reads it. SES marks fetches like this as likely automated (`isBotEvent`), and Plunk does not count them: the open is recorded when the contact actually opens the email. On self-hosted instances, set `IGNORE_AUTOMATIC_OPENS=false` to count them.
+- Some other clients and corporate mail security gateways pre-fetch images too. Those opens are counted unless SES marks them as automated.
 - Apple Mail Privacy Protection masks individual opens — opens from Apple Mail are recorded but reflect proxy fetches rather than human reads.
 
 ## Click tracking
@@ -36,6 +37,8 @@ Tracking is configured per project under **Settings → Tracking**. Three modes 
 | **Marketing only** | Tracking is applied to marketing sends (campaigns and emails sent by workflow steps using marketing or headless templates). Transactional sends — anything via `/v1/send` using a transactional template, or campaigns of type `TRANSACTIONAL` — are sent without tracking. |
 
 Tracking is **all or nothing** within a single send — there's no separate toggle for opens vs clicks. Pick the mode that fits your privacy and analytics requirements.
+
+Open and click rates on the dashboard and in Analytics are measured against the emails sent with tracking, so untracked mail does not lower them; when nothing in a period was sent with tracking they show as **Not tracked**, or **—** in tables. They follow the project's current mode: changing it reclassifies the emails in the period you are looking at, including when you switch back to **Enabled**. Campaign pages still measure against every email the campaign sent.
 
 <Callout title="Tracking mode availability" type="info">
 On self-hosted instances, the Marketing-only mode is only available when a no-tracking configuration set is configured. See [Self-hosting → Email setup](/self-hosting/email-setup) for details.

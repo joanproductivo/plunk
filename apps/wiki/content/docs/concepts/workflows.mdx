@@ -35,11 +35,21 @@ A workflow always begins with a single auto-created `TRIGGER` step. You build th
 | `TRIGGER`         | Auto-created entry point. Holds the trigger configuration.                                             | `eventName` (for `EVENT` trigger)                                |
 | `SEND_EMAIL`      | Sends an email to the contact using a template. Template variables resolve from contact data + execution context. | `templateId`, optional `from` override                  |
 | `DELAY`           | Pauses the execution for a fixed duration before continuing.                                           | `amount`, `unit` (`minutes` / `hours` / `days`)                  |
-| `WAIT_FOR_EVENT`  | Pauses until a specified event is tracked on the contact, with a timeout fallback.                     | `eventName`, `timeout` (seconds)                                 |
-| `CONDITION`       | Branches the execution based on contact data or event data. Each `CONDITION` step has two outgoing transitions tagged `yes` / `no`. | A filter expression (same shape as segment filters) |
+| `WAIT_FOR_EVENT`  | Pauses until a specified event is tracked on the contact, with a timeout fallback.                     | `eventName`, `timeout` (seconds; `0` or omitted waits with no limit) |
+| `CONDITION`       | Branches the execution based on contact data, event data or segment membership. Each `CONDITION` step has two outgoing transitions tagged `yes` / `no`. | A filter expression (same shape as segment filters) |
 | `WEBHOOK`         | Calls an external HTTPS endpoint with contact + execution context as the JSON body. `url`, header values, and `body` support `{{variables}}`. | `url`, optional `method`, `headers`, `body`            |
-| `UPDATE_CONTACT`  | Patches contact data — useful for tagging contacts as they progress (`{ stage: "activated" }`).        | `data` object                                                    |
+| `UPDATE_CONTACT`  | Patches contact data — useful for tagging contacts as they progress (`{ stage: "activated" }`) — and can subscribe or unsubscribe the contact and add it to or remove it from static segments. | `updates`, `subscriptionAction` and/or `segments: { add, remove }` (segment IDs) |
 | `EXIT`            | Terminates the execution. Optionally records an `exitReason` for analytics.                            | optional `reason`                                                |
+
+A `WAIT_FOR_EVENT` step on an email event resumes when that event comes from any email of the contact, including emails sent by campaigns or other workflows (`scope: "contact"`, the default). For the events a workflow email produces (`email.sent`, `email.delivery`, `email.open`, `email.click`, `email.bounce`, `email.complaint`), set `scope: "execution"` in the step config (**Only emails from this execution** in the editor) to count only the emails this execution sent to the contact. Emails a step sends to a custom recipient are recorded under the contact but never count for a scoped wait. If the execution sent several emails, an event from any of them resumes the wait. Give a scoped wait a timeout: if its email is never sent (for example, to an unsubscribed contact) or never opened, the execution would otherwise wait forever.
+
+### Segments in workflows
+
+An `UPDATE_CONTACT` step can move a contact between static segments: it applies the data and subscription changes first, then the removals, then the additions. For segments that track membership, the `exit` and `entry` events fire before the step finishes, so a workflow they start runs straight away and already sees the new data. Adding a contact who is already in a segment counts as a new entry (see [Segments](/concepts/segments)). A segment that has been deleted or is dynamic is skipped, listed in the step's `skippedSegments`, and the workflow carries on.
+
+A `CONDITION` step can check `segment.<segmentId>`: `true` when the contact is in that segment as the step runs — a current member of a static segment, or a match for a dynamic segment's filter. In the dashboard these fields appear under **Segments**, by name, both in the field picker and on the condition step in the canvas.
+
+Workflows that add contacts to each other's trigger segments can loop; see [Segments](/concepts/segments#tracking-membership-changes) for when, and keep **Allow re-entry** off unless a workflow needs it.
 
 ## Transitions
 
@@ -58,7 +68,7 @@ Each contact entering the workflow creates a `WorkflowExecution`. Executions mov
 | `COMPLETED` | Reached the end of the graph successfully.                                                    |
 | `EXITED`    | Hit an `EXIT` step. `exitReason` records why.                                                 |
 | `FAILED`    | An unrecoverable error occurred (e.g. webhook returned non-2xx after retries, template not found). |
-| `CANCELLED` | Cancelled manually via the API or dashboard.                                                  |
+| `CANCELLED` | Cancelled manually via the API or dashboard. Pending delays and waits do not resume it; a step already running finishes, and an email it queued is still sent. |
 
 Each execution carries a `context` JSON object that's merged with the contact's `data` when rendering templates and evaluating conditions. When you start an execution manually with `POST /workflows/:id/executions`, you can pass an initial `context` — this is how you parameterise per-execution variables (a coupon code, a referrer name) without storing them on the contact.
 
@@ -66,7 +76,7 @@ Each execution carries a `context` JSON object that's merged with the contact's 
 
 A workflow is **locked** for structural edits while it has active (`RUNNING` or `WAITING`) executions. To make breaking changes — adding/removing steps, changing the trigger event, switching trigger type — first either:
 
-- Disable the workflow and wait for active executions to complete, or
+- Disable the workflow and wait for active executions to complete (an execution waiting on a `WAIT_FOR_EVENT` step with no timeout only completes when its event arrives), or
 - `POST /workflows/:id/executions/cancel-all` to cancel everything in flight.
 
 Cosmetic changes (renaming, editing template content referenced by steps) don't require this.

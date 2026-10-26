@@ -2,6 +2,8 @@
  * Contact subscription types
  */
 
+import type {Contact} from '@plunk/db';
+
 /**
  * How long a recipient asked to stop receiving email for.
  *
@@ -30,9 +32,28 @@ export type SnoozeDuration = (typeof SNOOZE_DURATIONS)[number];
 export type SubscriptionChangeReason = 'bounce' | 'complaint' | 'snooze' | 'snooze_expired';
 
 /**
- * The subscription state the dashboard shows and filters on.
+ * The subscription states the dashboard shows and filters on.
  *
- * Derived, not stored: `snoozed` is `subscribed = false` with a `snoozedUntil` in the future.
+ * Derived, not stored: `snoozed` is `subscribed = false` with a `snoozedUntil` set.
  * Storing it would mean a third state every send path had to learn about.
  */
-export type ContactSubscriptionStatus = 'subscribed' | 'snoozed' | 'unsubscribed';
+export const CONTACT_SUBSCRIPTION_STATUSES = ['subscribed', 'snoozed', 'unsubscribed'] as const;
+
+export type ContactSubscriptionStatus = (typeof CONTACT_SUBSCRIPTION_STATUSES)[number];
+
+/**
+ * How a contact's subscription state reads, wherever it is reported (the dashboard, the CSV export).
+ *
+ * `snoozed` is derived rather than stored: a snooze is `subscribed = false` plus a date, which
+ * is what lets every send path suppress a snoozed contact through the `subscribed` filter it
+ * already has. The cost of that is exactly this -- the two "not subscribed" states look
+ * identical until you check the date, so every surface that reports status has to go through
+ * here rather than branching on the boolean.
+ */
+export function contactStatus(contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>): ContactSubscriptionStatus {
+  if (contact.subscribed) {
+    return 'subscribed';
+  }
+
+  return contact.snoozedUntil ? 'snoozed' : 'unsubscribed';
+}

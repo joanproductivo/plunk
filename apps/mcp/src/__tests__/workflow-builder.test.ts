@@ -683,6 +683,101 @@ describe('plunk_add_workflow_steps', () => {
   });
 });
 
+describe('segment steps', () => {
+  const SEG_A = '11111111-1111-4111-8111-111111111111';
+  const SEG_B = '22222222-2222-4222-8222-222222222222';
+
+  it('moves a contact between segments behind a segment condition', async () => {
+    const api = fakeApi();
+    const {client, close} = await connect();
+
+    const result = await call(client, 'plunk_add_workflow_steps', {
+      workflowId: 'wf-1',
+      steps: [
+        {
+          key: 'check',
+          type: 'CONDITION',
+          name: 'In the workshop?',
+          field: `segment.${SEG_A}`,
+          operator: 'equals',
+          value: true,
+        },
+        {type: 'UPDATE_CONTACT', name: 'Move on', branch: 'yes', segments: {remove: [SEG_A], add: [SEG_B]}},
+      ],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(api.stepNamed('In the workshop?').config).toEqual({
+      field: `segment.${SEG_A}`,
+      operator: 'equals',
+      value: true,
+    });
+    expect(api.stepNamed('Move on').config).toEqual({segments: {add: [SEG_B], remove: [SEG_A]}});
+    expect(reviewWorkflow(api.view()).issues).toEqual([]);
+
+    await close();
+  });
+
+  it('keeps the list an edit leaves out', async () => {
+    const api = fakeApi();
+    const {client, close} = await connect();
+    await call(client, 'plunk_add_workflow_step', {
+      workflowId: 'wf-1',
+      type: 'UPDATE_CONTACT',
+      name: 'Move on',
+      segments: {remove: [SEG_A], add: [SEG_B]},
+    });
+
+    const result = await call(client, 'plunk_update_workflow_step', {
+      workflowId: 'wf-1',
+      stepId: api.stepNamed('Move on').id,
+      segments: {add: []},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(api.stepNamed('Move on').config).toEqual({segments: {add: [], remove: [SEG_A]}});
+
+    await close();
+  });
+
+  it.each([
+    ['adds and removes the same segment', {segments: {add: [SEG_A], remove: [SEG_A]}}, 'both added and removed'],
+    ['lists a segment twice', {segments: {add: [SEG_A, SEG_A]}}, 'listed twice'],
+    ['names a segment instead of giving its ID', {segments: {add: ['workshop']}}, 'UUID'],
+  ])('rejects a step that %s before calling the API', async (_case, params, message) => {
+    const api = fakeApi();
+    const {client, close} = await connect();
+
+    const result = await call(client, 'plunk_add_workflow_step', {
+      workflowId: 'wf-1',
+      type: 'UPDATE_CONTACT',
+      ...params,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(message);
+    expect(api.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
+
+    await close();
+  });
+
+  it.each([
+    ['a slug instead of an ID', {field: 'segment.workshop', operator: 'equals', value: true}, 'never resolves'],
+    ['the string "true"', {field: `segment.${SEG_A}`, operator: 'equals', value: 'true'}, 'boolean'],
+    ['a text operator', {field: `segment.${SEG_A}`, operator: 'contains', value: true}, 'boolean'],
+  ])('rejects a segment condition with %s', async (_case, params, message) => {
+    fakeApi();
+    const {client, close} = await connect();
+
+    const result = await call(client, 'plunk_add_workflow_step', {workflowId: 'wf-1', type: 'CONDITION', ...params});
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(message);
+
+    await close();
+  });
+});
+
 describe('editing the graph', () => {
   async function linear() {
     const api = fakeApi();
@@ -1058,6 +1153,30 @@ describe('workflow lifecycle', () => {
     ]);
     expect(review.issues[0]?.message).toContain('"Lost" is not connected');
     expect(review.issues[1]?.message).toContain('branch "yes"');
+  });
+
+  it('accepts a wait with a timeout of 0 and shows it without a time limit', () => {
+    const review = reviewWorkflow({
+      id: 'wf-1',
+      steps: [
+        {
+          id: 'trigger',
+          type: 'TRIGGER',
+          config: {eventName: 'x'},
+          outgoingTransitions: [{id: 't1', fromStepId: 'trigger', toStepId: 'w'}],
+        },
+        {
+          id: 'w',
+          type: 'WAIT_FOR_EVENT',
+          name: 'Wait',
+          config: {eventName: 'user.verified', timeout: 0},
+          outgoingTransitions: [],
+        },
+      ],
+    });
+
+    expect(review.issues).toEqual([]);
+    expect(review.outline.split('\n')[1]).toContain('wait for "user.verified"  → end');
   });
 
   it('gives generated branch ids readable, unique slugs', () => {

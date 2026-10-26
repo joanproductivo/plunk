@@ -1,7 +1,8 @@
 import {beforeEach, describe, expect, it, vi, type Mock} from 'vitest';
-import {EmailSourceType, EmailStatus, TemplateType} from '@plunk/db';
+import {EmailSourceType, EmailStatus, TemplateType, TrackingMode} from '@plunk/db';
 import {ActionSchemas} from '@plunk/shared';
 import {EmailService} from '../EmailService';
+import {ProjectService} from '../ProjectService';
 import {sendRawEmail} from '../SESService';
 import {factories} from '../../../../../test/helpers';
 
@@ -740,7 +741,7 @@ describe('SES MIME Boundary Structure', () => {
     const relatedBoundary = relatedBoundaryMatch ? relatedBoundaryMatch[1] : '';
 
     expect(rawMessage).toContain(`--${relatedBoundary}\nContent-Type: multipart/alternative`);
-    expect(rawMessage).toContain(`Content-Disposition: inline; filename="image.png"`);
+    expect(rawMessage).toContain(`Content-Disposition: inline;\n filename="image.png"`);
     expect(rawMessage).toContain(`--${relatedBoundary}--`);
   });
 
@@ -990,6 +991,77 @@ describe('SES header serialization', () => {
     expect(headerSection.endsWith('\n')).toBe(false);
     expect(headerSection).toContain('Content-Type:');
   });
+
+  it('sends non-ASCII subjects and names as ASCII encoded-words', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Café Acmé', email: 'sender@example.com'},
+      to: [{name: 'Doe, Jane', email: 'jane@example.com'}],
+      content: {subject: '¡Novedades de otoño!', html: '<p>Hola</p>'},
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+    const [headerSection] = rawMessage.split('\n\n');
+
+    expect(headerSection).toMatch(/^[\x20-\x7E\n]*$/);
+    expect(headerSection).toContain('From: =?UTF-8?Q?Caf=C3=A9_Acm=C3=A9?= <sender@example.com>');
+    expect(headerSection).toContain('To: "Doe, Jane" <jane@example.com>');
+    expect(headerSection).toContain('Subject: =?UTF-8?Q?=C2=A1Novedades_de_oto=C3=B1o!?=');
+    // The display name travels in the From header; Source is only the identity.
+    expect(callArgs.Source).toBe('sender@example.com');
+  });
+
+  it('keeps Source and every header line short with a long non-ASCII sender name', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Café Acmé · Nutrición y bienestar para tu día a día', email: 'sender@example.com'},
+      to: [
+        {name: 'Pérez, Ana', email: 'ana@example.com'},
+        {name: 'Núñez, Íñigo', email: 'inigo@example.com'},
+      ],
+      content: {
+        subject: '🍂 ¡Novedades de otoño! Recetas, menús y una sorpresa especial para ti',
+        html: '<p>Hola</p>',
+      },
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+    const [headerSection] = rawMessage.split('\n\n');
+
+    expect(callArgs.Source).toBe('sender@example.com');
+    // RFC 2047 §2 limits lines that carry encoded-words to 76 characters.
+    for (const line of headerSection.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
+  });
+
+  it('encodes non-ASCII attachment filenames with RFC 2231', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Sender', email: 'sender@example.com'},
+      to: ['recipient@example.com'],
+      content: {subject: 'Test Subject', html: '<p>Hello world</p>'},
+      attachments: [
+        {
+          filename: 'Menú otoño.pdf',
+          content: 'SGVsbG8=',
+          contentType: 'application/pdf',
+          disposition: 'attachment' as const,
+        },
+      ],
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+
+    expect(rawMessage).toContain(`Content-Disposition: attachment;\n filename*=UTF-8''Men%C3%BA%20oto%C3%B1o.pdf`);
+    expect(rawMessage).toMatch(/^[\x00-\x7F]*$/);
+  });
 });
 
 /**
@@ -1040,5 +1112,60 @@ describe('Template rendering — hostile contact data keys (no DB)', () => {
     expect(EmailService.format({subject: 'Hi {{name ?? Guest}}', body: 'x', data: {}}).subject).toBe('Hi Guest');
     // A missing field with no fallback renders empty rather than leaking `{{...}}`.
     expect(EmailService.format({subject: 'Hi {{missing}}', body: 'x', data: {}}).subject).toBe('Hi ');
+  });
+});
+
+/**
+ * Stats measure opens and clicks only against emails that could record them, so the
+ * streams a mode tracks have to match what the send path does (shouldTrackEmail, plus
+ * SESService sending everything tracked without a no-tracking configuration set).
+ */
+describe('EmailService.trackedSourceTypes', () => {
+  const {TRANSACTIONAL, CAMPAIGN, WORKFLOW} = EmailSourceType;
+
+  it('tracks every outbound stream when tracking is enabled', () => {
+    expect(EmailService.trackedSourceTypes(TrackingMode.ENABLED, true)).toEqual([TRANSACTIONAL, CAMPAIGN, WORKFLOW]);
+  });
+
+  it('tracks campaigns and workflows only in marketing-only mode', () => {
+    expect(EmailService.trackedSourceTypes(TrackingMode.MARKETING_ONLY, true)).toEqual([CAMPAIGN, WORKFLOW]);
+  });
+
+  it('tracks nothing when tracking is disabled', () => {
+    expect(EmailService.trackedSourceTypes(TrackingMode.DISABLED, true)).toEqual([]);
+  });
+
+  it('tracks everything whatever the mode without a no-tracking configuration set', () => {
+    for (const mode of [TrackingMode.ENABLED, TrackingMode.MARKETING_ONLY, TrackingMode.DISABLED]) {
+      expect(EmailService.trackedSourceTypes(mode, false)).toEqual([TRANSACTIONAL, CAMPAIGN, WORKFLOW]);
+    }
+  });
+});
+
+describe('EmailService.trackedStreams', () => {
+  it("reads the project's tracking mode", async () => {
+    const project = await factories.createProject({tracking: TrackingMode.MARKETING_ONLY});
+
+    expect(await EmailService.trackedStreams(project.id)).toEqual([EmailSourceType.CAMPAIGN, EmailSourceType.WORKFLOW]);
+  });
+
+  it('treats a project it cannot find as tracking everything', async () => {
+    expect(await EmailService.trackedStreams('00000000-0000-0000-0000-000000000000')).toEqual([
+      EmailSourceType.TRANSACTIONAL,
+      EmailSourceType.CAMPAIGN,
+      EmailSourceType.WORKFLOW,
+    ]);
+  });
+
+  it('still answers when the project cannot be read, so stats keep loading', async () => {
+    const project = await factories.createProject({tracking: TrackingMode.MARKETING_ONLY});
+    const read = vi.spyOn(ProjectService, 'id').mockRejectedValueOnce(new Error('Redis unavailable'));
+
+    expect(await EmailService.trackedStreams(project.id)).toEqual([
+      EmailSourceType.TRANSACTIONAL,
+      EmailSourceType.CAMPAIGN,
+      EmailSourceType.WORKFLOW,
+    ]);
+    read.mockRestore();
   });
 });

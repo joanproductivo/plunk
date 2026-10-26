@@ -28,11 +28,13 @@ import {
   bodyHasListManagementLink,
   buildEmailHeaders,
   classifyEmail,
+  RECIPIENT_OVERRIDE_HEADER,
   withSourceEmail,
 } from '../services/EmailHeaderService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EventService} from '../services/EventService.js';
 import {MeterService} from '../services/MeterService.js';
+import {ProjectFooterService} from '../services/ProjectFooterService.js';
 import {emailQueue} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {getSendingQuota, sendRawEmail} from '../services/SESService.js';
@@ -164,6 +166,19 @@ export async function createEmailWorker() {
         return;
       }
 
+      // Classify the email once: it decides both the unsubscribe footer and the
+      // standards-based headers below.
+      const emailClass = classifyEmail({
+        sourceType: email.sourceType,
+        templateType: email.template?.type,
+        campaignType: email.campaign?.type,
+      });
+
+      // The project's own unsubscribe footers, read while the email is still pending: a failed
+      // read fails this attempt before the email is marked, so BullMQ's retry sends it, rather
+      // than it going out without the project's footer.
+      const footers = await ProjectFooterService.forEmail(emailClass, email.projectId);
+
       try {
         // Update status to sending
         await prisma.email.update({
@@ -186,22 +201,15 @@ export async function createEmailWorker() {
           },
         });
 
-        // Classify the email once: it decides both the unsubscribe footer and the
-        // standards-based headers below.
-        const emailClass = classifyEmail({
-          sourceType: email.sourceType,
-          templateType: email.template?.type,
-          campaignType: email.campaign?.type,
-        });
-
         // Compile HTML with unsubscribe footer and badge.
-        // Only marketing emails get the Plunk unsubscribe footer.
+        // Only marketing emails get the unsubscribe footer: the project's own, or Plunk's.
         const compiledHtml = EmailService.compile({
           content: formattedEmail.body,
           contact: email.contact,
           project: email.project,
           includeUnsubscribe: emailClass === 'marketing',
           sourceEmailId: emailId,
+          footers,
         });
 
         // Use fromName from database if available, otherwise fall back to project name
@@ -216,12 +224,12 @@ export async function createEmailWorker() {
             : undefined;
 
         // Check for custom recipient override in headers
-        const recipientEmail = customHeaders?.['X-Plunk-Recipient-Override'] || email.contact.email;
+        const recipientEmail = customHeaders?.[RECIPIENT_OVERRIDE_HEADER] || email.contact.email;
 
         // Remove internal headers before sending
         const publicHeaders = customHeaders ? {...customHeaders} : undefined;
-        if (publicHeaders && 'X-Plunk-Recipient-Override' in publicHeaders) {
-          delete publicHeaders['X-Plunk-Recipient-Override'];
+        if (publicHeaders && RECIPIENT_OVERRIDE_HEADER in publicHeaders) {
+          delete publicHeaders[RECIPIENT_OVERRIDE_HEADER];
         }
 
         // Build the outbound headers: standards-based defaults for the email class

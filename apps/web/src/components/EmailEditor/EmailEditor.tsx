@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {EditorContent, useEditor} from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import {TextAlign} from '@tiptap/extension-text-align';
 import {Color} from '@tiptap/extension-color';
 import {TextStyle} from '@tiptap/extension-text-style';
 import {Link} from '@tiptap/extension-link';
@@ -12,12 +11,27 @@ import {LogicMention} from './LogicMention';
 import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
+import {type ButtonAttrs, EmailButton} from './EmailButton';
+import {ButtonDialog} from './ButtonDialog';
+import {ImageDialog} from './ImageDialog';
+import {type DividerAttrs, EmailDivider} from './EmailDivider';
+import {DividerDialog} from './DividerDialog';
+import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
+import {EmailVideo, type VideoAttrs} from './EmailVideo';
+import {SlashCommand} from './SlashCommand';
+import {SpacerDialog} from './SpacerDialog';
+import {VideoDialog} from './VideoDialog';
+import {useBlockDialog} from './useBlockDialog';
+import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
+import {PreheaderField} from './PreheaderField';
+import {brandOnChange, canvasStyle, editorAttributes, useEmailBrand} from './useEmailBrand';
+import {useActiveProject} from '../../lib/contexts/ActiveProjectProvider';
 import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks/useContacts';
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {renderTemplate} from '@plunk/shared';
+import {detectCustomHtmlPatterns, joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -33,9 +47,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@plunk/ui';
-import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet, Upload, X} from 'lucide-react';
-import {network} from '../../lib/network';
-import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
+import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet} from 'lucide-react';
+import {wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
 interface EmailEditorProps {
@@ -60,22 +73,37 @@ const commonVariables = [
 ];
 
 export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
+  // The preview text and the brand travel with the body; the editors below only ever see the body
+  const {preheader, brand, body} = splitEmailMarkers(value);
+  const {activeProject} = useActiveProject();
+  const emailBrand = useEmailBrand(activeProject?.id, brand, body);
+  const markersRef = useRef({preheader, brand, body, project: emailBrand.project});
+  markersRef.current = {preheader, brand, body, project: emailBrand.project};
+  // A change keeps the email's brand, or gives an email that was empty the project's
+  const withMarkers = (html: string, nextPreheader?: string) => {
+    const current = markersRef.current;
+    return joinEmailMarkers({
+      preheader: nextPreheader ?? current.preheader,
+      brand: brandOnChange(current.brand, current.body, current.project),
+      body: html,
+    });
+  };
+  const emitChange = (html: string) => onChange(withMarkers(html));
+  const canvas = canvasStyle(emailBrand.look);
+
   // Detect if initial value has custom HTML and start in appropriate mode
-  const initialMode = detectCustomHtmlPatterns(value) ? 'html' : 'visual';
+  const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
 
   const [mode, setMode] = useState<'visual' | 'html'>(initialMode);
-  const [htmlContent, setHtmlContent] = useState(value);
+  const [htmlContent, setHtmlContent] = useState(body);
   const [showVariableDialog, setShowVariableDialog] = useState(false);
   const [showImageDialog, setShowImageDialog] = useState(false);
   const [showModeWarningDialog, setShowModeWarningDialog] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
-  const [imageUrl, setImageUrl] = useState('');
-  const [imageFile, setImageFile] = useState<File | null>(null);
   const [customVariable, setCustomVariable] = useState('');
   const [defaultValue, setDefaultValue] = useState('');
   const [selectedContactId, setSelectedContactId] = useState<string>('');
   const [previewUpdateTrigger, setPreviewUpdateTrigger] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch available contact fields using SWR
   const {fields: availableFields, fieldDetails} = useContactFields();
@@ -118,6 +146,9 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const {data: config} = useConfig();
   const canUploadImages = Boolean(config?.features.storage.s3Enabled);
+  // Read by the slash menu as it updates, so it follows the config once loaded
+  const canUploadImagesRef = useRef(canUploadImages);
+  canUploadImagesRef.current = canUploadImages;
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -127,10 +158,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           levels: [1, 2, 3],
         },
       }),
-      TextAlign.configure({
-        types: ['heading', 'paragraph'],
-        alignments: ['left', 'center', 'right', 'justify'],
-      }),
+      EmailTextAlign,
       Color,
       TextStyle,
       Link.configure({
@@ -140,42 +168,70 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         },
       }),
       ResizableImage,
+      EmailButton,
+      EmailDivider,
+      EmailSpacer,
+      EmailVideo,
       Variable,
       VariableMention,
       LogicMention,
+      SlashCommand.configure({canInsertImages: () => canUploadImagesRef.current}),
       Placeholder.configure({
-        placeholder: placeholder || 'Your next email starts here',
+        // On the empty line the cursor is in, where the slash menu would open
+        placeholder: ({editor, node}) =>
+          node.type.name !== 'paragraph'
+            ? ''
+            : editor.isEmpty
+              ? `${placeholder || 'Your next email starts here'}. Type / for blocks`
+              : 'Type / for blocks',
       }),
     ],
     // Only initialize with content if starting in visual mode
     // If starting in HTML mode (due to custom HTML), keep editor empty
-    content: initialMode === 'visual' ? value || '' : '',
+    content: initialMode === 'visual' ? body || '' : '',
     editorProps: {
-      attributes: {
-        class: 'prose prose-sm max-w-none focus:outline-none min-h-[400px] px-4 py-3 text-neutral-900',
-      },
+      // In the email's brand; useEditor applies these again whenever they change
+      attributes: editorAttributes(emailBrand.look),
     },
     onUpdate: ({editor}) => {
       const html = editor.getHTML();
-      onChange(html);
+      emitChange(html);
       setHtmlContent(html);
       // Trigger preview update
       setPreviewUpdateTrigger(prev => prev + 1);
     },
   });
 
+  const button = useBlockDialog<ButtonAttrs>(editor, 'button');
+
+  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
+  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
+  const video = useBlockDialog<VideoAttrs>(editor, 'video');
+
+  // The slash menu's image row opens the same dialog as the toolbar
+  useEffect(() => {
+    if (!editor) return;
+    const add = ({type}: {type: string}) => {
+      if (type === 'image') setShowImageDialog(true);
+    };
+    editor.on('newBlock', add);
+    return () => {
+      editor.off('newBlock', add);
+    };
+  }, [editor]);
+
   // Update editor content when value prop changes from outside
   useEffect(() => {
-    if (editor && value !== editor.getHTML() && value !== htmlContent) {
+    if (editor && body !== editor.getHTML() && body !== htmlContent) {
       // Only update editor if in visual mode or if value is simple HTML
-      const isCustomHtml = detectCustomHtmlPatterns(value);
+      const isCustomHtml = detectCustomHtmlPatterns(body);
 
       if (!isCustomHtml && mode === 'visual') {
-        editor.commands.setContent(value || '');
+        editor.commands.setContent(body || '');
       }
 
       // Always update htmlContent to stay in sync
-      setHtmlContent(value);
+      setHtmlContent(body);
 
       // If custom HTML is detected and we're in visual mode, switch to HTML mode
       if (isCustomHtml && mode === 'visual') {
@@ -210,7 +266,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     // Only switch if we have an editor and html content
     if (editor) {
       editor.commands.setContent(htmlContent || '');
-      onChange(htmlContent);
+      emitChange(htmlContent);
       setMode('visual');
     }
     setShowModeWarningDialog(false);
@@ -218,7 +274,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const handleHtmlChange = (newHtml: string) => {
     setHtmlContent(newHtml);
-    onChange(newHtml);
+    emitChange(newHtml);
   };
 
   const insertVariable = (varName: string, withDefault?: boolean) => {
@@ -229,33 +285,6 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       setShowVariableDialog(false);
       setCustomVariable('');
       setDefaultValue('');
-    }
-  };
-
-  const handleImageUpload = async () => {
-    if (!imageFile && !imageUrl) return;
-
-    if (imageUrl) {
-      // Insert external URL
-      (editor?.chain().focus() as any).setImage({src: imageUrl}).run();
-      setImageUrl('');
-      setShowImageDialog(false);
-    } else if (imageFile) {
-      try {
-        // Upload to S3/Minio
-        const formData = new FormData();
-        formData.append('image', imageFile);
-
-        const response = await network.upload<{url: string; key: string}>('POST', '/uploads/image', formData);
-
-        // Insert the uploaded image URL
-        (editor?.chain().focus() as any).setImage({src: response.url}).run();
-        setImageFile(null);
-        setShowImageDialog(false);
-      } catch (error) {
-        console.error('Failed to upload image:', error);
-        alert('Couldn’t upload the image. Try again.');
-      }
     }
   };
 
@@ -326,7 +355,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
       if (iframeDoc) {
         const previewContent = getPreviewHtml();
-        const fullHtml = wrapEmailWithStyles(previewContent);
+        const fullHtml = wrapEmailWithStyles(previewContent, emailBrand.look);
 
         iframeDoc.open();
         iframeDoc.write(fullHtml);
@@ -360,7 +389,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger]);
+  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger, JSON.stringify(emailBrand.look)]);
 
   return (
     <div className="border border-neutral-200 rounded-lg bg-white">
@@ -411,6 +440,23 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </div>
       </div>
 
+      <PreheaderField value={preheader} onChange={next => onChange(withMarkers(body, next))} />
+
+      {mode === 'visual' && emailBrand.differs && (
+        <div className="flex items-center justify-between gap-3 border-t border-sky-200 bg-sky-50 px-4 py-2">
+          <p className="text-xs text-sky-900">This email uses different styles from the project&apos;s brand.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 text-xs"
+            onClick={() => onChange(joinEmailMarkers({preheader, brand: emailBrand.project, body}))}
+          >
+            Apply brand
+          </Button>
+        </div>
+      )}
+
       {/* Template syntax errors, reported as you type rather than on save */}
       {syntaxIssue && !suggestionOpen && (
         <div className="flex items-start gap-2 border-t border-red-200 bg-red-50 px-4 py-2.5">
@@ -454,10 +500,16 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             editor={editor}
             onInsertVariable={() => setShowVariableDialog(true)}
             onInsertImage={() => setShowImageDialog(true)}
+            onButton={button.onToolbar}
+            onDivider={divider.onToolbar}
+            onSpacer={spacer.onToolbar}
+            onVideo={video.onToolbar}
             canUploadImages={canUploadImages}
           />
-          <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
-            <EditorContent editor={editor} />
+          <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
+            <div style={canvas.inner}>
+              <EditorContent editor={editor} />
+            </div>
           </div>
           {selectedContactId && (
             <>
@@ -776,83 +828,17 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         variant="destructive"
       />
 
-      {/* Image insertion dialog */}
-      <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Insert image</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="image-url" className="text-sm font-medium mb-2 block">
-                Image URL
-              </Label>
-              <Input
-                id="image-url"
-                value={imageUrl}
-                onChange={e => setImageUrl(e.target.value)}
-                placeholder="https://example.com/image.jpg"
-                type="url"
-              />
-            </div>
+      <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} />
+      <DividerDialog {...divider.dialogProps} />
+      <SpacerDialog {...spacer.dialogProps} />
+      <VideoDialog {...video.dialogProps} />
 
-            {canUploadImages && (
-              <>
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <span className="w-full border-t border-neutral-200" />
-                  </div>
-                  <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-white px-2 text-neutral-500">Or upload</span>
-                  </div>
-                </div>
-
-                <div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={e => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setImageFile(file);
-                        setImageUrl('');
-                      }
-                    }}
-                    className="hidden"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full"
-                  >
-                    <Upload className="h-4 w-4 mr-2" />
-                    Choose file
-                  </Button>
-                  {imageFile && (
-                    <div className="mt-2 flex items-center justify-between p-2 bg-neutral-50 rounded border border-neutral-200">
-                      <span className="text-sm text-neutral-700 truncate">{imageFile.name}</span>
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            <div className="flex gap-2 justify-end">
-              <Button type="button" variant="outline" onClick={() => setShowImageDialog(false)}>
-                Cancel
-              </Button>
-              <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
-                Insert
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ImageDialog
+        open={showImageDialog}
+        onOpenChange={setShowImageDialog}
+        canUpload={canUploadImages}
+        onInsert={src => (editor?.chain().focus() as any).setImage({src}).run()}
+      />
 
       {/* Custom styles for editor */}
       <style jsx global>{`
@@ -933,9 +919,25 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           max-width: 100%;
         }
 
-        .resizable-image-container.selected {
+        .resizable-image-container.selected,
+        .ProseMirror .node-button.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-spacer.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-video.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
+        }
+
+        /* A divider is as thin as its line; a taller invisible band takes the clicks */
+        .ProseMirror hr {
+          position: relative;
+          overflow: visible;
+          cursor: pointer;
+        }
+        .ProseMirror hr::after {
+          content: '';
+          position: absolute;
+          inset: -8px 0;
         }
 
         .resizable-image-container img {
@@ -946,15 +948,18 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           outline: none;
         }
 
-        .ProseMirror p.is-editor-empty:first-child::before {
+        .ProseMirror p.is-empty::before {
           color: #9ca3af;
           content: attr(data-placeholder);
           float: left;
           height: 0;
           pointer-events: none;
         }
+        .ProseMirror p.is-empty:not(.is-editor-empty)::before {
+          color: #d1d5db;
+        }
 
-        /* Variable autocomplete styles */
+        /* Suggestion menus ({{, {% and /) */
         .tippy-box[data-theme~='variable-suggestion'] {
           background-color: white;
           border: 1px solid #e5e7eb;

@@ -1,14 +1,27 @@
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
+
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
-import {ContactSchemas} from '@plunk/shared';
-import type {BulkContactActionSelector} from '@plunk/types';
+import {ContactSchemas, resolveContactLanguage, UtilitySchemas} from '@plunk/shared';
+import type {
+  BulkContactActionJobData,
+  BulkContactActionSelector,
+  BulkContactRecordOperation,
+  BulkSegmentOperation,
+  ContactSubscriptionStatus,
+} from '@plunk/types';
+import {CONTACT_SUBSCRIPTION_STATUSES} from '@plunk/types';
 import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import {contactWriteRateLimit} from '../middleware/rateLimit.js';
 import {HttpException} from '../exceptions/index.js';
+import {ContactExportService} from '../services/ContactExportService.js';
+import {ContactSegmentsService} from '../services/ContactSegmentsService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
+import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 // Configure multer for file uploads (memory storage)
@@ -60,11 +73,8 @@ export class Contacts {
     // Two spellings of the facet: `?status=subscribed|snoozed|unsubscribed` is the current
     // one, and `?subscribed=true|false` is kept working for callers written before snoozing
     // existed. `status` wins when both are present.
-    const statusParam = req.query.status as string | undefined;
-    const status =
-      statusParam === 'subscribed' || statusParam === 'snoozed' || statusParam === 'unsubscribed'
-        ? statusParam
-        : undefined;
+    const statusParam = req.query.status as ContactSubscriptionStatus | undefined;
+    const status = statusParam && CONTACT_SUBSCRIPTION_STATUSES.includes(statusParam) ? statusParam : undefined;
     const subscribedParam = req.query.subscribed as string | undefined;
     const subscribed = subscribedParam === 'true' ? true : subscribedParam === 'false' ? false : undefined;
     const sortParam = req.query.sort as string | undefined;
@@ -72,9 +82,17 @@ export class Contacts {
     const dirParam = req.query.dir as string | undefined;
     const dir = dirParam === 'asc' ? 'asc' : dirParam === 'desc' ? 'desc' : undefined;
 
+    // Optional `?segmentId=`: only the contacts currently in that segment.
+    const segmentIdParam = req.query.segmentId;
+    if (segmentIdParam !== undefined && !UtilitySchemas.id.safeParse({id: segmentIdParam}).success) {
+      throw new HttpException(400, 'segmentId must be a valid UUID');
+    }
+    const segmentId = segmentIdParam as string | undefined;
+
     const result = await ContactService.list(auth.projectId!, limit, cursor, search, {
       status,
       subscribed,
+      segmentId,
       sort,
       dir,
     });
@@ -160,6 +178,28 @@ export class Contacts {
     const contact = await ContactService.get(auth.projectId!, contactId);
 
     return res.status(200).json(contact);
+  }
+
+  /**
+   * GET /contacts/:id/segments
+   * The contact's static segments and the dynamic segments it matches, sorted by name
+   */
+  @Get(':id/segments')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async segments(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const contactId = req.params.id;
+
+    if (!contactId) {
+      return res.status(400).json({error: 'Contact ID is required'});
+    }
+
+    // 404 for a contact of another project, before reading any of its segments
+    const contact = await ContactService.get(auth.projectId!, contactId);
+
+    const segments = await ContactSegmentsService.forContact(auth.projectId!, contact.id);
+    return res.status(200).json(segments);
   }
 
   /**
@@ -258,15 +298,11 @@ export class Contacts {
       throw new HttpException(404, 'Contact not found');
     }
 
-    // Get contact-level locale (overrides project language)
-    const contactLocale =
-      contact.data &&
-      typeof contact.data === 'object' &&
-      !Array.isArray(contact.data) &&
-      'locale' in contact.data &&
-      typeof contact.data.locale === 'string'
-        ? contact.data.locale
-        : null;
+    // The contact's language, chosen as for the footer that links here (their locale, else the project's)
+    const locale =
+      contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
+        ? (contact.data as Record<string, unknown>).locale
+        : undefined;
 
     return res.status(200).json({
       id: contact.id,
@@ -279,7 +315,7 @@ export class Contacts {
       // opting out of before they act. Already printed in the footer of every marketing email
       // this contact received, so it discloses nothing the link holder has not seen.
       projectName: project.name,
-      language: contactLocale || project.language || 'en',
+      language: resolveContactLanguage(locale, project.language),
     });
   }
 
@@ -395,7 +431,7 @@ export class Contacts {
    * Import contacts from CSV file
    */
   @Post('import')
-  @Middleware([requireAuth, upload.single('file')])
+  @Middleware([requireAuth, requireEmailVerified, upload.single('file')])
   @CatchAsync
   public async importCsv(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
@@ -421,6 +457,48 @@ export class Contacts {
       return res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to queue import',
       });
+    }
+  }
+
+  /**
+   * POST /contacts/export
+   * Stream the selected contacts as CSV. Takes the same selector as the bulk actions: explicit
+   * ids, or "all matching" the list filters minus unticked rows.
+   */
+  @Post('export')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async exportCsv(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    const parsed = ContactSchemas.bulkAction.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpException(400, parsed.error.errors[0]?.message ?? 'Invalid export selector');
+    }
+
+    const selector: BulkContactActionSelector = parsed.data;
+
+    // Anything that fails here still gets a JSON error: no CSV byte has been sent yet.
+    const contactExport = await ContactExportService.prepare(auth.projectId!, selector);
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+    res.setHeader('Cache-Control', 'no-store');
+    // The image's nginx buffers proxied responses by default; stream straight through instead.
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    try {
+      // pipeline handles backpressure, and closes the generator if the client goes away.
+      await pipeline(Readable.from(contactExport.lines()), res);
+      signale.info(`[CONTACTS] Exported ${contactExport.rows} contacts`, {
+        projectId: auth.projectId,
+        mode: selector.mode,
+      });
+    } catch (error) {
+      // The CSV has already started, so there is no JSON error to send: pipeline has destroyed
+      // the response, which the client sees as a failed download rather than a short file.
+      signale.error(`[CONTACTS] Export stopped after ${contactExport.rows} contacts:`, error);
     }
   }
 
@@ -543,6 +621,28 @@ export class Contacts {
   }
 
   /**
+   * POST /contacts/bulk-add-to-segment
+   * Queue adding contacts to a static segment. Contacts already in it re-enter it.
+   */
+  @Post('bulk-add-to-segment')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkAddToSegment(req: Request, res: Response, _next: NextFunction) {
+    return queueBulkSegmentAction(req, res, 'addToSegment');
+  }
+
+  /**
+   * POST /contacts/bulk-remove-from-segment
+   * Queue removing contacts from a static segment
+   */
+  @Post('bulk-remove-from-segment')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkRemoveFromSegment(req: Request, res: Response, _next: NextFunction) {
+    return queueBulkSegmentAction(req, res, 'removeFromSegment');
+  }
+
+  /**
    * GET /contacts/bulk/:jobId
    * Get bulk action job status
    */
@@ -574,13 +674,17 @@ export class Contacts {
   }
 }
 
-async function queueBulkAction(
-  req: Request,
-  res: Response,
-  operation: 'subscribe' | 'unsubscribe' | 'delete',
-) {
-  const auth = res.locals.auth;
+/**
+ * The selector part of a parsed bulk payload, without any other fields it carried. Repeated ids
+ * are dropped: a contact listed twice would otherwise enter a segment twice.
+ */
+function toSelector(data: BulkContactActionSelector): BulkContactActionSelector {
+  return data.mode === 'ids'
+    ? {mode: 'ids', contactIds: [...new Set(data.contactIds)]}
+    : {mode: 'query', filter: data.filter, excludeIds: data.excludeIds};
+}
 
+async function queueBulkAction(req: Request, res: Response, operation: BulkContactRecordOperation) {
   const parsed = ContactSchemas.bulkAction.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -588,21 +692,39 @@ async function queueBulkAction(
     });
   }
 
-  const selector: BulkContactActionSelector =
-    parsed.data.mode === 'ids'
-      ? {mode: 'ids', contactIds: parsed.data.contactIds}
-      : {mode: 'query', filter: parsed.data.filter, excludeIds: parsed.data.excludeIds};
+  return queueBulkJob(res, {projectId: res.locals.auth.projectId!, operation, selector: toSelector(parsed.data)});
+}
 
+async function queueBulkSegmentAction(req: Request, res: Response, operation: BulkSegmentOperation) {
+  const projectId = res.locals.auth.projectId!;
+
+  const parsed = ContactSchemas.bulkSegmentAction.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.errors[0];
+    throw new HttpException(
+      400,
+      issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'Invalid bulk action payload',
+    );
+  }
+
+  // Reject a missing or dynamic segment now rather than in a job the user only sees fail later
+  const {targetSegmentId} = parsed.data;
+  await SegmentMembershipService.getStaticSegment(projectId, targetSegmentId, BULK_SEGMENT_ACTION[operation]);
+
+  return queueBulkJob(res, {projectId, operation, targetSegmentId, selector: toSelector(parsed.data)});
+}
+
+async function queueBulkJob(res: Response, data: BulkContactActionJobData) {
   try {
-    const job = await QueueService.queueBulkContactAction(auth.projectId!, selector, operation);
+    const job = await QueueService.queueBulkContactAction(data);
     return res.status(202).json({
-      message: `Bulk ${operation} queued successfully`,
+      message: `Bulk ${data.operation} queued successfully`,
       jobId: job.id,
     });
   } catch (error) {
-    signale.error(`[CONTACTS] Failed to queue bulk ${operation}:`, error);
+    signale.error(`[CONTACTS] Failed to queue bulk ${data.operation}:`, error);
     return res.status(500).json({
-      error: error instanceof Error ? error.message : `Failed to queue bulk ${operation}`,
+      error: error instanceof Error ? error.message : `Failed to queue bulk ${data.operation}`,
     });
   }
 }

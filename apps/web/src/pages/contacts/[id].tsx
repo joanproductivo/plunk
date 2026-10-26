@@ -11,6 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
+import {contactStatus} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -20,10 +21,11 @@ import {useEffect, useState} from 'react';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {KeyValueEditor} from '../../components/KeyValueEditor';
 import {ActivityFeed} from '../../components/ActivityFeed';
+import {ContactSegmentsCard} from '../../components/contacts/ContactSegmentsCard';
 import {network} from '../../lib/network';
-import {contactStatus, formatSnoozedUntil} from '../../lib/contactStatus';
+import {formatSnoozedUntil} from '../../lib/contactStatus';
 import {toast} from 'sonner';
-import useSWR from 'swr';
+import useSWR, {useSWRConfig} from 'swr';
 import {ContactSchemas} from '@plunk/shared';
 import dayjs from 'dayjs';
 
@@ -31,6 +33,7 @@ export default function ContactDetailPage() {
   const router = useRouter();
   const {id} = router.query;
   const {data: contact, mutate, isLoading} = useSWR<Contact>(id ? `/contacts/${id}` : null);
+  const {mutate: mutateKey} = useSWRConfig();
 
   const [email, setEmail] = useState('');
   const [subscribed, setSubscribed] = useState(true);
@@ -60,6 +63,8 @@ export default function ContactDetailPage() {
       >('PATCH', `/contacts/${id}`, {email, subscribed, data: customData});
       toast.success('Contact updated');
       void mutate();
+      // Its data and subscription decide which dynamic segments it matches
+      void mutateKey(`/contacts/${id}/segments`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.');
     } finally {
@@ -301,6 +306,8 @@ export default function ContactDetailPage() {
                   </div>
                 </CardContent>
               </Card>
+
+              <ContactSegmentsCard contactId={contact.id} email={contact.email} />
 
               {/* Public Links Card */}
               <Card>

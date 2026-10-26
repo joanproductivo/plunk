@@ -26,6 +26,7 @@ import {createImportWorker} from './import-processor.js';
 import {createMeterWorker} from './meter-processor.js';
 import {createScheduledCampaignWorker} from './scheduled-processor.js';
 import {createSegmentCountWorker} from './segment-count-processor.js';
+import {createSegmentMembershipEventsWorker} from './segment-membership-events-processor.js';
 import {createWorkflowWorker} from './workflow-processor-queue.js';
 
 const workers: {name: string; worker: Worker}[] = [];
@@ -118,6 +119,11 @@ async function startWorkers() {
     const cardVerificationSweepWorker = createCardVerificationSweepWorker();
     workers.push({name: 'card-verification-sweep', worker: cardVerificationSweepWorker});
     signale.success('[WORKER] Card verification sweep worker started');
+
+    // Start segment membership events worker
+    const segmentMembershipEventsWorker = createSegmentMembershipEventsWorker();
+    workers.push({name: 'segment-membership-events', worker: segmentMembershipEventsWorker});
+    signale.success('[WORKER] Segment membership events worker started');
 
     signale.success('[WORKER] All workers started successfully');
 
