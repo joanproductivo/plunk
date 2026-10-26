@@ -18,6 +18,7 @@ import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import {contactWriteRateLimit} from '../middleware/rateLimit.js';
 import {HttpException} from '../exceptions/index.js';
 import {ContactExportService} from '../services/ContactExportService.js';
+import {ContactSegmentsService} from '../services/ContactSegmentsService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
 import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
@@ -177,6 +178,28 @@ export class Contacts {
     const contact = await ContactService.get(auth.projectId!, contactId);
 
     return res.status(200).json(contact);
+  }
+
+  /**
+   * GET /contacts/:id/segments
+   * The contact's static segments and the dynamic segments it matches, sorted by name
+   */
+  @Get(':id/segments')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async segments(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const contactId = req.params.id;
+
+    if (!contactId) {
+      return res.status(400).json({error: 'Contact ID is required'});
+    }
+
+    // 404 for a contact of another project, before reading any of its segments
+    const contact = await ContactService.get(auth.projectId!, contactId);
+
+    const segments = await ContactSegmentsService.forContact(auth.projectId!, contact.id);
+    return res.status(200).json(segments);
   }
 
   /**
