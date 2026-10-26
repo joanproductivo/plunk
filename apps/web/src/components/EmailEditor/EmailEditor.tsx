@@ -13,6 +13,7 @@ import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
 import {type ButtonAttrs, EmailButton} from './EmailButton';
 import {ButtonDialog} from './ButtonDialog';
+import {ImageDialog} from './ImageDialog';
 import {type DividerAttrs, EmailDivider} from './EmailDivider';
 import {DividerDialog} from './DividerDialog';
 import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
@@ -42,8 +43,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@plunk/ui';
-import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet, Upload, X} from 'lucide-react';
-import {network} from '../../lib/network';
+import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet} from 'lucide-react';
 import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
@@ -84,13 +84,10 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const [showImageDialog, setShowImageDialog] = useState(false);
   const [showModeWarningDialog, setShowModeWarningDialog] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
-  const [imageUrl, setImageUrl] = useState('');
-  const [imageFile, setImageFile] = useState<File | null>(null);
   const [customVariable, setCustomVariable] = useState('');
   const [defaultValue, setDefaultValue] = useState('');
   const [selectedContactId, setSelectedContactId] = useState<string>('');
   const [previewUpdateTrigger, setPreviewUpdateTrigger] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch available contact fields using SWR
   const {fields: availableFields, fieldDetails} = useContactFields();
@@ -271,33 +268,6 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       setShowVariableDialog(false);
       setCustomVariable('');
       setDefaultValue('');
-    }
-  };
-
-  const handleImageUpload = async () => {
-    if (!imageFile && !imageUrl) return;
-
-    if (imageUrl) {
-      // Insert external URL
-      (editor?.chain().focus() as any).setImage({src: imageUrl}).run();
-      setImageUrl('');
-      setShowImageDialog(false);
-    } else if (imageFile) {
-      try {
-        // Upload to S3/Minio
-        const formData = new FormData();
-        formData.append('image', imageFile);
-
-        const response = await network.upload<{url: string; key: string}>('POST', '/uploads/image', formData);
-
-        // Insert the uploaded image URL
-        (editor?.chain().focus() as any).setImage({src: response.url}).run();
-        setImageFile(null);
-        setShowImageDialog(false);
-      } catch (error) {
-        console.error('Failed to upload image:', error);
-        alert('Couldn’t upload the image. Try again.');
-      }
     }
   };
 
@@ -827,83 +797,12 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       <DividerDialog {...divider.dialogProps} />
       <SpacerDialog {...spacer.dialogProps} />
 
-      {/* Image insertion dialog */}
-      <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Insert image</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="image-url" className="text-sm font-medium mb-2 block">
-                Image URL
-              </Label>
-              <Input
-                id="image-url"
-                value={imageUrl}
-                onChange={e => setImageUrl(e.target.value)}
-                placeholder="https://example.com/image.jpg"
-                type="url"
-              />
-            </div>
-
-            {canUploadImages && (
-              <>
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <span className="w-full border-t border-neutral-200" />
-                  </div>
-                  <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-white px-2 text-neutral-500">Or upload</span>
-                  </div>
-                </div>
-
-                <div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={e => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setImageFile(file);
-                        setImageUrl('');
-                      }
-                    }}
-                    className="hidden"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full"
-                  >
-                    <Upload className="h-4 w-4 mr-2" />
-                    Choose file
-                  </Button>
-                  {imageFile && (
-                    <div className="mt-2 flex items-center justify-between p-2 bg-neutral-50 rounded border border-neutral-200">
-                      <span className="text-sm text-neutral-700 truncate">{imageFile.name}</span>
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            <div className="flex gap-2 justify-end">
-              <Button type="button" variant="outline" onClick={() => setShowImageDialog(false)}>
-                Cancel
-              </Button>
-              <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
-                Insert
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ImageDialog
+        open={showImageDialog}
+        onOpenChange={setShowImageDialog}
+        canUpload={canUploadImages}
+        onInsert={src => (editor?.chain().focus() as any).setImage({src}).run()}
+      />
 
       {/* Custom styles for editor */}
       <style jsx global>{`
