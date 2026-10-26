@@ -39,6 +39,7 @@ import {
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import dagre from 'dagre';
 import {WorkflowEdge} from './WorkflowEdge';
+import {useSegmentName} from './segments/SegmentPicker';
 import {network} from '../lib/network';
 import {toast} from 'sonner';
 import {Button, ConfirmDialog, Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle} from '@plunk/ui';
@@ -274,6 +275,11 @@ function AddStepNode({data}: {data: {label: string; onClick?: () => void}}) {
   );
 }
 
+/** The name of a condition's `segment.<id>` field. A component, so only the nodes that show one load the segments */
+function SegmentFieldName({segmentId}: {segmentId: string}) {
+  return <>{useSegmentName()(segmentId)}</>;
+}
+
 // Custom node component with action buttons
 function CustomNode({
   data,
@@ -300,6 +306,11 @@ function CustomNode({
   const Icon = data.icon;
   const color = data.color;
   const bgColor = data.bgColor;
+  // Handle both legacy format {field, type} and new format (string)
+  const conditionField =
+    typeof data.config?.field === 'object' && data.config.field !== null && 'field' in data.config.field
+      ? String(data.config.field.field)
+      : String(data.config?.field);
   const [showActions, setShowActions] = useState(false);
 
   const sourceHandles = data.sourceHandles ?? [];
@@ -424,12 +435,13 @@ function CustomNode({
             <div className="text-xs text-neutral-600">
               <div className="flex items-center gap-1 mb-1">
                 <GitBranch className="h-3 w-3" />
-                <span className="font-mono text-[10px] truncate">
-                  {/* Handle both legacy format {field, type} and new format (string) */}
-                  {typeof data.config.field === 'object' && data.config.field !== null && 'field' in data.config.field
-                    ? String(data.config.field.field)
-                    : String(data.config.field)}
-                </span>
+                {conditionField.startsWith('segment.') ? (
+                  <span className="text-[10px] truncate">
+                    Segment: <SegmentFieldName segmentId={conditionField.slice('segment.'.length)} />
+                  </span>
+                ) : (
+                  <span className="font-mono text-[10px] truncate">{conditionField}</span>
+                )}
               </div>
               {data.config.mode === 'multi' ? (
                 <div className="text-[10px] text-neutral-500 ml-4">
