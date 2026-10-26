@@ -245,3 +245,53 @@ describe('visualAttributeText', () => {
     expect(visualAttributeText('data-driven')).toBe('data\u2011driven');
   });
 });
+
+describe('detectCustomHtmlPatterns with editor boxes', () => {
+  const box = (
+    inner = '<p>Inside</p>',
+    attributes = 'class="email-box" style="background-color: #f3f4f6; color: #374151;"',
+  ) => `<div ${attributes}>${inner}</div>`;
+
+  it('treats an editor box, inset or full width, as visual editor content', () => {
+    expect(detectCustomHtmlPatterns(`<p>a</p>${box()}<p>b</p>`)).toBe(false);
+    expect(
+      detectCustomHtmlPatterns(
+        box(
+          '<h2>Title</h2><ul><li><p>One</p></li></ul>',
+          'class="email-box email-box-full" style="background-color: #111827; color: #ffffff;"',
+        ),
+      ),
+    ).toBe(false);
+    expect(detectCustomHtmlPatterns(box('<p>a</p>', 'class="email-box"'))).toBe(false);
+  });
+
+  it.each([
+    ['without a class', ''],
+    ['with another class', 'class="card"'],
+    ['with a look-alike class', 'class="email-box-dark"'],
+    ['with its classes the other way round', 'class="email-box-full email-box"'],
+    ['in single quotes', "class='email-box'"],
+    ['with another attribute', 'class="email-box" title="x"'],
+    ['with the style first', 'style="color: #000000;" class="email-box"'],
+    ['with a > in its style', 'class="email-box" style="background: url(a>b)"'],
+  ])('treats a div %s as custom', (_, attributes) => {
+    expect(detectCustomHtmlPatterns(box('<p>a</p>', attributes))).toBe(true);
+  });
+
+  it('treats a box inside a box, or any div inside one, as custom', () => {
+    expect(detectCustomHtmlPatterns(box(box()))).toBe(true);
+    expect(detectCustomHtmlPatterns(box('<div><p>a</p></div>'))).toBe(true);
+  });
+
+  it('treats an unclosed div tag, or one in a comment, as custom', () => {
+    expect(detectCustomHtmlPatterns('<p>a</p><div class="email-box"')).toBe(true);
+    expect(detectCustomHtmlPatterns(`<!-- <div> -->${box()}`)).toBe(true);
+  });
+
+  it('reads a long run of boxes quickly', () => {
+    const html = box().repeat(5_000);
+    const started = performance.now();
+    expect(detectCustomHtmlPatterns(html)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});

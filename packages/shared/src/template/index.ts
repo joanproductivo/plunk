@@ -5,7 +5,9 @@ import {renderLegacyTemplate} from './legacy.js';
 import {preprocessTemplate} from './preprocess.js';
 
 export * from './brand.js';
+export * from './color.js';
 export * from './emailBlocks.js';
+export * from './emailBox.js';
 export * from './emailButton.js';
 export * from './emailDocument.js';
 export * from './emailFonts.js';

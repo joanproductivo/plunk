@@ -1,4 +1,5 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
+import {luminance} from './color.js';
 import {EDITOR_BLOCK_CLASSES} from './emailBlocks.js';
 import {isSafeVideoHrefAttribute} from './emailVideo.js';
 
@@ -58,12 +59,35 @@ function hasForeignVideo(html: string): boolean {
   return false;
 }
 
+// The one <div> the editor writes: a box, exactly as it serialises one (see @plunk/shared emailBox)
+const BOX_TAG = /^\s+class="email-box( email-box-full)?"(\s+style="[^"<>]*")?\s*$/;
+
+// Whether a <div> is anything but an editor box at the top of the email: any other div, however
+// close (other attributes, other quotes, a box inside a box), is custom HTML. A linear scan, as
+// hasRichButton: the body may carry contact data.
+function hasForeignDiv(html: string): boolean {
+  const parts = html.split(/(<\/?div\b)/i);
+  let depth = 0;
+  for (let i = 1; i < parts.length; i += 2) {
+    if (parts[i]![1] === '/') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    const rest = parts[i + 1]!;
+    const tagEnd = rest.indexOf('>');
+    if (tagEnd < 0 || depth > 0 || !BOX_TAG.test(rest.slice(0, tagEnd))) return true;
+    depth++;
+  }
+  return false;
+}
+
 /**
  * Detects if HTML contains custom patterns that indicate it was written in the HTML editor
  * rather than the visual editor.
  *
  * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
- * ResizableImage + EmailButton + EmailDivider (styled <hr>) + EmailSpacer + EmailVideo + VariableMention.
+ * ResizableImage + EmailButton + EmailDivider (styled <hr>) + EmailSpacer + EmailVideo + EmailBox (a
+ * <div class="email-box">, the only div it writes) + VariableMention.
  * TextStyle/Color/Link round-trip <span style="..."> and <a style="..."> markup. This detection
  * therefore PERMITS span + inline styles and only REJECTS markup TipTap cannot represent (tables,
  * divs, forms, embeds, custom attrs, <style> blocks, etc).
@@ -102,9 +126,10 @@ export function detectCustomHtmlPatterns(html: string): boolean {
   const hasCustomAttributes = /<[a-z][^>]*?[\s"'](?:data-|aria-|role=|id=)/i.test(html);
 
   // Elements TipTap cannot round-trip with the currently-loaded extension set.
-  // <span> is intentionally excluded -- TipTap's TextStyle extension handles it.
+  // <span> is intentionally excluded -- TipTap's TextStyle extension handles it, and <div> is
+  // checked on its own, as the editor writes one (see hasForeignDiv).
   const hasCustomElements =
-    /<(?:div|section|article|header|footer|nav|aside|main|table|tr|td|th|tbody|thead|tfoot|colgroup|col|form|input|button|select|textarea|iframe|video|audio|svg|object|embed|details|summary|dialog)\b/i.test(
+    /<(?:section|article|header|footer|nav|aside|main|table|tr|td|th|tbody|thead|tfoot|colgroup|col|form|input|button|select|textarea|iframe|video|audio|svg|object|embed|details|summary|dialog)\b/i.test(
       html,
     );
 
@@ -118,7 +143,8 @@ export function detectCustomHtmlPatterns(html: string): boolean {
     hasMediaQueries ||
     hasStyleTags ||
     hasRichButton(html) ||
-    hasForeignVideo(html)
+    hasForeignVideo(html) ||
+    hasForeignDiv(html)
   );
 }
 
@@ -146,15 +172,6 @@ export const EMAIL_COLUMN_RADIUS = 12;
 
 /** The padding of a framed email's column, in px, on each side of its content. */
 export const EMAIL_COLUMN_PADDING = 24;
-
-// WCAG relative luminance of a `#rrggbb` colour
-function luminance(hex: string): number {
-  const [r, g, b] = [1, 3, 5].map(at => {
-    const channel = parseInt(hex.slice(at, at + 2), 16) / 255;
-    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-}
 
 /**
  * Whether the unsubscribe footer, whose text is #404040 (see EmailService.compile), reads on

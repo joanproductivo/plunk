@@ -43,3 +43,25 @@ describe('emailProseCss', () => {
     expect(rule(css, '.prose code')).toContain('color: #111827;');
   });
 });
+
+describe('emailProseCss for editor boxes', () => {
+  const framed = toEmailBrand({backgroundColor: '#f3f4f6', contentWidth: 600});
+
+  it('pads and rounds a box wherever its styles are read, sending included', () => {
+    const css = emailProseCss();
+
+    expect(rule(css, '.prose .email-box')).toContain('padding: 16px;');
+    expect(rule(css, '.prose .email-box')).toContain('border-radius: 12px;');
+    expect(rule(css, '.prose .email-box-full')).toContain('padding: 24px;');
+    expect(rule(css, '.prose .email-box-full')).toContain('border-radius: 0;');
+    expect(css).toContain(
+      '.prose .email-box strong, .prose .email-box code, .prose .email-box blockquote {\n  color: inherit;',
+    );
+  });
+
+  it('takes a full-width box across a framed column in the preview only', () => {
+    expect(rule(emailProseCss(framed, {preview: true}), '.prose .email-box-full')).toContain('margin-left: -24px;');
+    expect(rule(emailProseCss(framed), '.prose .email-box-full')).not.toContain('margin-left');
+    expect(rule(emailProseCss(BRAND_DEFAULTS, {preview: true}), '.prose .email-box-full')).not.toContain('margin-left');
+  });
+});
