@@ -74,16 +74,18 @@ Each execution carries a `context` JSON object that's merged with the contact's 
 
 ## When something fails
 
-The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow or campaign, one for transactional emails, one for the project being disabled. What counts as a failure:
+The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow, campaign or domain, one for transactional emails, one for the project being disabled, and one each for sending reputation warnings and critical ones. What it shows:
 
 - an execution that fails in a step, for example a webhook to an address Plunk refuses to call. A webhook that answers with an error status does not fail the execution: its step records the status and the workflow carries on;
 - an email of a workflow, a campaign or an API call that SES does not accept. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
 - a campaign batch, or a workflow job, that runs out of attempts;
-- the project being disabled.
+- the project being disabled;
+- bounce or complaint rates past a warning threshold, or past a critical one when `AUTO_PROJECT_DISABLE` is off. With it on, a critical rate disables the project and the banner shows that instead. The rates are checked on every bounce and complaint, and some cover all the project's emails, so they can stay past a threshold for a long time: once an alert about some conditions goes out, they show up again after a day, and a new condition at once;
+- a domain that SES stops verifying, for example because its DNS records were removed. Emails from it fail until they are back.
 
 Marking a source reviewed closes what the banner showed. If it fails again, it shows up again, counting from one, and its alert email goes out again.
 
-In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. A disabled project sends no alerts.
+In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. If the sender's domain stops being verified, alerts go from the same name on the project's oldest other verified domain; with none, only the banner shows them, and a test alert always uses the address you saved. A disabled project sends no alerts.
 
 ## Locking active workflows
 
