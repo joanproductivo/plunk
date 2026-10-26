@@ -1,7 +1,8 @@
-import {Controller, Middleware, Post} from '@overnightjs/core';
+import {Controller, Get, Middleware, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
 import signale from 'signale';
+import {ErrorCode, HttpException} from '../exceptions/index.js';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import * as S3Service from '../services/S3Service.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -20,9 +21,12 @@ function validateMagicBytes(buffer: Buffer, mimetype: string): boolean {
   return signatures.some(sig => buffer.subarray(0, sig.length).equals(sig));
 }
 
-// Configure multer for file uploads (memory storage)
-const upload = multer({
+// Configure multer for file uploads (memory storage). multer 2.4 reads `defParamCharset`, which
+// @types/multer 2.0 does not declare yet.
+const uploadOptions: multer.Options & {defParamCharset: string} = {
   storage: multer.memoryStorage(),
+  // Browsers send file names as UTF-8; the default would read "café.png" as "cafÃ©.png"
+  defParamCharset: 'utf8',
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB max file size
   },
@@ -35,10 +39,37 @@ const upload = multer({
       cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP)'));
     }
   },
-});
+};
+const upload = multer(uploadOptions);
 
 @Controller('uploads')
 export class Uploads {
+  /**
+   * GET /uploads/images
+   * The project's uploaded images, latest first, for the image dialog's gallery. Only for
+   * dashboard sessions: listing is a billed storage request, and no API key needs it.
+   */
+  @Get('images')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async listImages(_req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    if (auth.type !== 'jwt') {
+      throw new HttpException(403, 'Images can only be listed from the dashboard', ErrorCode.FORBIDDEN);
+    }
+    if (!S3Service.isS3Enabled()) {
+      throw new HttpException(503, 'Image storage is not configured');
+    }
+
+    try {
+      return res.status(200).json(await S3Service.listImages(auth.projectId!));
+    } catch (error) {
+      // The storage error names the endpoint, which carries the account id: it stays in the log
+      signale.error('[UPLOADS] Failed to list images:', error);
+      throw new HttpException(502, "Couldn't list your images in storage", ErrorCode.EXTERNAL_SERVICE_ERROR);
+    }
+  }
+
   /**
    * POST /uploads/image
    * Upload an image file to S3/Minio

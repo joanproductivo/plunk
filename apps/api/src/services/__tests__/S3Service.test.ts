@@ -6,6 +6,8 @@ interface SentCommand {
 }
 
 const sent = vi.hoisted(() => [] as SentCommand[]);
+// Replies to list requests, one per page, in order
+const listReplies = vi.hoisted(() => [] as unknown[]);
 
 vi.mock('@aws-sdk/client-s3', () => {
   const command = (name: string) =>
@@ -18,11 +20,12 @@ vi.mock('@aws-sdk/client-s3', () => {
     S3Client: class {
       async send(sentCommand: SentCommand) {
         sent.push(sentCommand);
-        return {};
+        return sentCommand.name === 'ListObjectsV2' ? (listReplies.shift() ?? {}) : {};
       }
     },
     CreateBucketCommand: command('CreateBucket'),
     HeadBucketCommand: command('HeadBucket'),
+    ListObjectsV2Command: command('ListObjectsV2'),
     PutBucketPolicyCommand: command('PutBucketPolicy'),
     PutObjectCommand: command('PutObject'),
   };
@@ -64,6 +67,7 @@ function publicReadResources() {
 describe('S3Service', () => {
   afterEach(() => {
     sent.length = 0;
+    listReplies.length = 0;
     vi.unstubAllEnvs();
   });
 
@@ -73,7 +77,7 @@ describe('S3Service', () => {
 
       const {key, url} = await uploadImage(S3Service);
 
-      expect(key).toMatch(/^project-1\/\d+-[0-9a-f]{16}\.png$/);
+      expect(key).toMatch(/^project-1\/\d+-[0-9a-f]{16}-logo\.png$/);
       expect(url).toBe(`https://cdn.example.com/${key}`);
       expect(sentInput('PutObject')).toMatchObject({
         Bucket: 'shared-bucket',
@@ -86,7 +90,7 @@ describe('S3Service', () => {
 
       const {key, url} = await uploadImage(S3Service);
 
-      expect(key).toMatch(/^plunk\/project-1\/\d+-[0-9a-f]{16}\.png$/);
+      expect(key).toMatch(/^plunk\/project-1\/\d+-[0-9a-f]{16}-logo\.png$/);
       expect(url).toBe(`https://cdn.example.com/${key}`);
       expect(sentInput('PutObject')).toMatchObject({
         Bucket: 'shared-bucket',
@@ -106,12 +110,91 @@ describe('S3Service', () => {
       await expect(upload('page.html', 'text/html')).rejects.toThrow('Unsupported image type');
     });
 
+    it('keeps the original name in the key as a slug, read back by imageNameFromKey', async () => {
+      const S3Service = await loadS3Service('');
+      const keyFor = async (filename: string) =>
+        (await S3Service.uploadFile({file: Buffer.from('image'), filename, contentType: 'image/png', projectId: 'p'}))
+          .key;
+
+      expect(await keyFor('Café niño.png')).toMatch(/^p\/\d+-[0-9a-f]{16}-cafe-nino\.png$/);
+      expect(await keyFor('€€€.png')).toMatch(/^p\/\d+-[0-9a-f]{16}\.png$/);
+      expect(await keyFor('no-extension')).toMatch(/-no-extension\.png$/);
+
+      expect(S3Service.imageNameFromKey(await keyFor('Café niño.png'))).toBe('cafe-nino');
+      expect(S3Service.imageNameFromKey(await keyFor('€€€.png'))).toBeNull();
+      // Keys from before names were kept, whatever their extension
+      expect(S3Service.imageNameFromKey('p/1761400000000-0123456789abcdef.JPG')).toBeNull();
+      expect(S3Service.imageNameFromKey('p/1761400000000-0123456789abcdef.foto final')).toBeNull();
+    });
+
     it('ignores leading and trailing slashes in S3_PREFIX', async () => {
       const S3Service = await loadS3Service('/tenants/plunk/');
 
       const {key} = await uploadImage(S3Service);
 
-      expect(key).toMatch(/^tenants\/plunk\/project-1\/\d+-[0-9a-f]{16}\.png$/);
+      expect(key).toMatch(/^tenants\/plunk\/project-1\/\d+-[0-9a-f]{16}-logo\.png$/);
+    });
+  });
+
+  describe('listImages', () => {
+    const object = (time: number, name = '', extension = 'png') => ({
+      Key: `project-1/${time}-0123456789abcdef${name && `-${name}`}.${extension}`,
+      LastModified: new Date(time),
+      Size: 100,
+    });
+    const listRequests = () => sent.filter(command => command.name === 'ListObjectsV2');
+
+    it("lists only the project's folder, latest first, with public URLs and names", async () => {
+      const S3Service = await loadS3Service('plunk');
+      listReplies.push({Contents: [object(1000, 'old'), object(3000, 'new'), object(2000)], IsTruncated: false});
+
+      const {images, truncated} = await S3Service.listImages('project-1');
+
+      expect(sentInput('ListObjectsV2')).toMatchObject({Bucket: 'shared-bucket', Prefix: 'plunk/project-1/'});
+      expect(images.map(image => image.name)).toEqual(['new', null, 'old']);
+      expect(images[0]).toEqual({
+        url: 'https://cdn.example.com/project-1/3000-0123456789abcdef-new.png',
+        name: 'new',
+        uploadedAt: new Date(3000).toISOString(),
+        size: 100,
+      });
+      expect(truncated).toBe(false);
+    });
+
+    it('reads every page, keeping the latest 1000', async () => {
+      const S3Service = await loadS3Service('');
+      const page = (from: number) => Array.from({length: 1000}, (_, index) => object(1_000_000 + from + index));
+      listReplies.push(
+        {Contents: page(0), IsTruncated: true, NextContinuationToken: 'two'},
+        {Contents: page(1000), IsTruncated: true, NextContinuationToken: 'three'},
+        {Contents: page(2000).slice(0, 10), IsTruncated: false},
+      );
+
+      const {images, truncated} = await S3Service.listImages('project-1');
+
+      expect(listRequests().map(command => command.input.ContinuationToken)).toEqual([undefined, 'two', 'three']);
+      expect(images).toHaveLength(1000);
+      expect(images[0]!.url).toContain(`/${1_000_000 + 2009}-`);
+      expect(truncated).toBe(true);
+    });
+
+    it('stops when a page claims more but gives no token, and skips folder markers', async () => {
+      const S3Service = await loadS3Service('');
+      listReplies.push({Contents: [object(1000), {Key: 'project-1/', Size: 0}], IsTruncated: true});
+
+      const {images} = await S3Service.listImages('project-1');
+
+      expect(listRequests()).toHaveLength(1);
+      expect(images).toHaveLength(1);
+    });
+
+    it('encodes older keys that took odd extensions from the file name', async () => {
+      const S3Service = await loadS3Service('');
+      listReplies.push({Contents: [object(1000, '', 'foto final')]});
+
+      const {images} = await S3Service.listImages('project-1');
+
+      expect(images[0]!.url).toBe('https://cdn.example.com/project-1/1000-0123456789abcdef.foto%20final');
     });
   });
 
