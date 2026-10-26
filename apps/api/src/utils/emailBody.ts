@@ -1,7 +1,6 @@
 import {
   BRAND_DEFAULTS,
   BUTTON_PADDING,
-  columnTextWidth,
   detectCustomHtmlPatterns,
   emailDocument,
   emailFontFamily,
@@ -14,7 +13,10 @@ import {
   readButtonStyle,
   readPixels,
   readSpacerHeight,
+  readVideoSize,
   splitEmailMarkers,
+  videoMaxWidth,
+  withDeclaration,
 } from '@plunk/shared';
 import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
@@ -105,17 +107,23 @@ function addOutlookButtonPadding($: CheerioAPI, emailFont: string): void {
 const VIDEO_MAX_RATIO = 4;
 
 /**
- * Editor videos as Outlook for Windows can render them. Its Word engine sizes images by their
+ * Editor videos at their size (see @plunk/shared emailVideoSize), in the email's own width: the
+ * cap of their size written out for it, which the editor wrote for an email without a brand width,
+ * and centred, as videos saved before sizes were not. Outlook for Windows sizes images by their
  * width and height attributes, ignoring CSS, so the poster's own size (1280 px) would burst the
- * column: the width becomes the column's (the brand's width less the column's padding, or the
- * usual 600 px), whatever the brand was when the video was inserted, and the height follows the
- * poster's shape. A video whose link is not one a video may have loses it.
+ * column: the width becomes the cap, whatever the brand was when the video was inserted, and the
+ * height follows the poster's shape. A video whose link is not one a video may have loses it.
  */
 function sizeVideos($: CheerioAPI, brand: EmailBrand): void {
-  const width = columnTextWidth(brand);
   $('a.email-video').each((_, element) => {
     const link = $(element);
     const image = link.children('img').first();
+    // Read from the poster's width in %: the prose styles have just inlined a max-width on it
+    const width = videoMaxWidth(readVideoSize(image.attr('style')), brand);
+    image.attr(
+      'style',
+      withDeclaration(withDeclaration(image.attr('style'), 'max-width', `${width}px`), 'margin', '0px auto'),
+    );
     const [posterWidth, posterHeight] = [readPixels(image.attr('width')), readPixels(image.attr('height'))];
     const ratio = posterWidth / posterHeight;
     image.attr('width', String(width));

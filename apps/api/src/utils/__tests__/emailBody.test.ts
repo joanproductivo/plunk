@@ -284,15 +284,55 @@ describe('renderBody', () => {
       `<p style="text-align: center;"><a class="email-video" href="${href}" style="text-decoration: none;">${inner}</a></p>`;
     const imageTag = (html: string) => html.match(/<img\b[^>]*>/)?.[0] ?? '';
 
-    it('sends the poster 600 px wide in Outlook, keeping its own style over the prose one', () => {
+    it('sends a video saved before sizes as large: 600 px wide in Outlook, capped and centred elsewhere', () => {
       const html = renderBody(`<p>Hi</p>${video()}`);
       const img = imageTag(html);
 
       expect(html).toContain('<a class="email-video" href="https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s"');
       expect(img).toContain('width="600" height="338"');
-      expect(img).toMatch(/margin-top: [^;]+;.*margin: 0px; border: 0px; border-radius: 12px;/);
       expect(img).toContain('width: 100%;');
+      expect(img).toMatch(/border-radius: 12px; max-width: 600px; margin: 0px auto"/);
+      expect(img).not.toContain('max-width: 100%');
       expect(html).toMatch(/<a class="email-video" [^>]*style="[^"]*text-decoration: none;"/);
+    });
+
+    it.each([
+      ['small', 50, 300, 169],
+      ['medium', 75, 450, 253],
+    ])('sends a %s video at its share of the text, capped for the email', (_, percent, width, height) => {
+      const sized = image().replace('width: 100%;', `width: ${percent}%; max-width: 123px;`);
+      const img = imageTag(renderBody(video(sized)));
+
+      expect(img).toContain(`width="${width}" height="${height}"`);
+      expect(img).toContain(`width: ${percent}%;`);
+      expect(img).toMatch(new RegExp(`max-width: ${width}px; margin: 0px auto"`));
+      expect(img).not.toContain('max-width: 123px');
+    });
+
+    it("caps each size at its share of a framed brand's column", () => {
+      const sized = (percent: number) => video(image().replace('width: 100%;', `width: ${percent}%;`));
+      const capOf = (html: string) => imageTag(html).match(/width="(\d+)"/)![1];
+      const framed = (body: string, contentWidth: number) =>
+        renderBody(
+          joinEmailMarkers({preheader: '', brand: toEmailBrand({backgroundColor: '#f3f4f6', contentWidth}), body}),
+        );
+
+      expect([capOf(framed(sized(50), 600)), capOf(framed(sized(75), 600)), capOf(framed(sized(100), 600))]).toEqual([
+        '276',
+        '414',
+        '552',
+      ]);
+      expect(capOf(framed(sized(50), 800))).toBe('376');
+    });
+
+    it('fits a large video into a box, and leaves a small one as it is', () => {
+      const boxed = (inner: string) =>
+        `<div class="email-box" style="background-color: #fef3c7; color: #374151;">${inner}</div>`;
+
+      expect(imageTag(renderBody(boxed(video())))).toContain('width="568"');
+      expect(imageTag(renderBody(boxed(video(image().replace('width: 100%;', 'width: 50%;')))))).toContain(
+        'width="300"',
+      );
     });
 
     it("sends it as wide as a framed brand's column, keeping the poster's shape", () => {
