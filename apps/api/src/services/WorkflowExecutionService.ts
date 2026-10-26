@@ -26,9 +26,9 @@ import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 
-// A failing step is rethrown through the catch of every step before it in the same run, so this
-// set keeps the errors already recorded for the project's alerts, to count each once.
-const recordedFailures = new WeakSet<object>();
+// A step's error is rethrown through the catch of every step before it in the same run, which
+// had completed; the step it came from has handled it, so those pass it up untouched.
+const handledFailures = new WeakSet<object>();
 
 type StepConfig = Prisma.JsonValue;
 type StepResult = Record<string, unknown>;
@@ -217,6 +217,9 @@ export class WorkflowExecutionService {
       signale.info(`[WORKFLOW] Updated existing step execution ${stepExecution.id} to RUNNING`);
     }
 
+    // True once the step itself has completed: an error after that comes from moving on from it
+    let stepCompleted = false;
+
     try {
       // Execute the step based on its type
       signale.info(`[WORKFLOW] Executing step ${stepId} of type ${step.type}`);
@@ -257,19 +260,31 @@ export class WorkflowExecutionService {
           output: result ? toPrismaJson(result) : undefined,
         },
       });
+      stepCompleted = true;
 
       // Determine next step(s) based on transitions and conditions
       await this.processNextSteps(execution, step, result);
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // Pass up untouched an error a later step of this run already handled. An error of this step
+      // itself is always handled, even one another execution it resumed through an event already
+      // handled: this step failed too.
+      const isObject = typeof error === 'object' && error !== null;
+      if (stepCompleted && isObject && handledFailures.has(error)) {
+        throw error;
+      }
+      if (isObject) {
+        handledFailures.add(error);
+      }
+
       signale.error(`[WORKFLOW] Error executing step ${step.id}:`, error);
-      // Mark step as failed
+      // Mark step as failed, unless it completed: then moving on from it is what failed, and the
+      // step keeps its result with the error
       await prisma.workflowStepExecution.update({
         where: {id: stepExecution.id},
-        data: {
-          status: StepExecutionStatus.FAILED,
-          completedAt: new Date(),
-          error: error instanceof Error ? error.message : 'Unknown error',
-        },
+        data: stepCompleted
+          ? {error: message}
+          : {status: StepExecutionStatus.FAILED, completedAt: new Date(), error: message},
       });
 
       // Mark workflow execution as failed
@@ -294,16 +309,12 @@ export class WorkflowExecutionService {
         },
       });
 
-      const isObject = typeof error === 'object' && error !== null;
-      if (!isObject || !recordedFailures.has(error)) {
-        if (isObject) recordedFailures.add(error);
-        await FailureAlertService.record(failedExecution.workflow.project.id, {
-          sourceKey: `workflow:${failedExecution.workflowId}`,
-          label: failedExecution.workflow.name,
-          error: error instanceof Error ? error.message : 'Unknown error',
-          contactEmail: failedExecution.contact.email,
-        });
-      }
+      await FailureAlertService.record(failedExecution.workflow.project.id, {
+        sourceKey: `workflow:${failedExecution.workflowId}`,
+        label: failedExecution.workflow.name,
+        error: message,
+        contactEmail: failedExecution.contact.email,
+      });
 
       // Send notification about workflow execution failure
       await NtfyService.notifyWorkflowExecutionFailed(
@@ -311,7 +322,7 @@ export class WorkflowExecutionService {
         failedExecution.workflow.project.name,
         failedExecution.workflow.project.id,
         failedExecution.contact.email,
-        error instanceof Error ? error.message : 'Unknown error',
+        message,
       );
 
       throw error;

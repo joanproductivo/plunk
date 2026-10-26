@@ -110,4 +110,48 @@ describe('WorkflowExecutionService - failure alerts', () => {
     await FailureAlertService.recordWorkflowJob(finished.id, 'stepExecutionId is required');
     expect(await prisma.plunkLiteFailure.findFirst({where: {sourceKey: `workflow:${done.id}`}})).toBeNull();
   });
+
+  it('records both workflows when a step fails in another execution it resumed through an event', async () => {
+    const subscribed = await factories.createContact({projectId, email: 'leo@example.net', subscribed: true});
+
+    /** A workflow with `steps` after its trigger, started for the subscribed contact */
+    async function start(name: string, steps: Array<{type: WorkflowStepType; config: Record<string, unknown>}>) {
+      const workflow = await factories.createWorkflow({projectId, name});
+      const trigger = await prisma.workflowStep.findFirstOrThrow({
+        where: {workflowId: workflow.id, type: WorkflowStepType.TRIGGER},
+      });
+      let from = trigger.id;
+      for (const step of steps) {
+        const created = await factories.createWorkflowStep({workflowId: workflow.id, ...step});
+        await prisma.workflowTransition.create({data: {fromStepId: from, toStepId: created.id}});
+        from = created.id;
+      }
+      const execution = await prisma.workflowExecution.create({
+        data: {
+          workflowId: workflow.id,
+          contactId: subscribed.id,
+          status: WorkflowExecutionStatus.RUNNING,
+          currentStepId: trigger.id,
+        },
+      });
+      return {
+        workflowId: workflow.id,
+        run: () => WorkflowExecutionService.processStepExecution(execution.id, trigger.id),
+      };
+    }
+
+    const waiting = await start('Goodbye', [
+      {type: WorkflowStepType.WAIT_FOR_EVENT, config: {eventName: 'contact.unsubscribed', timeout: 3600}},
+      {type: WorkflowStepType.WEBHOOK, config: {url: 'http://127.0.0.1/hook', method: 'POST'}},
+    ]);
+    await waiting.run();
+    const unsubscribing = await start('Unsubscribe', [
+      {type: WorkflowStepType.UPDATE_CONTACT, config: {subscriptionAction: 'unsubscribe'}},
+    ]);
+
+    await expect(unsubscribing.run()).rejects.toThrow(/private/i);
+
+    const sources = (await prisma.plunkLiteFailure.findMany({where: {projectId}})).map(failure => failure.sourceKey);
+    expect(sources.sort()).toEqual([`workflow:${waiting.workflowId}`, `workflow:${unsubscribing.workflowId}`].sort());
+  });
 });
