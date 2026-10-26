@@ -6,7 +6,13 @@ import signale from 'signale';
 import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
-import {plunkFooterParagraph, renderTemplate, unsubscribeFooterHtml} from '@plunk/shared';
+import {
+  footerParagraph,
+  type ProjectFooters,
+  renderTemplate,
+  resolveFooterLanguage,
+  unsubscribeFooterHtml,
+} from '@plunk/shared';
 
 import {renderBody} from '../utils/emailBody.js';
 
@@ -329,11 +335,14 @@ export class EmailService {
     project,
     includeUnsubscribe = true,
     sourceEmailId,
+    footers,
   }: {
     content: string;
     contact: Contact;
     project: Project;
     includeUnsubscribe?: boolean;
+    /** The project's own footers by language (ProjectFooterService); Plunk's for the rest. */
+    footers?: ProjectFooters;
     /**
      * Id of the email this footer is being rendered into, so an opt-out from the
      * footer link can be attributed to it. See {@link withSourceEmail}.
@@ -342,22 +351,19 @@ export class EmailService {
   }): string {
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
-          // Get contact-level locale (overrides project language)
-          const contactLocale =
-            contact.data &&
-            typeof contact.data === 'object' &&
-            !Array.isArray(contact.data) &&
-            'locale' in contact.data &&
-            typeof contact.data.locale === 'string'
-              ? contact.data.locale
-              : null;
+          // The contact's language (their locale, else the project's), with its own footer or Plunk's
+          const locale =
+            contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
+              ? (contact.data as Record<string, unknown>).locale
+              : undefined;
 
           return unsubscribeFooterHtml(
-            plunkFooterParagraph(
-              contactLocale || project.language || 'en',
-              project.name,
-              withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
-            ),
+            footerParagraph({
+              language: resolveFooterLanguage(locale, project.language),
+              projectName: project.name,
+              href: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
+              footers,
+            }),
           );
         })()
       : '';

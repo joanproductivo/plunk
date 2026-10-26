@@ -33,6 +33,7 @@ import {
 import {EmailService} from '../services/EmailService.js';
 import {EventService} from '../services/EventService.js';
 import {MeterService} from '../services/MeterService.js';
+import {ProjectFooterService} from '../services/ProjectFooterService.js';
 import {emailQueue} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {getSendingQuota, sendRawEmail} from '../services/SESService.js';
@@ -195,13 +196,14 @@ export async function createEmailWorker() {
         });
 
         // Compile HTML with unsubscribe footer and badge.
-        // Only marketing emails get the Plunk unsubscribe footer.
+        // Only marketing emails get the unsubscribe footer: the project's own, or Plunk's.
         const compiledHtml = EmailService.compile({
           content: formattedEmail.body,
           contact: email.contact,
           project: email.project,
           includeUnsubscribe: emailClass === 'marketing',
           sourceEmailId: emailId,
+          footers: await ProjectFooterService.forEmail(emailClass, email.projectId),
         });
 
         // Use fromName from database if available, otherwise fall back to project name

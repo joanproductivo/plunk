@@ -895,3 +895,13 @@ model PlunkLiteProjectBrand {
 
   @@map("plunk_lite_project_brands")
 }
+
+/// Plunk Lite: a project's own unsubscribe footers, by language (see ProjectFooterService). A table
+/// of its own with no relation to Project, so that Plunk's own tables stay as upstream has them.
+model PlunkLiteProjectFooters {
+  projectId String   @id
+  footers   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("plunk_lite_project_footers")
+}

@@ -4,6 +4,7 @@ import {SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
 import type {ProjectBrand} from '../template/brand.js';
+import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
 const literalSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.date()]);
 type Literal = z.infer<typeof literalSchema>;
@@ -625,5 +626,16 @@ export const BrandSchemas = {
   update: z.custom<Partial<ProjectBrand>>(
     value => typeof value === 'object' && value !== null && !Array.isArray(value),
     'The brand must be an object',
+  ),
+} as const;
+
+/**
+ * A project's own unsubscribe footers as sent to the API: any object, which the API then checks
+ * with toProjectFooters, answering 400 with the reasons for anything it cannot keep.
+ */
+export const FooterSchemas = {
+  update: z.custom<ProjectFooters>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The footers must be an object',
   ),
 } as const;
