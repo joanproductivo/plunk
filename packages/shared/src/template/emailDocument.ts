@@ -1,5 +1,6 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
 import {EDITOR_BLOCK_CLASSES} from './emailBlocks.js';
+import {isSafeVideoHref} from './emailVideo.js';
 
 /**
  * The document visual editor emails go out in, shared by the dashboard's previews and the API,
@@ -23,12 +24,42 @@ function hasRichButton(html: string): boolean {
   return false;
 }
 
+// Whether an `a.email-video` is not one the editor writes: a video link holding a single image
+// with a source and nothing else. The visual editor would drop the rest, so it stays custom HTML.
+// A linear scan, as hasRichButton.
+function hasForeignVideo(html: string): boolean {
+  const links = html.split(/<a\b/i);
+  for (let i = 1; i < links.length; i++) {
+    const link = links[i]!;
+    const tagEnd = link.indexOf('>');
+    if (tagEnd < 0) return false;
+    const tag = link.slice(0, tagEnd);
+    if (!/\bclass\s*=\s*["'][^"']*\bemail-video\b/i.test(tag)) continue;
+
+    const hrefAt = /\shref\s*=\s*"/i.exec(tag);
+    const hrefStart = hrefAt ? hrefAt.index + hrefAt[0].length : -1;
+    const hrefEnd = hrefAt ? tag.indexOf('"', hrefStart) : -1;
+    if (hrefEnd < 0 || !isSafeVideoHref(tag.slice(hrefStart, hrefEnd).replace(/&amp;/g, '&'))) return true;
+
+    const content = link.slice(tagEnd + 1);
+    const end = content.search(/<\/a>/i);
+    const inner = (end < 0 ? content : content.slice(0, end)).trim();
+    const isLoneImage =
+      /^<img\b/i.test(inner) &&
+      inner.indexOf('>') === inner.length - 1 &&
+      inner.indexOf('<', 1) < 0 &&
+      /\ssrc\s*=/i.test(inner);
+    if (!isLoneImage) return true;
+  }
+  return false;
+}
+
 /**
  * Detects if HTML contains custom patterns that indicate it was written in the HTML editor
  * rather than the visual editor.
  *
  * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
- * ResizableImage + EmailButton + EmailDivider (styled <hr>) + EmailSpacer + VariableMention.
+ * ResizableImage + EmailButton + EmailDivider (styled <hr>) + EmailSpacer + EmailVideo + VariableMention.
  * TextStyle/Color/Link round-trip <span style="..."> and <a style="..."> markup. This detection
  * therefore PERMITS span + inline styles and only REJECTS markup TipTap cannot represent (tables,
  * divs, forms, embeds, custom attrs, <style> blocks, etc).
@@ -82,7 +113,8 @@ export function detectCustomHtmlPatterns(html: string): boolean {
     hasCustomElements ||
     hasMediaQueries ||
     hasStyleTags ||
-    hasRichButton(html)
+    hasRichButton(html) ||
+    hasForeignVideo(html)
   );
 }
 
