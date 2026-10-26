@@ -13,6 +13,8 @@ import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
 import {type ButtonAttrs, EmailButton} from './EmailButton';
 import {ButtonDialog} from './ButtonDialog';
+import {type DividerAttrs, EmailDivider} from './EmailDivider';
+import {DividerDialog} from './DividerDialog';
 import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
@@ -148,6 +150,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       }),
       ResizableImage,
       EmailButton,
+      EmailDivider,
       Variable,
       VariableMention,
       LogicMention,
@@ -173,6 +176,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   });
 
   const button = useBlockDialog<ButtonAttrs>(editor, 'button');
+  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', chain => chain.setHorizontalRule());
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -467,6 +471,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onInsertVariable={() => setShowVariableDialog(true)}
             onInsertImage={() => setShowImageDialog(true)}
             onButton={button.onToolbar}
+            onDivider={divider.onToolbar}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
@@ -790,6 +795,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       />
 
       <ButtonDialog {...button.dialogProps} />
+      <DividerDialog {...divider.dialogProps} />
 
       {/* Image insertion dialog */}
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
@@ -949,9 +955,22 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         }
 
         .resizable-image-container.selected,
-        .ProseMirror .ProseMirror-selectednode > [data-node-view-wrapper] {
+        .ProseMirror .ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
+        }
+
+        /* A divider is as thin as its line; a taller invisible band takes the clicks */
+        .ProseMirror hr {
+          position: relative;
+          overflow: visible;
+          cursor: pointer;
+        }
+        .ProseMirror hr::after {
+          content: '';
+          position: absolute;
+          inset: -8px 0;
         }
 
         .resizable-image-container img {
