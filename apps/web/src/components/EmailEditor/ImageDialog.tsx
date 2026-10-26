@@ -1,10 +1,9 @@
 import {Button, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {Images, Upload, X} from 'lucide-react';
 import {useRef, useState} from 'react';
-import {useSWRConfig} from 'swr';
 
-import {network} from '../../lib/network';
-import {ImageGallery, UPLOADED_IMAGES_KEY} from './ImageGallery';
+import {ImageGallery} from './ImageGallery';
+import {useImageUpload} from './useImageUpload';
 
 interface ImageDialogProps {
   open: boolean;
@@ -56,7 +55,7 @@ function ImageForm({
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [showGallery, setShowGallery] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const {mutate} = useSWRConfig();
+  const upload = useImageUpload();
 
   const handleImageUpload = async () => {
     if (!imageFile && !imageUrl) return;
@@ -66,15 +65,7 @@ function ImageForm({
       onInsert(imageUrl);
     } else if (imageFile) {
       try {
-        // Upload to S3/Minio
-        const formData = new FormData();
-        formData.append('image', imageFile);
-
-        const response = await network.upload<{url: string; key: string}>('POST', '/uploads/image', formData);
-
-        // The gallery lists it next time it is opened, rather than relisting now
-        void mutate(UPLOADED_IMAGES_KEY, undefined, {revalidate: false});
-        onInsert(response.url);
+        onInsert(await upload(imageFile));
       } catch (error) {
         console.error('Failed to upload image:', error);
         alert('Couldn’t upload the image. Try again.');

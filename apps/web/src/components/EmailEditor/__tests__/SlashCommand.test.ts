@@ -92,6 +92,7 @@ describe('slashItems', () => {
       'Quote',
       'Button',
       'Image',
+      'YouTube video',
       'Divider',
       'Spacer',
       'Variable',
@@ -109,6 +110,7 @@ describe('slashItems', () => {
     // Longer ones also match inside, after those that start with them
     expect(labels('ote')).toEqual(['Quote']);
     expect(labels('zzz')).toEqual([]);
+    expect(labels('vid')).toEqual(['YouTube video', 'Divider']);
   });
 
   it('only offers rows that apply where it is opened', () => {
@@ -139,6 +141,8 @@ describe('slashItems', () => {
     images = false;
     createEditor('<p></p>');
     expect(labels()).not.toContain('Image');
+    // Its poster is uploaded, so it needs storage too
+    expect(labels()).not.toContain('YouTube video');
   });
 });
 

@@ -105,6 +105,12 @@ const SLASH_ITEMS: SlashItem[] = [
     run: opensDialog('image'),
   },
   {
+    label: 'YouTube video',
+    aliases: ['video', 'youtube'],
+    offered: (editor, options) => takesBlocks(editor) && options.canInsertImages(),
+    run: opensDialog('video'),
+  },
+  {
     label: 'Divider',
     syntax: '---',
     aliases: ['line', 'separator', 'rule', 'hr'],
