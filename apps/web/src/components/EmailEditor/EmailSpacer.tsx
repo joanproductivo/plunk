@@ -17,7 +17,7 @@ function SpacerView({node, editor, getPos}: ReactNodeViewProps) {
       <div
         title="Double-click to edit"
         onDoubleClick={() => emitEditBlock(editor, getPos)}
-        className="flex items-center justify-center rounded border border-dashed border-neutral-300 text-[11px] text-neutral-400"
+        className="flex select-none items-center justify-center rounded border border-dashed border-neutral-300 text-[11px] text-neutral-400"
         style={{height, cursor: 'pointer'}}
       >
         Spacer · {height}px
