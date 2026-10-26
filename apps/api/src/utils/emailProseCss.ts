@@ -1,6 +1,4 @@
-/** The email's own font, which buttons without a font of their own also get when sent. */
-export const EMAIL_FONT_FAMILY =
-  "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+import {EMAIL_FONT_FAMILY} from '@plunk/shared';
 
 /**
  * Typography for visual editor emails. Mirrors the stylesheet in apps/web/src/lib/emailStyles.ts,

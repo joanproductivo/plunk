@@ -1,6 +1,7 @@
 import {
   BUTTON_PADDING,
   EDITOR_BLOCK_CLASSES,
+  EMAIL_FONT_FAMILY,
   isSafeButtonHref,
   readButtonStyle,
   readSpacerHeight,
@@ -10,7 +11,7 @@ import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
 
-import {EMAIL_FONT_FAMILY, EMAIL_PROSE_CSS} from './emailProseCss.js';
+import {EMAIL_PROSE_CSS} from './emailProseCss.js';
 
 // juice's main entry pulls in full cheerio (parse5, undici) and web-resource-inliner, ~28 MB of
 // resident memory per process. Its inliner core on cheerio's htmlparser2 build costs ~2 MB.

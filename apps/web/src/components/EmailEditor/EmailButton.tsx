@@ -1,10 +1,10 @@
 import {
   BUTTON_DEFAULTS,
-  BUTTON_FONTS,
   BUTTON_PADDING,
   BUTTON_RADIUS,
   buttonStyle,
   type ButtonStyle,
+  EMAIL_FONTS,
   isSafeButtonHref,
   readButtonStyle,
 } from '@plunk/shared';
@@ -54,7 +54,7 @@ export function ButtonFace({
         fontWeight: 600,
         lineHeight: 1.2,
         borderRadius: BUTTON_RADIUS[button.shape],
-        fontFamily: button.font ? BUTTON_FONTS[button.font] : undefined,
+        fontFamily: button.font ? EMAIL_FONTS[button.font] : undefined,
         ...style,
       }}
     >

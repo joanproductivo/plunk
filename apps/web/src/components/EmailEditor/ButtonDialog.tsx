@@ -1,10 +1,10 @@
 import {
   BUTTON_DEFAULTS,
-  BUTTON_FONTS,
-  type ButtonFont,
   type ButtonShape,
   type ButtonSize,
   type ButtonStyle,
+  EMAIL_FONTS,
+  type EmailFont,
   isSafeButtonHref,
   normalizeHexColor,
   toButtonStyle,
@@ -44,7 +44,7 @@ const SHAPES: Record<ButtonShape, string> = {rectangle: 'Rectangle', rounded: 'R
 const SIZES: Record<ButtonSize, string> = {small: 'Small', medium: 'Medium', large: 'Large'};
 // The email's own font is stored as no font of the button's own.
 const EMAIL_FONT = 'email';
-const FONTS: Record<ButtonFont | typeof EMAIL_FONT, string> = {
+const FONTS: Record<EmailFont | typeof EMAIL_FONT, string> = {
   [EMAIL_FONT]: "Email's font",
   'modern-sans': 'Modern sans',
   'geometric-sans': 'Geometric sans',
@@ -137,7 +137,7 @@ function ButtonForm({
           value={attrs.font ?? EMAIL_FONT}
           options={FONTS}
           onChange={value => set('font', value === EMAIL_FONT ? null : value)}
-          optionStyle={value => ({fontFamily: value === EMAIL_FONT ? undefined : BUTTON_FONTS[value]})}
+          optionStyle={value => ({fontFamily: value === EMAIL_FONT ? undefined : EMAIL_FONTS[value]})}
         />
       </div>
       <div className="flex items-center gap-2">

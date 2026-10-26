@@ -6,6 +6,7 @@ import {preprocessTemplate} from './preprocess.js';
 
 export * from './emailBlocks.js';
 export * from './emailButton.js';
+export * from './emailFonts.js';
 export {escapeHtml} from './html.js';
 export {preheaderToText, splitPreheader, textToPreheader, withPreheader} from './preheader.js';
 
