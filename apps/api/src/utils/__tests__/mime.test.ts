@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 
-import {encodeQuotedPrintable, htmlToPlainText} from '../mime.js';
+import {encodeHeaderValue, encodeQuotedPrintable, formatMailbox, htmlToPlainText} from '../mime.js';
 
 /**
  * Decode quoted-printable back to a string, so the encoder can be checked on the
@@ -160,5 +160,90 @@ describe('encodeQuotedPrintable', () => {
 
   it('handles empty input', () => {
     expect(encodeQuotedPrintable('')).toBe('');
+  });
+});
+
+/**
+ * Decode RFC 2047 "Q" encoded-words back to a string, the way a mail client does:
+ * unfold, drop the whitespace between adjacent words, then decode each one.
+ */
+function decodeEncodedWords(input: string): string {
+  return input
+    .replace(/\n /g, ' ')
+    .replace(/\?=\s+=\?/g, '?==?')
+    .replace(/=\?UTF-8\?Q\?([^?]*)\?=/g, (_, payload: string) => decodeQuotedPrintable(payload.replace(/_/g, '=20')));
+}
+
+describe('encodeHeaderValue', () => {
+  it('leaves plain ASCII untouched', () => {
+    expect(encodeHeaderValue('Your order has shipped!')).toBe('Your order has shipped!');
+  });
+
+  it('encodes non-ASCII so the header is pure ASCII on the wire', () => {
+    const encoded = encodeHeaderValue('¡Novedades de otoño! 🍂');
+
+    expect(encoded).toMatch(/^[\x20-\x7E\n]*$/);
+    expect(encoded.startsWith('=?UTF-8?Q?')).toBe(true);
+    expect(decodeEncodedWords(encoded)).toBe('¡Novedades de otoño! 🍂');
+  });
+
+  it('keeps every encoded-word within 75 characters and every line short', () => {
+    const subject = 'Ñandú '.repeat(40) + '👨‍👩‍👧 fin';
+    const encoded = encodeHeaderValue(subject);
+
+    for (const line of encoded.split('\n')) {
+      expect(line.trim().length).toBeLessThanOrEqual(75);
+    }
+    expect(decodeEncodedWords(encoded)).toBe(subject);
+  });
+
+  it('never splits the bytes of one character across two encoded-words', () => {
+    const encoded = encodeHeaderValue('é'.repeat(30));
+
+    for (const word of encoded.split('\n ')) {
+      // Each word must decode on its own, without U+FFFD replacement characters.
+      expect(decodeEncodedWords(word)).toMatch(/^é+$/);
+    }
+  });
+
+  it('turns line breaks into spaces so the value cannot start a new header', () => {
+    expect(encodeHeaderValue('Hello\r\nBcc: victim@example.com')).toBe('Hello Bcc: victim@example.com');
+    expect(decodeEncodedWords(encodeHeaderValue('Olá\nmundo'))).toBe('Olá mundo');
+  });
+
+  it('encodes ASCII that a client could misread as an encoded-word', () => {
+    const encoded = encodeHeaderValue('Literal =?UTF-8?Q?x?= text');
+
+    expect(encoded.startsWith('=?UTF-8?Q?')).toBe(true);
+    expect(encoded).not.toContain('?Q?x?=');
+    expect(decodeEncodedWords(encoded)).toBe('Literal =?UTF-8?Q?x?= text');
+  });
+});
+
+describe('formatMailbox', () => {
+  it('returns the bare address when there is no name', () => {
+    expect(formatMailbox('', 'a@example.com')).toBe('a@example.com');
+    expect(formatMailbox(undefined, 'a@example.com')).toBe('a@example.com');
+    expect(formatMailbox('   ', 'a@example.com')).toBe('a@example.com');
+  });
+
+  it('leaves a simple name unquoted', () => {
+    expect(formatMailbox('Acme Support', 'a@example.com')).toBe('Acme Support <a@example.com>');
+  });
+
+  it('quotes a name with specials, so a comma is not read as a second address', () => {
+    expect(formatMailbox('Joan, from Acme', 'a@example.com')).toBe('"Joan, from Acme" <a@example.com>');
+    expect(formatMailbox('Acme Inc.', 'a@example.com')).toBe('"Acme Inc." <a@example.com>');
+  });
+
+  it('escapes quotes and backslashes inside a quoted name', () => {
+    expect(formatMailbox('The "Best" \\ Shop', 'a@example.com')).toBe('"The \\"Best\\" \\\\ Shop" <a@example.com>');
+  });
+
+  it('encodes a non-ASCII name, specials included', () => {
+    const formatted = formatMailbox('Café, Sabaï', 'a@example.com');
+
+    expect(formatted).toMatch(/^=\?UTF-8\?Q\?[^,]*\?= <a@example\.com>$/);
+    expect(decodeEncodedWords(formatted)).toBe('Café, Sabaï <a@example.com>');
   });
 });

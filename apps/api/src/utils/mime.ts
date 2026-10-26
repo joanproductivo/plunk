@@ -142,3 +142,100 @@ function wrapQuotedPrintableLine(tokens: string[]): string {
   flush(false);
   return lines.join('\n');
 }
+
+/**
+ * Characters an RFC 2047 "Q" encoded-word may carry literally in every position,
+ * including a display name (§5, rule 3). Using the strictest set for subjects too
+ * keeps one encoder valid wherever a header value ends up.
+ */
+const Q_LITERAL = /^[A-Za-z0-9!*+\-/]$/;
+
+/**
+ * RFC 2047 §2 caps an encoded-word at 75 characters; `=?UTF-8?Q?` and `?=` take 12.
+ */
+const ENCODED_WORD_PAYLOAD = 63;
+
+/**
+ * Collapse line breaks in a header value into spaces.
+ *
+ * Subjects and sender names come from user content, and a CR or LF there would end
+ * the header early: whatever follows lands in a header of its own, or in the body.
+ */
+function toSingleLine(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ');
+}
+
+/**
+ * Encode a header value for the wire (RFC 2047).
+ *
+ * RFC 5322 headers are ASCII. UTF-8 written raw into `Subject` or a display name is
+ * what SpamAssassin scores as `SUBJ_ILLEGAL_CHARS`, and SES expects non-ASCII sender
+ * names as encoded-words because it does not support SMTPUTF8. ASCII values are left
+ * as they are, since encoding them anyway is itself a spam signal; the exception is a
+ * value containing `=?`, which a client could misread as the start of an encoded-word.
+ *
+ * Words are split on character boundaries, as §5 requires, and folded onto their
+ * own lines, so a long subject also stays well within the 998-character line limit.
+ */
+export function encodeHeaderValue(value: string): string {
+  const singleLine = toSingleLine(value);
+
+  if (/^[\x20-\x7E]*$/.test(singleLine) && !singleLine.includes('=?')) {
+    return singleLine;
+  }
+
+  const words: string[] = [];
+  let current = '';
+
+  for (const char of singleLine) {
+    let token: string;
+    if (char === ' ') {
+      token = '_';
+    } else if (Q_LITERAL.test(char)) {
+      token = char;
+    } else {
+      token = Array.from(
+        new TextEncoder().encode(char),
+        byte => `=${byte.toString(16).toUpperCase().padStart(2, '0')}`,
+      ).join('');
+    }
+
+    if (current.length + token.length > ENCODED_WORD_PAYLOAD) {
+      words.push(current);
+      current = '';
+    }
+    current += token;
+  }
+  words.push(current);
+
+  // Whitespace between adjacent encoded-words is dropped when decoding (§6.2), so
+  // folding here adds nothing to the text; spaces inside it travel as `_`.
+  return words.map(word => `=?UTF-8?Q?${word}?=`).join('\n ');
+}
+
+/**
+ * Format an address with an optional display name, as for `From` or `To`.
+ *
+ * A name with RFC 5322 specials (a comma, a dot, parentheses…) has to be quoted, or
+ * `Joan, from Plunk <a@b.c>` reads as two addresses and the header stops being
+ * valid. Non-ASCII names become encoded-words instead, which cannot appear inside
+ * quotes.
+ */
+export function formatMailbox(name: string | undefined, email: string): string {
+  const displayName = toSingleLine(name ?? '').trim();
+
+  if (!displayName) {
+    return email;
+  }
+
+  // atext from RFC 5322 §3.2.3, plus the spaces between words of a phrase.
+  if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]+$/.test(displayName) && !displayName.includes('=?')) {
+    return `${displayName} <${email}>`;
+  }
+
+  if (/^[\x20-\x7E]+$/.test(displayName) && !displayName.includes('=?')) {
+    return `"${displayName.replace(/(["\\])/g, '\\$1')}" <${email}>`;
+  }
+
+  return `${encodeHeaderValue(displayName)} <${email}>`;
+}
