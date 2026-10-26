@@ -15,8 +15,9 @@ const POLL_MS = 60_000;
 const SHOWN = 3;
 
 /**
- * What failed in the project and has not been reviewed (Plunk Lite): on every page until someone
- * marks it reviewed, for the whole team. A source that fails again after that shows up again.
+ * What failed in the project, or needs attention (its sending reputation, a domain), and has not
+ * been reviewed (Plunk Lite): on every page until someone marks it reviewed, for the whole team. A
+ * source that fails again after that shows up again.
  */
 export function FailureBanner() {
   const {activeProject} = useActiveProject();
@@ -53,7 +54,7 @@ export function FailureBanner() {
       <div className="ml-3 flex-1">
         <div className="flex items-start justify-between">
           <div className="min-w-0">
-            <h3 className="font-semibold text-red-900 mb-1">Something failed and needs review</h3>
+            <h3 className="font-semibold text-red-900 mb-1">Something needs review</h3>
             <ul className="space-y-2">
               {shown.map(failure => (
                 <li key={failure.id} className="text-sm text-red-800">
