@@ -22,6 +22,7 @@ import {
   RATE_LIMIT_ENABLED,
   RATE_LIMIT_SEND_PER_SECOND,
   RATE_LIMIT_TRACK_PER_SECOND,
+  SHUTDOWN_TIMEOUT_MS,
   S3_ENABLED,
   SMTP_ENABLED,
   STRIPE_ENABLED,
@@ -425,16 +426,20 @@ process.on('uncaughtException', error => {
   // Don't exit the process - just log the error
 });
 
-/**
- * How long in-flight requests get to finish on shutdown. Below pm2's `kill_timeout` (30s,
- * docker-entrypoint-nginx.sh): a request cut off between creating an email row and queueing
- * its job would leave the row PENDING with nothing to send it.
- */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
-
 let httpServer: HttpServer | undefined;
+let stopping = false;
 
+/**
+ * Stop taking requests and let the running ones finish: a request cut off between creating an
+ * email row and queueing its job would leave the row PENDING with nothing to send it.
+ */
 function shutdown(signal: string) {
+  // A second signal must not fall through to Node's default handler, which exits at once
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+
   signale.info(`[API] Received ${signal}, closing the HTTP server...`);
 
   const deadline = setTimeout(() => {
@@ -454,8 +459,8 @@ function shutdown(signal: string) {
   });
 }
 
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 void prisma.$connect().then(async () => {
   httpServer = server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));

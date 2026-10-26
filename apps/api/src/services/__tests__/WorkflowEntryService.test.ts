@@ -43,7 +43,10 @@ describe('WorkflowEntryService', () => {
 
     const result = await WorkflowEntryService.enter(workflow, contact.id, trigger.id, undefined);
 
-    expect(result).toEqual({entered: false, refusal: {reason: 'already-entered', status: WorkflowExecutionStatus.COMPLETED}});
+    expect(result).toEqual({
+      entered: false,
+      refusal: {reason: 'already-entered', status: WorkflowExecutionStatus.COMPLETED},
+    });
   });
 
   it('lets a contact whose run is waiting enter a workflow with re-entry again', async () => {

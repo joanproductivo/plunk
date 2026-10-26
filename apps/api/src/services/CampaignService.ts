@@ -647,7 +647,12 @@ export class CampaignService {
     // Never allowed to fail the send: the campaign is SENDING and its first batch is queued
     try {
       const project = await prisma.project.findUnique({where: {id: projectId}, select: {name: true}});
-      await NtfyService.notifyCampaignSendingStarted(campaign.name, project?.name ?? projectId, projectId, recipientCount);
+      await NtfyService.notifyCampaignSendingStarted(
+        campaign.name,
+        project?.name ?? projectId,
+        projectId,
+        recipientCount,
+      );
     } catch (error) {
       signale.warn(`[CAMPAIGN] Failed to notify that campaign ${campaignId} started sending:`, error);
     }
@@ -793,8 +798,9 @@ export class CampaignService {
    * count it twice.
    *
    * Never allowed to fail the send that triggered it: the message is already away
-   * by the time this runs, and throwing here would retry the job and send it again.
-   * A lost increment is corrected by `reconcileStats` at finalization.
+   * by the time this runs, and a failure here would hold back the rest of recording
+   * it (billing, `email.sent`) until the job's retry. A lost increment is corrected
+   * by `reconcileStats` at finalization.
    */
   public static async countCampaignSent(campaignId: string): Promise<void> {
     try {

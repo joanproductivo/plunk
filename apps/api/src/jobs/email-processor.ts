@@ -284,7 +284,9 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
     (!email.campaign.sentAt ||
       email.id !== CampaignService.emailIdFor(email.campaignId, email.campaign.sentAt.getTime(), email.contactId))
   ) {
-    signale.warn(`[EMAIL-PROCESSOR] Email ${emailId} belongs to an earlier send of campaign ${email.campaignId}, skipping`);
+    signale.warn(
+      `[EMAIL-PROCESSOR] Email ${emailId} belongs to an earlier send of campaign ${email.campaignId}, skipping`,
+    );
     await prisma.email.update({
       where: {id: emailId},
       data: {
@@ -334,9 +336,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       },
     });
 
-    if (email.campaignId) {
-      await CampaignService.finalizeIfDone(email.campaignId);
-    }
+    await finalizeCampaignSafely(email.campaignId);
     return;
   }
 
@@ -360,11 +360,17 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
   let disabledForPolicy = false;
 
   try {
-    // Update status to sending
-    await prisma.email.update({
-      where: {id: emailId},
+    // Claim the email: only the run that moves it from PENDING sends it. A job BullMQ
+    // re-runs as stalled while the first run is still going (Redis unreachable long enough
+    // to lose the lock) finds it taken.
+    const claimed = await prisma.email.updateMany({
+      where: {id: emailId, status: EmailStatus.PENDING},
       data: {status: EmailStatus.SENDING},
     });
+
+    if (claimed.count === 0) {
+      return;
+    }
 
     // Format template variables in subject and body
     const contactData = (email.contact.data as Record<string, unknown>) || {};
@@ -491,6 +497,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
 
     if (disabledForPolicy) {
       // Already marked failed, and the project is disabled: a retry could only fail again
+      await finalizeCampaignSafely(email.campaignId);
       throw new UnrecoverableError(message);
     }
 
@@ -526,18 +533,14 @@ export async function createEmailWorker() {
   signale.info(
     `[EMAIL-PROCESSOR] Worker concurrency: ${concurrency} (rate limit: ${rateLimit}/s)`,
   );
-  const worker = new Worker<SendEmailJobData>(
-    emailQueue.name,
-    processEmailJob,
-    {
-      connection: emailQueue.opts.connection,
-      concurrency,
-      limiter: {
-        max: rateLimit, // Max emails per second (from env, AWS SES quota, or default)
-        duration: 1000,
-      },
+  const worker = new Worker<SendEmailJobData>(emailQueue.name, processEmailJob, {
+    connection: emailQueue.opts.connection,
+    concurrency,
+    limiter: {
+      max: rateLimit, // Max emails per second (from env, AWS SES quota, or default)
+      duration: 1000,
     },
-  );
+  });
 
   worker.on('completed', job => {
     signale.info(`[EMAIL-PROCESSOR] Job ${job.id} completed`);

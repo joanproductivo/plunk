@@ -3,6 +3,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
+import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {CampaignService} from '../../services/CampaignService';
 import {ContactService} from '../../services/ContactService';
@@ -692,7 +693,7 @@ describe('Webhooks - SES event notifications', () => {
 
     it('asks SNS to deliver again when the suppression could not be recorded', async () => {
       await sentEmail('ses-fail-before');
-      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockRejectedValue(new Error('database down'));
+      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
 
       const response = await post(notification('Bounce', 'ses-fail-before', {bounce: {bounceType: 'Permanent'}}));
 
@@ -728,20 +729,19 @@ describe('Webhooks - SES event notifications', () => {
       expect(await prisma.event.count({where: {emailId: email.id, name: 'email.complaint'}})).toBe(1);
     });
 
-    it('does not enforce again on the redelivery of a bounce that was already recorded', async () => {
-      await sentEmail('ses-fail-redeliver');
-      const enforce = vi
-        .spyOn(SecurityService, 'checkAndEnforceSecurityLimits')
-        .mockRejectedValueOnce(new Error('database down'))
-        .mockResolvedValue();
+    it('records the suppression and enforces on the redelivery after a 500', async () => {
+      const email = await sentEmail('ses-fail-redeliver');
+      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
 
       const first = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
       const second = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
 
       expect(first.status).toBe(500);
       expect(second.status).toBe(200);
-      // The first attempt wrote `bouncedAt` before enforcement failed, so the redelivery reads
-      // as already charged -- the residual risk the change accepts by name
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).not.toBeNull();
+      // Nothing was recorded by the failed attempt, so the redelivery is the new suppression
       expect(enforce).toHaveBeenCalledTimes(1);
     });
   });

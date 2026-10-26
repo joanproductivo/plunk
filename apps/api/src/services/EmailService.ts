@@ -224,7 +224,8 @@ export class EmailService {
         },
       });
     } catch (error) {
-      const existing = params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
+      const existing =
+        params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
       if (!existing) {
         throw error;
       }

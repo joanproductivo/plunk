@@ -47,7 +47,10 @@ const redisConnection: RedisOptions = {
 export const emailQueue = new Queue<SendEmailJobData>('email', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Exponential from 2s: the retries span about four minutes, so an email outlasts a
+    // database or SES hiccup instead of being marked failed (or, once SES has it, left
+    // unrecorded) a few seconds in
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 2000,

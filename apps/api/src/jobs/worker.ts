@@ -9,6 +9,8 @@
 import {Worker} from 'bullmq';
 import signale from 'signale';
 
+import {SHUTDOWN_TIMEOUT_MS} from '../app/constants.js';
+
 import {createApiRequestCleanupWorker} from './api-request-cleanup-processor.js';
 import {buildBackgroundIndexes} from './background-index-builder.js';
 import {createIdempotencyKeyCleanupWorker} from './idempotency-key-cleanup-processor.js';
@@ -134,13 +136,6 @@ async function startWorkers() {
     process.exit(1);
   }
 }
-
-/**
- * How long the workers get to finish their active jobs on shutdown. Below pm2's
- * `kill_timeout` (30s, docker-entrypoint-nginx.sh), so a close that hangs ends in our
- * own exit with a log line rather than a silent SIGKILL.
- */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 let stopping = false;
 

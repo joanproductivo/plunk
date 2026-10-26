@@ -70,7 +70,9 @@ describe('processEmailJob', () => {
     return prisma.email.create({
       data: {
         // A campaign email carries the id its send derives, as `processBatch` creates it
-        id: options.id ?? (campaign ? CampaignService.emailIdFor(campaign.id, campaign.sentAt!.getTime(), contact.id) : undefined),
+        id:
+          options.id ??
+          (campaign ? CampaignService.emailIdFor(campaign.id, campaign.sentAt!.getTime(), contact.id) : undefined),
         projectId,
         contactId: contact.id,
         campaignId: campaign?.id ?? null,
@@ -169,9 +171,12 @@ describe('processEmailJob', () => {
     it('keeps what SES returned on the job, and a retry records it without sending again', async () => {
       const email = await pendingEmail();
       const job = makeJob(email.id, 0);
-      // The stamp fails twice: in the attempt, and in the second try from the catch
+      // The claim (PENDING -> SENDING) goes through; the stamp then fails twice: in the
+      // attempt, and in the second try from the catch
+      const claim = appPrisma.email.updateMany.bind(appPrisma.email);
       const updateMany = vi
         .spyOn(appPrisma.email, 'updateMany')
+        .mockImplementationOnce(args => claim(args))
         .mockRejectedValueOnce(new Error('database down'))
         .mockRejectedValueOnce(new Error('database down'));
 
@@ -266,7 +271,9 @@ describe('processEmailJob', () => {
   it('does not send an email left from an earlier send of the same campaign', async () => {
     const campaign = await sendingCampaign();
     // Created under a send that was cancelled: its id derives from another generation
-    const stale = await pendingEmail({campaign: {id: campaign.id, sentAt: new Date(campaign.sentAt!.getTime() - 60_000)}});
+    const stale = await pendingEmail({
+      campaign: {id: campaign.id, sentAt: new Date(campaign.sentAt!.getTime() - 60_000)},
+    });
 
     await processEmailJob(makeJob(stale.id));
 

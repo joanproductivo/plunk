@@ -613,8 +613,9 @@ export class Webhooks {
       // enforcement on one could only re-disable a project over history it has already been
       // judged against -- which is what happened to projects that were manually re-enabled.
       //
-      // Runs before anything below, which may fail without failing the event: up to here, a
-      // failure answers 500 and SNS delivers the notification again.
+      // Runs before anything below, which may fail without failing the event. Up to the
+      // email update above, a failure answers 500 and SNS delivers the notification again;
+      // this check logs its own failures rather than throwing.
       const isNewSuppression =
         (countsTowardBounceRate && !alreadyBounced) || (eventType === 'Complaint' && !alreadyComplained);
       if (isNewSuppression && !isSimulated) {
