@@ -1,6 +1,6 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
 import {BOX_INHERITED_COLOUR, BOX_PADDING, BOX_RADIUS} from './emailBox.js';
-import {EMAIL_COLUMN_PADDING} from './emailDocument.js';
+import {columnTextWidth, EMAIL_COLUMN_PADDING} from './emailDocument.js';
 import {emailFontFamily} from './emailFonts.js';
 
 /**
@@ -329,6 +329,11 @@ export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = fal
 
 .prose .resizable-image-container img {
   margin: 0;
+}
+
+/* Videos no wider than the email's text, however wide the window: their own size caps them less */
+.prose .email-video img {
+  max-width: ${columnTextWidth(brand)}px;
 }
 
 .prose .email-box {
