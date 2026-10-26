@@ -1,8 +1,8 @@
 import {
   BRAND_DEFAULTS,
   BUTTON_PADDING,
+  columnTextWidth,
   detectCustomHtmlPatterns,
-  EMAIL_COLUMN_PADDING,
   emailDocument,
   emailFontFamily,
   emailProseCss,
@@ -12,12 +12,15 @@ import {
   isSafeButtonHref,
   isSafeVideoHrefAttribute,
   readButtonStyle,
+  readPixels,
   readSpacerHeight,
   splitEmailMarkers,
 } from '@plunk/shared';
 import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
 import signale from 'signale';
+
+import {convertBoxes, recolourBoxes, spanFullWidthBoxes} from './emailBoxes.js';
 
 // juice's main entry pulls in full cheerio (parse5, undici) and web-resource-inliner, ~28 MB of
 // resident memory per process. Its inliner core on cheerio's htmlparser2 build costs ~2 MB.
@@ -98,14 +101,8 @@ function addOutlookButtonPadding($: CheerioAPI, emailFont: string): void {
   });
 }
 
-/** Videos outside a column of a chosen width go out this wide in Outlook, the usual email width. */
-const VIDEO_DEFAULT_WIDTH = 600;
-
 /** Posters taller or wider than this are not a video's, so their height is left to the client. */
 const VIDEO_MAX_RATIO = 4;
-
-// A size attribute as written by the editor: a whole number of pixels
-const pixels = (value: string | undefined) => (value && /^\d{1,5}$/.test(value) ? Number(value) : 0);
 
 /**
  * Editor videos as Outlook for Windows can render them. Its Word engine sizes images by their
@@ -115,11 +112,11 @@ const pixels = (value: string | undefined) => (value && /^\d{1,5}$/.test(value) 
  * poster's shape. A video whose link is not one a video may have loses it.
  */
 function sizeVideos($: CheerioAPI, brand: EmailBrand): void {
-  const width = brand.contentWidth ? brand.contentWidth - 2 * EMAIL_COLUMN_PADDING : VIDEO_DEFAULT_WIDTH;
+  const width = columnTextWidth(brand);
   $('a.email-video').each((_, element) => {
     const link = $(element);
     const image = link.children('img').first();
-    const [posterWidth, posterHeight] = [pixels(image.attr('width')), pixels(image.attr('height'))];
+    const [posterWidth, posterHeight] = [readPixels(image.attr('width')), readPixels(image.attr('height'))];
     const ratio = posterWidth / posterHeight;
     image.attr('width', String(width));
     if (ratio >= 1 / VIDEO_MAX_RATIO && ratio <= VIDEO_MAX_RATIO) {
@@ -175,6 +172,16 @@ function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: stri
       applyHeightAttributes: false,
       applyAttributesTableElements: false,
     });
+    try {
+      recolourBoxes($);
+    } catch (error) {
+      // Their headings keep `color: inherit`, which every client but Outlook for Windows applies
+      warnAtMostEveryMinute(
+        'box-colour',
+        `[EMAIL] Failed to colour boxes${emailId ? ` of email ${emailId}` : ''}:`,
+        error,
+      );
+    }
     // Apple Mail styles <blockquote> as quoted reply text and overrides its margins, even inline,
     // so a quote from the editor goes out as a <div> with the same styles
     $('blockquote').each((_, element) => {
@@ -205,6 +212,13 @@ function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: stri
     } catch (error) {
       // A video at its poster's size still shows everywhere but Outlook for Windows
       warnAtMostEveryMinute('video', `[EMAIL] Failed to size videos${emailId ? ` of email ${emailId}` : ''}:`, error);
+    }
+    try {
+      convertBoxes($, brand);
+      spanFullWidthBoxes($, brand);
+    } catch (error) {
+      // An unconverted box is a div with its background and padding inlined, unpadded only in Outlook
+      warnAtMostEveryMinute('box', `[EMAIL] Failed to convert boxes${emailId ? ` of email ${emailId}` : ''}:`, error);
     }
     return $.html();
   } catch (error) {

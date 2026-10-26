@@ -1,7 +1,7 @@
 /** Colour contrast, as WCAG measures it, for colours written as `#rrggbb`. */
 
-/** The relative luminance of a `#rrggbb` colour, from 0 (black) to 1 (white). */
-export function luminance(hex: string): number {
+// The relative luminance of a `#rrggbb` colour, from 0 (black) to 1 (white)
+function luminance(hex: string): number {
   const [r, g, b] = [1, 3, 5].map(at => {
     const channel = parseInt(hex.slice(at, at + 2), 16) / 255;
     return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;

@@ -1,7 +1,7 @@
 import type {CommandProps, Editor as CoreEditor} from '@tiptap/core';
 import {NodeSelection, TextSelection, type Transaction} from '@tiptap/pm/state';
 import type {Editor} from '@tiptap/react';
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 
 declare module '@tiptap/core' {
   interface EditorEvents {
@@ -50,6 +50,34 @@ export function insertBlock(editor: CoreEditor, type: string, attrs?: Record<str
   return editor.chain().focus().command(insertBlockAfterSelection(type, attrs)).run();
 }
 
+/**
+ * Follows the block at `pos` (null: none) through changes to the document, telling `onMove` where
+ * it is now, or null once it is gone.
+ */
+export function useFollowBlock(editor: Editor | null, pos: number | null, onMove: (pos: number | null) => void) {
+  // Read when the document changes, after renders
+  const onMoveRef = useRef(onMove);
+  useEffect(() => {
+    onMoveRef.current = onMove;
+  });
+
+  useEffect(() => {
+    if (!editor || pos === null) return;
+    const follow = ({transaction}: {transaction: Transaction}) => {
+      const mapped = transaction.mapping.mapResult(pos);
+      if (mapped.deleted) {
+        onMoveRef.current(null);
+      } else if (mapped.pos !== pos) {
+        onMoveRef.current(mapped.pos);
+      }
+    };
+    editor.on('transaction', follow);
+    return () => {
+      editor.off('transaction', follow);
+    };
+  }, [editor, pos]);
+}
+
 /** What a block's dialog receives from useBlockDialog. */
 export interface BlockDialogProps<Attrs> {
   open: boolean;
@@ -75,7 +103,7 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
     const edit = ({pos}: {pos: number}) => {
       if (editor.state.doc.nodeAt(pos)?.type.name === type) setState({open: true, pos});
     };
-    // A new block asked for outside the toolbar (the slash menu only asks for blocks that need a dialog)
+    // A new block of this type asked for outside the toolbar, as the slash menu asks
     const add = ({type: asked}: {type: string}) => {
       if (asked === type) setState({open: true, pos: null});
     };
@@ -89,22 +117,9 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
 
   // While its dialog is open, the block being edited follows changes to the document (a content
   // update from outside, say); the dialog closes if the block is gone.
-  const editing = state.open ? state.pos : null;
-  useEffect(() => {
-    if (!editor || editing === null) return;
-    const follow = ({transaction}: {transaction: Transaction}) => {
-      const mapped = transaction.mapping.mapResult(editing);
-      if (mapped.deleted) {
-        setState({open: false, pos: null});
-      } else if (mapped.pos !== editing) {
-        setState({open: true, pos: mapped.pos});
-      }
-    };
-    editor.on('transaction', follow);
-    return () => {
-      editor.off('transaction', follow);
-    };
-  }, [editor, editing]);
+  useFollowBlock(editor, state.open ? state.pos : null, pos =>
+    setState(pos === null ? {open: false, pos: null} : {open: true, pos}),
+  );
 
   const onToolbar = () => {
     if (!editor) return;

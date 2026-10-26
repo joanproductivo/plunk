@@ -1,5 +1,5 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
-import {luminance} from './color.js';
+import {contrastRatio} from './color.js';
 import {EDITOR_BLOCK_CLASSES} from './emailBlocks.js';
 import {isSafeVideoHrefAttribute} from './emailVideo.js';
 
@@ -62,9 +62,10 @@ function hasForeignVideo(html: string): boolean {
 // The one <div> the editor writes: a box, exactly as it serialises one (see @plunk/shared emailBox)
 const BOX_TAG = /^\s+class="email-box( email-box-full)?"(\s+style="[^"<>]*")?\s*$/;
 
-// Whether a <div> is anything but an editor box at the top of the email: any other div, however
-// close (other attributes, other quotes, a box inside a box), is custom HTML. A linear scan, as
-// hasRichButton: the body may carry contact data.
+// Whether a <div> is anything but an editor box outside other divs: any other div, however close
+// (other attributes, other quotes, a box inside a box), is custom HTML. Boxes inside lists or
+// quotes, which the editor never writes, read as boxes, and the editor moves them to the top when
+// opening the email. A linear scan, as hasRichButton: the body may carry contact data.
 function hasForeignDiv(html: string): boolean {
   const parts = html.split(/(<\/?div\b)/i);
   let depth = 0;
@@ -90,7 +91,7 @@ function hasForeignDiv(html: string): boolean {
  * <div class="email-box">, the only div it writes) + VariableMention.
  * TextStyle/Color/Link round-trip <span style="..."> and <a style="..."> markup. This detection
  * therefore PERMITS span + inline styles and only REJECTS markup TipTap cannot represent (tables,
- * divs, forms, embeds, custom attrs, <style> blocks, etc).
+ * other divs, forms, embeds, custom attrs, <style> blocks, etc).
  */
 export function detectCustomHtmlPatterns(html: string): boolean {
   if (!html || html.trim() === '') return false;
@@ -173,13 +174,24 @@ export const EMAIL_COLUMN_RADIUS = 12;
 /** The padding of a framed email's column, in px, on each side of its content. */
 export const EMAIL_COLUMN_PADDING = 24;
 
+/** The width emails without a brand width are laid out for, in px: the usual email width. */
+export const EMAIL_DEFAULT_WIDTH = 600;
+
+/**
+ * The width of an email's text, in px: a framed column's less its padding, or the usual width.
+ * Outlook for Windows sizes images by their width attribute, so images are sized for it.
+ */
+export function columnTextWidth(brand: EmailBrand): number {
+  return brand.contentWidth ? brand.contentWidth - 2 * EMAIL_COLUMN_PADDING : EMAIL_DEFAULT_WIDTH;
+}
+
 /**
  * Whether the unsubscribe footer, whose text is #404040 (see EmailService.compile), reads on
  * `color` at WCAG's 4.5:1. On a darker content colour it gets a white background of its own:
  * however the brand looks, the way out of the list stays legible.
  */
 export function footerReadableOn(color: string): boolean {
-  return (luminance(color) + 0.05) / (luminance('#404040') + 0.05) >= 4.5;
+  return contrastRatio(color, '#404040') >= 4.5;
 }
 
 /**

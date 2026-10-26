@@ -14,6 +14,7 @@ import {
   Link,
   List,
   ListOrdered,
+  PaintBucket,
   Palette,
   Quote,
   RectangleHorizontal,
@@ -40,6 +41,8 @@ interface ToolbarProps {
   onSpacer: () => void;
   /** Inserts a YouTube video, or edits the selected one. */
   onVideo: () => void;
+  /** Wraps the selected blocks in a box, or opens the settings of the box the cursor is in. */
+  onBox: () => void;
   canUploadImages: boolean;
 }
 
@@ -51,6 +54,7 @@ export function Toolbar({
   onDivider,
   onSpacer,
   onVideo,
+  onBox,
   canUploadImages,
 }: ToolbarProps) {
   const [showLinkInput, setShowLinkInput] = useState(false);
@@ -605,6 +609,18 @@ export function Toolbar({
           }
         >
           <Video className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onMouseDown={e => e.preventDefault()}
+          onClick={onBox}
+          data-active={editor.isActive('box')}
+          className="h-8 w-8 data-[active=true]:bg-neutral-200"
+          title={editor.isActive('box') ? 'Box settings' : 'Put in a box with a background'}
+        >
+          <PaintBucket className="h-4 w-4" />
         </Button>
         <Button
           type="button"

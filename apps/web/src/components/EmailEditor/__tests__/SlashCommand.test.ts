@@ -93,6 +93,7 @@ describe('slashItems', () => {
       'Button',
       'Image',
       'YouTube video',
+      'Box',
       'Divider',
       'Spacer',
       'Variable',
