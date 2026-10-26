@@ -8,6 +8,17 @@
  */
 export interface SendEmailJobData {
   emailId: string;
+  /**
+   * Set once SES has accepted the email, before the send is recorded. A retry that finds it
+   * only records the send: SES already has the message, so it must not be given it again.
+   */
+  accepted?: AcceptedEmail;
+}
+
+/** What SES returned for an accepted email, and the subject it went out with */
+export interface AcceptedEmail {
+  messageId: string;
+  subject: string;
 }
 
 /**

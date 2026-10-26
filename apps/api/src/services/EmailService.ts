@@ -1,4 +1,4 @@
-import type {Contact, Email, Project} from '@plunk/db';
+import type {Contact, Email, Project, TemplateType} from '@plunk/db';
 import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
@@ -55,6 +55,34 @@ interface SendEmailParams {
  */
 export class EmailService {
   /**
+   * Whether an email may only go to a subscribed contact.
+   *
+   * Decided when the email is queued and again by the send path just before it leaves: a
+   * contact can unsubscribe, bounce or complain in between, and a large campaign takes an hour
+   * to drain at 14/s.
+   *
+   * - Campaign and workflow emails are marketing. A transactional template makes their source
+   *   type TRANSACTIONAL, as does a transactional campaign.
+   * - A transactional send with a MARKETING template is still marketing.
+   * - A workflow email to a custom recipient goes to an address outside the contact list.
+   */
+  public static requiresSubscribedContact(params: {
+    sourceType: EmailSourceType;
+    templateType?: TemplateType | null;
+    hasRecipientOverride: boolean;
+  }): boolean {
+    if (params.hasRecipientOverride) {
+      return false;
+    }
+
+    if (params.sourceType !== EmailSourceType.TRANSACTIONAL) {
+      return true;
+    }
+
+    return params.templateType === 'MARKETING';
+  }
+
+  /**
    * Send a transactional email via API
    */
   public static async sendTransactionalEmail(params: SendEmailParams): Promise<Email> {
@@ -67,7 +95,13 @@ export class EmailService {
       });
 
       // If using a marketing template, check subscription status
-      if (template?.type === 'MARKETING') {
+      if (
+        this.requiresSubscribedContact({
+          sourceType: EmailSourceType.TRANSACTIONAL,
+          templateType: template?.type,
+          hasRecipientOverride: false,
+        })
+      ) {
         const contact = await prisma.contact.findUnique({
           where: {id: params.contactId},
           select: {subscribed: true, email: true},
@@ -208,7 +242,7 @@ export class EmailService {
     // Check subscription status for marketing emails
     // Transactional emails should always be sent regardless of subscription status
     // Custom recipient emails also bypass subscription checks (they're not in the contact list)
-    if (sourceType !== EmailSourceType.TRANSACTIONAL && !params.recipientEmail) {
+    if (this.requiresSubscribedContact({sourceType, hasRecipientOverride: Boolean(params.recipientEmail)})) {
       const contact = await prisma.contact.findUnique({
         where: {id: params.contactId},
         select: {subscribed: true},
