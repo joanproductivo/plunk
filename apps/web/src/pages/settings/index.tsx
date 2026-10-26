@@ -34,6 +34,7 @@ import {AnimatePresence, motion} from 'framer-motion';
 import {NextSeo} from 'next-seo';
 import {
   AlertTriangle,
+  BellRing,
   CreditCard,
   Database,
   Globe,
@@ -47,6 +48,7 @@ import {
 } from 'lucide-react';
 import type {z} from 'zod';
 import {useRouter} from 'next/router';
+import {FailureAlertSettings} from '../../components/FailureAlertSettings';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {BrandSettings} from '../../components/BrandSettings';
 import {DomainsSettings} from '../../components/DomainsSettings';
@@ -68,7 +70,7 @@ import {useUser} from '../../lib/hooks/useUser';
 import {useProjectSecurity} from '../../lib/hooks/useProjectSecurity';
 import useSWR from 'swr';
 
-type TabId = 'general' | 'brand' | 'billing' | 'domains' | 'smtp' | 'data' | 'team' | 'security';
+type TabId = 'general' | 'brand' | 'alerts' | 'billing' | 'domains' | 'smtp' | 'data' | 'team' | 'security';
 
 interface Tab {
   id: TabId;
@@ -92,6 +94,7 @@ const buildTabs = (options: {billingEnabled: boolean; smtpEnabled: boolean}): Ta
   const allTabs: Tab[] = [
     {id: 'general', label: 'General', icon: SettingsIcon},
     {id: 'brand', label: 'Brand', icon: Palette},
+    {id: 'alerts', label: 'Alerts', icon: BellRing},
     {id: 'team', label: 'Team', icon: Users},
     {id: 'security', label: 'Security', icon: Shield},
     {id: 'billing', label: 'Billing', icon: CreditCard, condition: billingEnabled},
@@ -841,6 +844,11 @@ export default function Settings() {
                   canEdit={currentUserRole !== 'MEMBER'}
                 />
               </div>
+            </TabsContent>
+
+            {/* Alerts Tab */}
+            <TabsContent value="alerts">
+              <FailureAlertSettings projectId={activeProject.id} canEdit={currentUserRole !== 'MEMBER'} />
             </TabsContent>
 
             {/* Domains Tab */}
