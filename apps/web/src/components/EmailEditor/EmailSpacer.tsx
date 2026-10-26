@@ -2,6 +2,8 @@ import {readSpacerHeight, SPACER_DEFAULT_HEIGHT, spacerStyle} from '@plunk/share
 import {Node} from '@tiptap/core';
 import {NodeViewWrapper, type ReactNodeViewProps, ReactNodeViewRenderer} from '@tiptap/react';
 
+import {emitEditBlock} from './useBlockDialog';
+
 export interface SpacerAttrs {
   height: number;
 }
@@ -14,10 +16,7 @@ function SpacerView({node, editor, getPos}: ReactNodeViewProps) {
     <NodeViewWrapper>
       <div
         title="Double-click to edit"
-        onDoubleClick={() => {
-          const pos = getPos();
-          if (typeof pos === 'number') editor.emit('editBlock', {pos});
-        }}
+        onDoubleClick={() => emitEditBlock(editor, getPos)}
         className="flex items-center justify-center rounded border border-dashed border-neutral-300 text-[11px] text-neutral-400"
         style={{height, cursor: 'pointer'}}
       >

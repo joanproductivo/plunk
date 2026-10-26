@@ -13,6 +13,7 @@ import {NodeViewWrapper, type ReactNodeViewProps, ReactNodeViewRenderer} from '@
 import type {HTMLAttributes} from 'react';
 
 import {blockAlignment, isLoneChildParagraph} from './blockAlignment';
+import {emitEditBlock} from './useBlockDialog';
 
 export interface ButtonAttrs extends ButtonStyle {
   text: string;
@@ -72,10 +73,7 @@ function ButtonView({node, editor, getPos}: ReactNodeViewProps) {
         button={attrs}
         text={attrs.text}
         title="Double-click to edit"
-        onDoubleClick={() => {
-          const pos = getPos();
-          if (typeof pos === 'number') editor.emit('editBlock', {pos});
-        }}
+        onDoubleClick={() => emitEditBlock(editor, getPos)}
         style={{cursor: 'pointer'}}
       />
     </NodeViewWrapper>

@@ -1,5 +1,5 @@
-import type {ChainedCommands, CommandProps} from '@tiptap/core';
-import {NodeSelection, TextSelection} from '@tiptap/pm/state';
+import type {CommandProps, Editor as CoreEditor} from '@tiptap/core';
+import {NodeSelection, TextSelection, type Transaction} from '@tiptap/pm/state';
 import type {Editor} from '@tiptap/react';
 import {useEffect, useState} from 'react';
 
@@ -10,11 +10,17 @@ declare module '@tiptap/core' {
   }
 }
 
+/** Opens the dialog of the block at `getPos()`, from a node view's double-click. */
+export function emitEditBlock(editor: CoreEditor, getPos: () => number | undefined): void {
+  const pos = getPos();
+  if (typeof pos === 'number') editor.emit('editBlock', {pos});
+}
+
 /**
  * After inserting a block: a block left selected would be replaced by the next keystroke, so the
  * cursor moves to the text after it, or to a new paragraph when none follows.
  */
-export function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean {
+function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean {
   if (!(tr.selection instanceof NodeSelection)) return true;
   if (dispatch) {
     const after = tr.selection.to;
@@ -24,6 +30,20 @@ export function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean
     tr.setSelection(TextSelection.create(tr.doc, after + 1)).scrollIntoView();
   }
   return true;
+}
+
+/**
+ * Inserts a block of `type` after the selection, rather than in its place, and leaves the cursor
+ * in the text after the new block (inserting at the end of the selection leaves the new block
+ * selected, never a block that was already there).
+ */
+export function insertBlock(editor: CoreEditor, type: string, attrs?: Record<string, unknown>): boolean {
+  return editor
+    .chain()
+    .focus()
+    .insertContentAt(editor.state.selection.to, {type, attrs})
+    .command(continueAfterBlock)
+    .run();
 }
 
 /** What a block's dialog receives from useBlockDialog. */
@@ -37,15 +57,11 @@ export interface BlockDialogProps<Attrs> {
 
 /**
  * Wires a block's dialog to an editor. The toolbar edits the selected block of `type`; with none
- * selected, it runs `insert` when given (blocks with a usable default) or opens the dialog to fill
- * in a new one. Double-clicking a block of `type` opens the dialog for it. New blocks go after the
- * selection, rather than in its place.
+ * selected, it inserts one with its defaults (`insertDirectly`, for blocks that need nothing
+ * filled in) or opens the dialog to fill in a new one. Double-clicking a block of `type` opens
+ * the dialog for it. New blocks go after the selection (see insertBlock).
  */
-export function useBlockDialog<Attrs extends object>(
-  editor: Editor | null,
-  type: string,
-  insert?: (chain: ChainedCommands) => ChainedCommands,
-) {
+export function useBlockDialog<Attrs extends object>(editor: Editor | null, type: string, insertDirectly = false) {
   // The dialog edits the block at `pos`, or fills in a new one when it is null
   const [state, setState] = useState<{open: boolean; pos: number | null}>({open: false, pos: null});
 
@@ -60,14 +76,31 @@ export function useBlockDialog<Attrs extends object>(
     };
   }, [editor, type]);
 
-  const atSelectionEnd = () => editor!.chain().focus().setTextSelection(editor!.state.selection.to);
+  // While its dialog is open, the block being edited follows changes to the document (a content
+  // update from outside, say); the dialog closes if the block is gone.
+  const editing = state.open ? state.pos : null;
+  useEffect(() => {
+    if (!editor || editing === null) return;
+    const follow = ({transaction}: {transaction: Transaction}) => {
+      const mapped = transaction.mapping.mapResult(editing);
+      if (mapped.deleted) {
+        setState({open: false, pos: null});
+      } else if (mapped.pos !== editing) {
+        setState({open: true, pos: mapped.pos});
+      }
+    };
+    editor.on('transaction', follow);
+    return () => {
+      editor.off('transaction', follow);
+    };
+  }, [editor, editing]);
 
   const onToolbar = () => {
     if (!editor) return;
     const selection = editor.state.selection;
     const selected = selection instanceof NodeSelection && selection.node.type.name === type ? selection.from : null;
-    if (selected === null && insert) {
-      insert(atSelectionEnd()).command(continueAfterBlock).run();
+    if (selected === null && insertDirectly) {
+      insertBlock(editor, type);
     } else {
       setState({open: true, pos: selected});
     }
@@ -77,10 +110,11 @@ export function useBlockDialog<Attrs extends object>(
 
   const onSubmit = (submitted: Attrs) => {
     const attrs = submitted as Record<string, unknown>;
+    if (!editor) return;
     if (state.pos === null) {
-      atSelectionEnd().insertContent({type, attrs}).command(continueAfterBlock).run();
-    } else {
-      editor?.chain().focus().setNodeSelection(state.pos).updateAttributes(type, attrs).run();
+      insertBlock(editor, type, attrs);
+    } else if (editor.state.doc.nodeAt(state.pos)?.type.name === type) {
+      editor.chain().focus().setNodeSelection(state.pos).updateAttributes(type, attrs).run();
     }
     setState({open: false, pos: null});
   };

@@ -1,6 +1,12 @@
 import {describe, expect, it} from 'vitest';
 
-import {readSpacerHeight, SPACER_DEFAULT_HEIGHT, spacerStyle} from '../template/index.js';
+import {
+  closestOption,
+  readSpacerHeight,
+  SPACER_DEFAULT_HEIGHT,
+  SPACER_HEIGHTS,
+  spacerStyle,
+} from '../template/index.js';
 
 describe('readSpacerHeight', () => {
   it('reads back the style a spacer is saved with', () => {
@@ -28,5 +34,20 @@ describe('readSpacerHeight', () => {
     expect(readSpacerHeight('height: 3em')).toBe(SPACER_DEFAULT_HEIGHT);
     expect(readSpacerHeight('height: -5px')).toBe(SPACER_DEFAULT_HEIGHT);
     expect(readSpacerHeight('line-height: 48px')).toBe(SPACER_DEFAULT_HEIGHT);
+  });
+});
+
+describe('spacerStyle', () => {
+  it('writes a height within bounds, whatever it is given', () => {
+    expect(spacerStyle(1e6)).toBe('border-style: none; margin: 0px; height: 200px;');
+    expect(spacerStyle(Number.NaN)).toBe(`border-style: none; margin: 0px; height: ${SPACER_DEFAULT_HEIGHT}px;`);
+  });
+});
+
+describe('closestOption', () => {
+  it('picks the nearest option, the first on a tie', () => {
+    expect(closestOption(SPACER_HEIGHTS, 50)).toBe('large');
+    expect(closestOption(SPACER_HEIGHTS, 24)).toBe('small');
+    expect(closestOption(SPACER_HEIGHTS, 1000)).toBe('xlarge');
   });
 });

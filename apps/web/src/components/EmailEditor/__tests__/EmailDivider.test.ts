@@ -5,6 +5,7 @@ import {afterEach, describe, expect, it} from 'vitest';
 
 import {detectCustomHtmlPatterns} from '../../../lib/emailStyles';
 import {DIVIDER_DEFAULTS, type DividerAttrs, dividerStyle, EmailDivider} from '../EmailDivider';
+import {insertBlock} from '../useBlockDialog';
 
 /**
  * Parsing and serialising run through the extensions the editor loads, so these pin the HTML a
@@ -76,8 +77,16 @@ describe('EmailDivider', () => {
 
   it('falls back to the defaults for what it cannot tell', () => {
     createEditor('<hr style="border-top: 5px solid red; margin: 3em 0;">');
-
     expect(dividerAttrs()).toEqual({color: DIVIDER_DEFAULTS.color, thickness: 'thick', spacing: 'large'});
+
+    createEditor('<hr style="border-top: thick solid #e11d48;">');
+    expect(dividerAttrs()).toEqual({color: '#e11d48', thickness: 'thick', spacing: 'large'});
+  });
+
+  it('writes nothing it does not know, whatever code sets', () => {
+    expect(
+      dividerStyle({color: 'red; x: y', thickness: 'huge', spacing: 'none'} as unknown as DividerAttrs),
+    ).toBeNull();
   });
 
   it('goes back to a plain <hr> when its options are reset', () => {
@@ -89,15 +98,43 @@ describe('EmailDivider', () => {
     expect(editor.getHTML()).toMatch(/^<hr>/);
   });
 
-  it('is inserted after the selection, not in its place', () => {
+  it('is inserted after the selection, not in its place, with the cursor in the text after it', () => {
     createEditor('<p>hello world</p>');
     editor.commands.setTextSelection({from: 1, to: 6});
 
-    // As useBlockDialog inserts a divider from the toolbar
-    editor.chain().focus().setTextSelection(editor.state.selection.to).setHorizontalRule().run();
+    insertBlock(editor, 'horizontalRule');
+    editor.commands.insertContent('X');
 
-    expect(editor.getHTML()).toBe('<p>hello</p><hr><p> world</p>');
-    expect(editor.state.selection.empty).toBe(true);
+    expect(editor.getHTML()).toBe('<p>hello</p><hr><p>X world</p>');
+  });
+
+  it('leaves the cursor right after itself when a block that takes no text follows', () => {
+    createEditor('<p>ab</p><ul><li><p>item</p></li></ul>');
+    editor.commands.setTextSelection(3);
+
+    insertBlock(editor, 'horizontalRule');
+    editor.commands.insertContent('X');
+
+    // The editor keeps an empty paragraph after a trailing list
+    expect(editor.getHTML()).toBe('<p>ab</p><hr><p>X</p><ul><li><p>item</p></li></ul><p></p>');
+  });
+
+  it('is still made by typing ---', () => {
+    createEditor('<p>a</p><p></p>');
+    editor.commands.setTextSelection(4);
+
+    // As typing does: input rules first, then the character itself
+    for (const char of '---') {
+      const {from, to} = editor.state.selection;
+      const view = editor.view;
+      const handled = view.someProp('handleTextInput', handle =>
+        handle(view, from, to, char, () => view.state.tr.insertText(char, from, to)),
+      );
+      if (!handled) view.dispatch(view.state.tr.insertText(char, from, to));
+    }
+
+    expect(editor.getHTML()).toMatch(/^<p>a<\/p><hr>/);
+    expect(dividerAttrs()).toEqual(DIVIDER_DEFAULTS);
   });
 
   it('is visual editor content, not custom HTML', () => {

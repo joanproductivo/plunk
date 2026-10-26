@@ -6,7 +6,7 @@ import {afterEach, describe, expect, it} from 'vitest';
 
 import {EmailDivider} from '../EmailDivider';
 import {EmailSpacer} from '../EmailSpacer';
-import {continueAfterBlock} from '../useBlockDialog';
+import {insertBlock} from '../useBlockDialog';
 
 /**
  * Parsing and serialising run through the extensions the editor loads, so these pin the HTML a
@@ -19,17 +19,6 @@ let editor: Editor;
 function createEditor(content: string) {
   editor = new Editor({extensions: [StarterKit, EmailDivider, EmailSpacer], content});
   return editor;
-}
-
-// As useBlockDialog inserts a spacer from the toolbar
-function insertSpacer() {
-  editor
-    .chain()
-    .focus()
-    .setTextSelection(editor.state.selection.to)
-    .insertContent({type: 'spacer'})
-    .command(continueAfterBlock)
-    .run();
 }
 
 afterEach(() => editor?.destroy());
@@ -62,38 +51,37 @@ describe('EmailSpacer', () => {
     createEditor('<p>hello world</p>');
     editor.commands.setTextSelection({from: 1, to: 6});
 
-    insertSpacer();
+    insertBlock(editor, 'spacer');
+    editor.commands.insertContent('X');
 
-    expect(editor.getHTML()).toBe(`<p>hello</p>${spacer(32)}<p> world</p>`);
-    expect(editor.state.selection.empty).toBe(true);
-    expect(editor.state.selection.$from.parent.textContent).toBe(' world');
+    expect(editor.getHTML()).toBe(`<p>hello</p>${spacer(32)}<p>X world</p>`);
   });
 
   it('leaves the cursor in a new paragraph when nothing can take text after it', () => {
     createEditor(`<p>hello</p>${spacer(16)}`);
     editor.commands.setTextSelection(6);
 
-    insertSpacer();
+    insertBlock(editor, 'spacer');
     editor.commands.insertContent('typed');
 
     // The editor keeps an empty paragraph after a trailing block
     expect(editor.getHTML()).toBe(`<p>hello</p>${spacer(32)}<p>typed</p>${spacer(16)}<p></p>`);
   });
 
-  it('keeps an existing block when a divider is inserted before it', () => {
-    createEditor(`<p>hello</p>${spacer(16)}`);
-    editor.commands.setTextSelection(6);
+  it('goes after a selected block, keeping it, with the cursor right after the new one', () => {
+    createEditor(`<p>hello</p>${spacer(16)}<p>tail</p>`);
+    editor.commands.setNodeSelection(7);
 
-    editor
-      .chain()
-      .focus()
-      .setTextSelection(editor.state.selection.to)
-      .setHorizontalRule()
-      .command(continueAfterBlock)
-      .run();
-    editor.commands.insertContent('typed');
+    insertBlock(editor, 'horizontalRule');
+    editor.commands.insertContent('X');
 
-    expect(editor.getHTML()).toContain(spacer(16));
-    expect(editor.getHTML()).toContain('typed');
+    expect(editor.getHTML()).toBe(`<p>hello</p>${spacer(16)}<hr><p>Xtail</p>`);
+  });
+
+  it('writes a height within bounds, whatever code sets', () => {
+    createEditor('<p>a</p>');
+    editor.commands.insertContentAt(3, {type: 'spacer', attrs: {height: 1e6}});
+
+    expect(editor.getHTML()).toContain(spacer(200));
   });
 });

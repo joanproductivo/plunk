@@ -19,13 +19,16 @@ export const DIVIDER_THICKNESS: Record<DividerThickness, number> = {thin: 1, med
 /** Space above and below, in px; `large` is the prose styles' own 3em (about 42px). */
 export const DIVIDER_SPACING: Record<DividerSpacing, number> = {small: 16, medium: 24, large: 42};
 
+// The widths browsers give border keywords.
+const BORDER_KEYWORDS: Record<string, number> = {thin: 1, medium: 3, thick: 5};
+
 /**
  * A divider's options from its <hr>, read through the CSSOM: the editor saves styles through it,
  * so a browser may hand back longhands and rgb() colours, or a hand-written border-top shorthand.
  * Anything it cannot tell falls back to the defaults.
  */
-export function readDivider(element: HTMLElement): DividerAttrs {
-  const width = parseFloat(element.style.borderTopWidth);
+function readDivider(element: HTMLElement): DividerAttrs {
+  const width = BORDER_KEYWORDS[element.style.borderTopWidth] ?? parseFloat(element.style.borderTopWidth);
   const margin = /^(\d+(?:\.\d+)?)px$/.exec(element.style.marginTop);
 
   return {
@@ -41,17 +44,22 @@ export function readDivider(element: HTMLElement): DividerAttrs {
  * the colour; the prose styles' margin stays unless the spacing is set.
  */
 export function dividerStyle(divider: DividerAttrs): string | null {
+  // Values outside the options (only code can set them) count as the defaults
   const color = normalizeHexColor(divider.color) ?? DIVIDER_DEFAULTS.color;
+  const thickness = Object.hasOwn(DIVIDER_THICKNESS, divider.thickness)
+    ? divider.thickness
+    : DIVIDER_DEFAULTS.thickness;
+  const spacing = Object.hasOwn(DIVIDER_SPACING, divider.spacing) ? divider.spacing : DIVIDER_DEFAULTS.spacing;
   if (
     color === DIVIDER_DEFAULTS.color &&
-    divider.thickness === DIVIDER_DEFAULTS.thickness &&
-    divider.spacing === DIVIDER_DEFAULTS.spacing
+    thickness === DIVIDER_DEFAULTS.thickness &&
+    spacing === DIVIDER_DEFAULTS.spacing
   ) {
     return null;
   }
 
-  const margin = divider.spacing === 'large' ? '' : ` margin: ${DIVIDER_SPACING[divider.spacing]}px 0px;`;
-  return `border-width: ${DIVIDER_THICKNESS[divider.thickness]}px 0px 0px; border-style: solid; border-color: ${color};${margin}`;
+  const margin = spacing === 'large' ? '' : ` margin: ${DIVIDER_SPACING[spacing]}px 0px;`;
+  return `border-width: ${DIVIDER_THICKNESS[thickness]}px 0px 0px; border-style: solid; border-color: ${color};${margin}`;
 }
 
 /**

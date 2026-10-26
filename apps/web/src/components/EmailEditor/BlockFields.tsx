@@ -2,7 +2,7 @@ import {normalizeHexColor} from '@plunk/shared';
 import {Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@plunk/ui';
 import type {CSSProperties} from 'react';
 
-/** Fields shared by the dialogs of the editor's blocks (see ButtonDialog). */
+/** Fields shared by the dialogs of the editor's blocks. */
 
 export function OptionSelect<T extends string>(props: {
   label: string;

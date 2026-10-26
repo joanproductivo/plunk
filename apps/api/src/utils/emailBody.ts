@@ -70,10 +70,10 @@ function hasRichButton(html: string): boolean {
  * rather than the visual editor. Mirrors the same logic in apps/web/src/lib/emailStyles.ts.
  *
  * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
- * ResizableImage + EmailButton + EmailDivider + EmailSpacer + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
- * <a style="..."> markup. This detection therefore PERMITS span + inline styles and only
- * REJECTS markup TipTap cannot represent (tables, divs, forms, embeds, custom attrs,
- * <style> blocks, etc).
+ * ResizableImage + EmailButton + EmailDivider (styled <hr>) + EmailSpacer + VariableMention.
+ * TextStyle/Color/Link round-trip <span style="..."> and <a style="..."> markup. This detection
+ * therefore PERMITS span + inline styles and only REJECTS markup TipTap cannot represent (tables,
+ * divs, forms, embeds, custom attrs, <style> blocks, etc).
  */
 function detectCustomHtmlPatterns(html: string): boolean {
   if (!html || html.trim() === '') return false;
@@ -179,7 +179,7 @@ function convertSpacers($: CheerioAPI): void {
   $('hr.email-spacer').each((_, element) => {
     const height = readSpacerHeight($(element).attr('style'));
     $(element).replaceWith(
-      `<div class="email-spacer" style="height:${height}px;line-height:${height}px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>`,
+      `<div data-plunk-spacer style="height:${height}px;line-height:${height}px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>`,
     );
   });
 }

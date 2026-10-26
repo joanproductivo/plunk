@@ -22,10 +22,10 @@ function hasRichButton(html: string): boolean {
 //
 // The TipTap editor in EmailEditor.tsx loads: StarterKit (paragraphs, headings, lists,
 // blockquote, code, hr, bold, italic, strike, etc.), TextAlign, Color, TextStyle, Link,
-// ResizableImage, EmailButton, EmailDivider (styled hr), EmailSpacer, and VariableMention. Of these, TextStyle + Color + Link natively
-// round-trip <span style="color: ..."> / <a style="color: ..."> markup that TipTap itself
-// generates when you change text color or style a link. We must therefore PERMIT what
-// TipTap can represent and REJECT only what it can't.
+// ResizableImage, EmailButton, EmailDivider (styled <hr>), EmailSpacer, and VariableMention. Of
+// these, TextStyle + Color + Link natively round-trip <span style="color: ..."> /
+// <a style="color: ..."> markup that TipTap itself generates when you change text color or
+// style a link. We must therefore PERMIT what TipTap can represent and REJECT only what it can't.
 export const detectCustomHtmlPatterns = (html: string): boolean => {
   if (!html || html.trim() === '') return false;
 

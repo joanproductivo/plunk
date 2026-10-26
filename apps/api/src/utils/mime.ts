@@ -29,7 +29,7 @@ export function htmlToPlainText(html: string): string {
       // the body; the preheader text itself stays, as it is part of the message.
       {selector: 'span[data-plunk-preheader-fill]', format: 'skip'},
       // Editor spacers are empty space, sent as a div (or left as an <hr> if converting failed).
-      {selector: 'div.email-spacer', format: 'skip'},
+      {selector: 'div[data-plunk-spacer]', format: 'skip'},
       {selector: 'hr.email-spacer', format: 'skip'},
       // Plunk's editor emits table-based layout, not tabular data. Rendering those as
       // ASCII tables would turn a normal email into a wall of pipes and dashes.

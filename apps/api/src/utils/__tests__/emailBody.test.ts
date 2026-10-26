@@ -225,14 +225,14 @@ describe('renderBody', () => {
 
       expect(html).not.toContain('<hr');
       expect(html).toContain(
-        '<div class="email-spacer" style="height:48px;line-height:48px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>',
+        '<div data-plunk-spacer style="height:48px;line-height:48px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>',
       );
     });
 
     it('writes a hand-written height as a number within bounds, or the default', () => {
       const heightOf = (style: string) =>
         renderBody(`<hr class="email-spacer" style="${style}">`).match(
-          /<div class="email-spacer" style="height:(\d+)px/,
+          /<div data-plunk-spacer style="height:(\d+)px/,
         )?.[1];
 
       expect(heightOf('height: 999px')).toBe('200');

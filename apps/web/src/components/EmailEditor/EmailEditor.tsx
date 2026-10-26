@@ -179,8 +179,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   });
 
   const button = useBlockDialog<ButtonAttrs>(editor, 'button');
-  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', chain => chain.setHorizontalRule());
-  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', chain => chain.insertContent({type: 'spacer'}));
+  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
+  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -961,7 +961,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         }
 
         .resizable-image-container.selected,
-        .ProseMirror .ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-button.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-spacer.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
