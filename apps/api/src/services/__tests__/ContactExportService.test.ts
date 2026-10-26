@@ -158,11 +158,11 @@ describe('ContactExportService', () => {
     expect(imported.subscribed).toBe(true);
     expect(imported.segments).toBe('');
     expect(imported.data).toEqual({
-      'data.status': 'gold',
-      'formula': '=1+1',
-      'handle': '@ana',
-      'note': 'a, "quoted"\nline',
-      'phone': '+34 600 00 00 00',
+      status: 'gold',
+      formula: '=1+1',
+      handle: '@ana',
+      note: 'a, "quoted"\nline',
+      phone: '+34 600 00 00 00',
     });
   });
 });

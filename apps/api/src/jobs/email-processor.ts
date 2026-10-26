@@ -24,6 +24,7 @@ import {
 } from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {CampaignService} from '../services/CampaignService.js';
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {
   bodyHasListManagementLink,
   buildEmailHeaders,
@@ -104,7 +105,7 @@ export async function createEmailWorker() {
           contact: true,
           project: true,
           template: {select: {type: true}},
-          campaign: {select: {type: true, status: true}},
+          campaign: {select: {type: true, status: true, name: true}},
         },
       });
 
@@ -178,6 +179,12 @@ export async function createEmailWorker() {
       // read fails this attempt before the email is marked, so BullMQ's retry sends it, rather
       // than it going out without the project's footer.
       const footers = await ProjectFooterService.forEmail(emailClass, email.projectId);
+
+      // Set once SES has the email: a failure after that (counters, billing, events) does not
+      // mean the email was not sent, so it is not reported as one.
+      let accepted = false;
+      // The phishing check disables the project, which reports the failure itself
+      let disabledForPolicy = false;
 
       try {
         // Update status to sending
@@ -268,6 +275,7 @@ export async function createEmailWorker() {
             phishingCheck.confidence,
             'Phishing content detected',
           );
+          disabledForPolicy = true;
 
           // Mark email as failed
           await prisma.email.update({
@@ -297,6 +305,7 @@ export async function createEmailWorker() {
           tracking: shouldTrack,
           attachments: email.attachments as {filename: string; content: string; contentType: string}[] | null,
         });
+        accepted = true;
 
         // Mark as sent with SES message ID.
         //
@@ -375,6 +384,10 @@ export async function createEmailWorker() {
             error: error instanceof Error ? error.message : 'Unknown error',
           },
         });
+
+        if (!accepted && !disabledForPolicy) {
+          await FailureAlertService.recordEmail(email, error instanceof Error ? error.message : 'Unknown error');
+        }
 
         throw error; // Re-throw to trigger retry
       }

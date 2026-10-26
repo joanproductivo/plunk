@@ -2,7 +2,8 @@ import type {ContactImportJobData} from '@plunk/types';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createMockJob, factories, getPrismaClient} from '../../../../../test/helpers';
 import {ContactService} from '../../services/ContactService.js';
-import {coerceCustomValue, parseImportCsv, splitImportRecord} from '../import-csv.js';
+import {SegmentService} from '../../services/SegmentService.js';
+import {coerceCustomValue, importCustomData, importFieldKey, parseImportCsv, splitImportRecord} from '../import-csv.js';
 import {processContactImport} from '../import-processor.js';
 
 /**
@@ -388,6 +389,13 @@ describe('splitImportRecord', () => {
     });
   });
 
+  it('fills a custom field from a data. column without touching the column of the same name', () => {
+    const split = splitImportRecord({'email': 'a@example.com', 'status': 'unsubscribed', 'data.status': 'gold'});
+
+    expect(split.statusSubscription).toBe(false);
+    expect(split.data).toEqual({status: 'gold'});
+  });
+
   it('writes no custom data when only reserved columns are present', () => {
     expect(splitImportRecord({email: 'a@example.com', status: 'subscribed'}).data).toBeUndefined();
   });
@@ -416,6 +424,25 @@ describe('processContactImport', () => {
   const subscriptionEvents = (contactId: string) =>
     prisma.event.count({where: {contactId, name: {in: ['contact.subscribed', 'contact.unsubscribed']}}});
 
+  it('imports a dotted date column that within and olderThan filters can use', async () => {
+    // Flodesk writes dates without milliseconds; the filters compare against toISOString(), with them
+    const daysAgo = (days: number) =>
+      new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+    await runImport(`email,metafields.lastOpen\nrecent@example.test,${daysAgo(1)}\nold@example.test,${daysAgo(40)}`);
+
+    const matching = async (operator: 'within' | 'olderThan') => {
+      const where = await SegmentService.buildConditionClause(projectId, {
+        logic: 'AND',
+        groups: [{filters: [{field: 'data.metafields_lastopen', operator, value: 30, unit: 'days'}]}],
+      });
+      const contacts = await prisma.contact.findMany({where: {projectId, ...where}, select: {email: true}});
+      return contacts.map(contact => contact.email);
+    };
+    expect(await matching('within')).toEqual(['recent@example.test']);
+    expect(await matching('olderThan')).toEqual(['old@example.test']);
+  });
+
   it('imports a row shaped like the Flodesk export: date, opt-out and three segments', async () => {
     const result = await runImport(
       [
@@ -430,10 +457,10 @@ describe('processContactImport', () => {
     expect(ana.createdAt).toEqual(new Date('2023-04-05T08:09:10Z'));
     expect(ana.subscribed).toBe(false);
     expect(ana.data).toEqual({
-      'firstname': 'Ana',
-      'lastname': 'Ruiz',
-      'source': 'form',
-      'metafields.lastip': '192.0.2.1',
+      firstname: 'Ana',
+      lastname: 'Ruiz',
+      source: 'form',
+      metafields_lastip: '192.0.2.1',
     });
     const bo = await contactNamed('bo@example.test');
     expect(bo.createdAt).toEqual(new Date('2022-01-02T03:04:05Z'));
@@ -617,5 +644,47 @@ describe('ContactService.upsert createdAt', () => {
       createdAt,
     });
     expect(updated.createdAt).toEqual(existing.createdAt);
+  });
+});
+
+describe('importFieldKey', () => {
+  it('stores a dot in a column name as an underscore, so filters and templates can reach it', () => {
+    expect(importFieldKey('metafields.lastopen')).toBe('metafields_lastopen');
+    expect(importFieldKey('a..b')).toBe('a__b');
+  });
+
+  it('drops a leading data. prefix', () => {
+    expect(importFieldKey('data.plan')).toBe('plan');
+    expect(importFieldKey('data.a.b')).toBe('a_b');
+    expect(importFieldKey('data.')).toBe('data_');
+  });
+
+  it('leaves other names alone', () => {
+    expect(importFieldKey('plan')).toBe('plan');
+    expect(importFieldKey('first name')).toBe('first name');
+    expect(importFieldKey('database')).toBe('database');
+  });
+});
+
+describe('importCustomData', () => {
+  it('fills each field from its column, coercing the values', () => {
+    expect(importCustomData({'plan': 'pro', 'metafields.lastopen': '2026-10-24T20:35:24Z', 'age': '42'})).toEqual({
+      plan: 'pro',
+      metafields_lastopen: '2026-10-24T20:35:24Z',
+      age: 42,
+    });
+    expect(importCustomData({})).toBeUndefined();
+  });
+
+  it('never lets an empty cell erase another column filling the same field', () => {
+    expect(importCustomData({'plan': 'pro', 'data.plan': ''})).toEqual({plan: 'pro'});
+    expect(importCustomData({'plan': '', 'data.plan': 'pro'})).toEqual({plan: 'pro'});
+    expect(importCustomData({'a.b': 'one', 'a_b': 'two'})).toEqual({a_b: 'two'});
+  });
+
+  it('keeps an unusual field name as its own key', () => {
+    const data = importCustomData({'data.__proto__': 'x'});
+    expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+    expect(Object.keys(data!)).toEqual(['__proto__']);
   });
 });

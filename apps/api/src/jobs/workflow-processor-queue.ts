@@ -7,6 +7,7 @@ import type {WorkflowStepJobData} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {workflowQueue} from '../services/QueueService.js';
 import {WorkflowExecutionService} from '../services/WorkflowExecutionService.js';
 
@@ -40,6 +41,9 @@ export function createWorkflowWorker() {
 
   worker.on('failed', (job, err) => {
     signale.error(`[WORKFLOW-PROCESSOR] Job ${job?.id} failed:`, err.message);
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      void FailureAlertService.recordWorkflowJob(job.data.executionId, err.message);
+    }
   });
 
   worker.on('error', err => {

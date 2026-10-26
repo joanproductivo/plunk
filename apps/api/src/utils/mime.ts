@@ -82,6 +82,16 @@ export function encodeQuotedPrintable(input: string): string {
     .join('\n');
 }
 
+const utf8 = new TextEncoder();
+
+/**
+ * A byte as two upper-case hex digits, the form both `=XX` (quoted-printable, RFC 2047)
+ * and `%XX` (RFC 2231) escapes use.
+ */
+function hexByte(byte: number): string {
+  return byte.toString(16).toUpperCase().padStart(2, '0');
+}
+
 /**
  * Encode one line into atomic tokens, each either a literal character or an `=XX` group.
  *
@@ -94,7 +104,7 @@ function encodeLineTokens(line: string): string[] {
   // Byte-wise, not character-wise: a multi-byte UTF-8 character must become one `=XX`
   // group per byte. Iterating JS characters would emit code points instead and produce
   // something no decoder can read back.
-  const bytes = new TextEncoder().encode(line);
+  const bytes = utf8.encode(line);
 
   return Array.from(bytes, byte => {
     // `=` starts an escape, so it must itself be escaped.
@@ -105,7 +115,7 @@ function encodeLineTokens(line: string): string[] {
     if (byte === 9 || byte === 32 || (byte >= 33 && byte <= 126)) {
       return String.fromCharCode(byte);
     }
-    return `=${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+    return `=${hexByte(byte)}`;
   });
 }
 
@@ -157,56 +167,144 @@ function wrapQuotedPrintableLine(tokens: string[]): string {
 const Q_LITERAL = /^[A-Za-z0-9!*+\-/]$/;
 
 /**
- * RFC 2047 §2 caps an encoded-word at 75 characters; `=?UTF-8?Q?` and `?=` take 12.
+ * Payload of one encoded-word. RFC 2047 §2 allows 75 characters per word and 76 per
+ * line; 40 plus the 12 of `=?UTF-8?Q?…?=` leaves room for the header name on the
+ * first line.
  */
-const ENCODED_WORD_PAYLOAD = 63;
+const ENCODED_WORD_PAYLOAD = 40;
 
 /**
- * Collapse line breaks in a header value into spaces.
- *
- * Subjects and sender names come from user content, and a CR or LF there would end
- * the header early: whatever follows lands in a header of its own, or in the body.
+ * attribute-char from RFC 2231 §7: a token character of RFC 2045 other than `*`, `'`
+ * and `%`. Note that `encodeURIComponent` leaves `'`, `(`, `)` and `*` alone, so it
+ * cannot be used for this.
  */
-function toSingleLine(value: string): string {
-  return value.replace(/[\r\n]+/g, ' ');
+const ATTRIBUTE_CHAR = /^[A-Za-z0-9!#$&+\-.^_`{|}~]$/;
+
+/**
+ * Longest `%XX`-encoded segment of an RFC 2231 parameter: ` filename*0*=UTF-8''` takes
+ * 20 characters and the `;` after it one more, which keeps the line within 78.
+ */
+const PARAMETER_SEGMENT = 56;
+
+/**
+ * The line length RFC 5322 §2.1.1 asks header lines to keep to.
+ */
+const LINE_LENGTH = 78;
+
+/**
+ * The longest line RFC 5322 §2.1.1 allows, not counting the line break.
+ */
+const MAX_LINE_LENGTH = 998;
+
+/**
+ * Make user text safe to place in a header.
+ *
+ * Subjects, sender names and filenames come from user content. A CR or LF there would
+ * end the header early, so whatever follows lands in a header of its own or in the
+ * body; each becomes a space, as do tabs. Other control characters have no visible
+ * form and are dropped: a NUL in a decoded subject is enough to break some receiving
+ * systems.
+ */
+function sanitizeHeaderText(value: string): string {
+  // Matching control characters is the point of this pattern.
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/\r\n|[\r\n\t]/g, ' ').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+}
+
+/**
+ * Whether text can go into a header as it is: printable ASCII, and without `=?`,
+ * which a client could misread as the start of an encoded-word.
+ */
+function isPlainAscii(value: string): boolean {
+  return /^[\x20-\x7E]*$/.test(value) && !value.includes('=?');
+}
+
+/**
+ * Wrap text in a quoted-string (RFC 5322 §3.2.4), escaping `"` and `\`.
+ */
+function quoteString(value: string): string {
+  return `"${value.replace(/(["\\])/g, '\\$1')}"`;
+}
+
+/**
+ * Fold ASCII text so header lines stay within 78 characters where spaces allow it.
+ *
+ * The text is cut into chunks of a word with the spaces before it, and a fold goes
+ * before a chunk, so its leading space is the one the fold sits on. Every line then
+ * carries a word: a line of nothing but spaces is obsolete syntax, and a relay that
+ * trims trailing whitespace turns it into the blank line that ends the header section.
+ * Unfolding (RFC 5322 §2.2.3) removes only the line breaks, so the text reads back
+ * unchanged.
+ *
+ * Returns `null` when a single chunk cannot fit within 998 characters.
+ */
+function foldAtSpaces(text: string, prefixLength: number): string | null {
+  if (prefixLength + text.length <= LINE_LENGTH) {
+    return text;
+  }
+
+  // Trailing spaces stay with the last word, so they never form a line of their own.
+  const chunks = text.match(/ *[^ ]+ *$| *[^ ]+/g);
+  if (!chunks) {
+    return text;
+  }
+
+  const lines: string[] = [];
+  let current = '';
+  let used = prefixLength;
+
+  for (const chunk of chunks) {
+    // A chunk opening a continuation line starts with the space the fold sits on.
+    if (current.length > 0 && used + current.length + chunk.length > LINE_LENGTH && chunk.startsWith(' ')) {
+      lines.push(current);
+      current = '';
+      used = 0;
+    }
+    current += chunk;
+    if (used + current.length > MAX_LINE_LENGTH) {
+      return null;
+    }
+  }
+  lines.push(current);
+
+  return lines.join('\n');
 }
 
 /**
  * Encode a header value for the wire (RFC 2047).
  *
- * RFC 5322 headers are ASCII. UTF-8 written raw into `Subject` or a display name is
- * what SpamAssassin scores as `SUBJ_ILLEGAL_CHARS`, and SES expects non-ASCII sender
- * names as encoded-words because it does not support SMTPUTF8. ASCII values are left
- * as they are, since encoding them anyway is itself a spam signal; the exception is a
- * value containing `=?`, which a client could misread as the start of an encoded-word.
+ * RFC 5322 headers are ASCII: raw UTF-8 needs SMTPUTF8 (RFC 6532), which SES does not
+ * support, so non-ASCII text goes out as "Q" encoded-words. Plain ASCII is left as it
+ * is, only folded when long; a run without spaces too long to fit on one line is
+ * encoded instead, as encoded-words can always be split. `prefixLength` is the length
+ * of what precedes the value on its first line, such as `Subject: `.
  *
- * Words are split on character boundaries, as §5 requires, and folded onto their
- * own lines, so a long subject also stays well within the 998-character line limit.
+ * Words are split on character boundaries, as §5 requires, each on a line of its own.
  */
-export function encodeHeaderValue(value: string): string {
-  const singleLine = toSingleLine(value);
+export function encodeHeaderValue(value: string, prefixLength = 0): string {
+  const text = sanitizeHeaderText(value);
 
-  if (/^[\x20-\x7E]*$/.test(singleLine) && !singleLine.includes('=?')) {
-    return singleLine;
+  if (isPlainAscii(text)) {
+    const folded = foldAtSpaces(text, prefixLength);
+    if (folded !== null) {
+      return folded;
+    }
   }
 
   const words: string[] = [];
   let current = '';
 
-  for (const char of singleLine) {
+  for (const char of text) {
     let token: string;
     if (char === ' ') {
       token = '_';
     } else if (Q_LITERAL.test(char)) {
       token = char;
     } else {
-      token = Array.from(
-        new TextEncoder().encode(char),
-        byte => `=${byte.toString(16).toUpperCase().padStart(2, '0')}`,
-      ).join('');
+      token = Array.from(utf8.encode(char), byte => `=${hexByte(byte)}`).join('');
     }
 
-    if (current.length + token.length > ENCODED_WORD_PAYLOAD) {
+    if (current.length > 0 && current.length + token.length > ENCODED_WORD_PAYLOAD) {
       words.push(current);
       current = '';
     }
@@ -223,25 +321,66 @@ export function encodeHeaderValue(value: string): string {
  * Format an address with an optional display name, as for `From` or `To`.
  *
  * A name with RFC 5322 specials (a comma, a dot, parentheses…) has to be quoted, or
- * `Joan, from Plunk <a@b.c>` reads as two addresses and the header stops being
+ * `Jane, from Acme <a@b.c>` reads as two addresses and the header stops being
  * valid. Non-ASCII names become encoded-words instead, which cannot appear inside
  * quotes.
  */
 export function formatMailbox(name: string | undefined, email: string): string {
-  const displayName = toSingleLine(name ?? '').trim();
+  const displayName = sanitizeHeaderText(name ?? '').trim();
 
   if (!displayName) {
     return email;
   }
 
+  if (!isPlainAscii(displayName)) {
+    return `${encodeHeaderValue(displayName)} <${email}>`;
+  }
+
   // atext from RFC 5322 §3.2.3, plus the spaces between words of a phrase.
-  if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]+$/.test(displayName) && !displayName.includes('=?')) {
+  if (/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~ ]+$/.test(displayName)) {
     return `${displayName} <${email}>`;
   }
 
-  if (/^[\x20-\x7E]+$/.test(displayName) && !displayName.includes('=?')) {
-    return `"${displayName.replace(/(["\\])/g, '\\$1')}" <${email}>`;
+  return `${quoteString(displayName)} <${email}>`;
+}
+
+/**
+ * Format the `filename` parameter of a `Content-Disposition` header.
+ *
+ * ASCII names go in a quoted-string. Anything else uses RFC 2231: the UTF-8 bytes
+ * `%XX`-encoded, split into numbered segments (`filename*0*`, `filename*1*`…) when long,
+ * each on its own line. Segments end on character boundaries: the standard allows a
+ * character to span two, but decoders that work segment by segment would garble it.
+ * The caller puts the result on a line of its own, after `attachment;` or `inline;`.
+ */
+export function formatFilenameParameter(filename: string): string {
+  const name = sanitizeHeaderText(filename);
+
+  if (isPlainAscii(name)) {
+    return `filename=${quoteString(name)}`;
   }
 
-  return `${encodeHeaderValue(displayName)} <${email}>`;
+  const segments: string[] = [];
+  let current = '';
+
+  for (const char of name) {
+    const token = ATTRIBUTE_CHAR.test(char)
+      ? char
+      : Array.from(utf8.encode(char), byte => `%${hexByte(byte)}`).join('');
+
+    if (current.length > 0 && current.length + token.length > PARAMETER_SEGMENT) {
+      segments.push(current);
+      current = '';
+    }
+    current += token;
+  }
+  segments.push(current);
+
+  if (segments.length === 1) {
+    return `filename*=UTF-8''${segments[0]}`;
+  }
+
+  return segments
+    .map((segment, index) => (index === 0 ? `filename*0*=UTF-8''${segment}` : `filename*${index}*=${segment}`))
+    .join(';\n ');
 }

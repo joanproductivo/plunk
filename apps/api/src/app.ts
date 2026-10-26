@@ -28,6 +28,7 @@ import {
 } from './app/constants.js';
 import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';
+import {Alerts} from './controllers/Alerts.js';
 import {Analytics} from './controllers/Analytics.js';
 import {Auth} from './controllers/Auth.js';
 import {Brand} from './controllers/Brand.js';
@@ -165,6 +166,7 @@ const server = new (class extends Server {
     this.addControllers([
       new Actions(),
       new Activity(),
+      new Alerts(),
       new Analytics(),
       new Auth(),
       new Brand(),

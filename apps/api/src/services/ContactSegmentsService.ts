@@ -64,7 +64,7 @@ export class ContactSegmentsService {
     for (const segment of segments) {
       try {
         const condition = fromPrismaJson<FilterCondition>(segment.condition);
-        const where = await SegmentService.buildConditionClause(condition);
+        const where = await SegmentService.buildConditionClause(projectId, condition);
         if (probe) {
           await prisma.contact.findFirst({where: {AND: [{projectId}, where]}, select: {id: true}});
         }

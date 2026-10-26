@@ -57,7 +57,8 @@ export class ContactExportService {
 
     const customKeys = await ContactService.getCustomFieldKeys(projectId);
     const fixed = new Set(FIXED_COLUMNS.map(column => column.toLowerCase()));
-    // A custom field named like a fixed column would make two identical headers.
+    // A custom field named like a fixed column would make two identical headers; the import
+    // reads `data.<field>` back as that field (see importFieldKey).
     const customHeaders = customKeys.map(key => (fixed.has(key.toLowerCase()) ? `data.${key}` : key));
 
     const dynamicSegments = await ContactSegmentsService.loadDynamicSegments(projectId);

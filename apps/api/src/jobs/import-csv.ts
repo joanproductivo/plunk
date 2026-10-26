@@ -87,9 +87,9 @@ export function splitImportRecord(
   const createdAt = createdat.trim() === '' ? undefined : parseImportDate(createdat);
 
   // Custom data: every other column except the read-only ones
-  const customEntries = Object.entries(rest).filter(([key]) => !READ_ONLY_COLUMNS.has(key));
-  const data =
-    customEntries.length > 0 ? Object.fromEntries(customEntries.map(([k, v]) => [k, coerceCustomValue(v)])) : undefined;
+  const data = importCustomData(
+    Object.fromEntries(Object.entries(rest).filter(([key]) => !READ_ONLY_COLUMNS.has(key))),
+  );
 
   return {
     email: email?.trim() ?? '',
@@ -212,6 +212,39 @@ export function parseImportDate(value: string, now = new Date()): Date | null {
     return null;
   }
   return new Date(Math.min(time, now.getTime()));
+}
+
+/**
+ * The custom field a CSV column fills. Segment filters, workflow conditions and templates read a
+ * dot in a field name as nesting, so `metafields.lastOpen` is stored as `metafields_lastopen`
+ * rather than as a key none of them can reach. A leading `data.` names the field itself:
+ * `data.plan` fills `plan`, and the export's `data.Status` (a field named like a fixed column)
+ * comes back as the field `status` rather than as the subscription status.
+ *
+ * @param column The column name, already lowercased.
+ * @returns The field name to store the value under.
+ */
+export function importFieldKey(column: string): string {
+  return column.replace(/^data\.(?=.)/, '').replace(/\./g, '_');
+}
+
+/**
+ * The custom data a row's other columns fill, or `undefined` when there are none. Two columns can
+ * fill one field (`plan` and `data.plan`): an empty cell never erases the other's value.
+ *
+ * @param columns The row's cells by lowercased column name, without the reserved ones.
+ * @returns The fields to merge into the contact's data.
+ */
+export function importCustomData(
+  columns: Record<string, string>,
+): Record<string, string | boolean | number> | undefined {
+  const fields = new Map<string, string | boolean | number>();
+  for (const [column, value] of Object.entries(columns)) {
+    const field = importFieldKey(column);
+    if (value.trim() === '' && fields.has(field)) continue;
+    fields.set(field, coerceCustomValue(value));
+  }
+  return fields.size > 0 ? Object.fromEntries(fields) : undefined;
 }
 
 // Values considered as boolean during import.
