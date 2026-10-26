@@ -45,6 +45,8 @@ Go to **Segments** in the dashboard and click **Create Segment**, then choose **
 
 Open a static segment and use the **Add Members** search to find contacts. The search looks up contacts already in your project, so you can't accidentally add someone who doesn't exist. Contacts already in the segment are greyed out. To remove several members at once, tick them in the member list and click **Remove selected**.
 
+A contact's own page lists its segments too: the static ones it is in, which you can leave with the × or join from the picker, and, in grey, the dynamic ones whose filter it matches right now.
+
 For larger changes, use the **Contacts** page: filter by **Segment** (alongside the search and status filters), select contacts — or all matching — and click **Add to segment** or **Remove from segment**. This runs as a bulk job (`POST /contacts/bulk-add-to-segment` / `bulk-remove-from-segment`, polled with `GET /contacts/bulk/:jobId`) that changes the members in batches of 100. When the segment tracks membership, each batch's entry/exit events go through the same background queue as the API calls below. If the job is interrupted, it carries on from the last batch it finished instead of starting over. The batch it was in the middle of runs again: an add queues those entries a second time, and a removal counts those contacts as not in the segment, since they already left.
 
 Programmatically, use:
