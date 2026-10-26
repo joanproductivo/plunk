@@ -324,6 +324,8 @@ export class SecurityService {
             );
           }
 
+          await FailureAlertService.recordReputation(projectId, 'critical', status.violations);
+
           // Send notification about critical security violations
           await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
         }
@@ -344,6 +346,8 @@ export class SecurityService {
         });
 
         if (project) {
+          await FailureAlertService.recordReputation(projectId, 'warning', status.warnings);
+
           // Send notification about security warning
           await NtfyService.notifySecurityWarning(project.name, projectId, status.warnings);
         }

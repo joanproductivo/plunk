@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {prisma as servicePrisma} from '../../database/prisma';
+import {redis} from '../../database/redis';
 import {FailureAlertService} from '../FailureAlertService';
 import {SecurityService} from '../SecurityService';
 import {sendRawEmail} from '../SESService';
@@ -96,9 +97,9 @@ describe('FailureAlertService', () => {
       expect(await FailureAlertService.listOpen(projectId)).toHaveLength(1);
     });
 
-    it('never throws, whatever goes wrong', async () => {
+    it('never throws, whatever goes wrong, and says no alert is on its way', async () => {
       vi.spyOn(servicePrisma, '$queryRaw').mockRejectedValueOnce(new Error('database down'));
-      await expect(fail()).resolves.toBeUndefined();
+      await expect(fail()).resolves.toBe(false);
     });
   });
 
@@ -197,7 +198,7 @@ describe('FailureAlertService', () => {
       expect(params.tracking).toBe(false);
     });
 
-    it('records but sends nothing without addresses, for a disabled project, or from an unverified domain', async () => {
+    it('records but sends nothing without addresses, for a disabled project, or with no verified domain', async () => {
       await prisma.plunkLiteAlertSettings.deleteMany({where: {projectId}});
       await fail();
       await settle();
@@ -217,6 +218,135 @@ describe('FailureAlertService', () => {
       await settle();
       expect(sendRawEmail).not.toHaveBeenCalled();
       expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(3);
+    });
+  });
+
+  describe('sender', () => {
+    it("sends from the same name on another verified domain while the sender's is not verified", async () => {
+      const other = await factories.createDomain({projectId, domain: 'other.example.com'});
+      // Created later, so not the one chosen
+      await factories.createDomain({projectId, domain: 'third.example.com'});
+      await prisma.domain.updateMany({where: {projectId, domain: 'example.com'}, data: {verified: false}});
+
+      await fail();
+      await settle();
+
+      expect(vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.from.email)).toEqual([
+        `alerts@${other.domain}`,
+        `alerts@${other.domain}`,
+      ]);
+    });
+
+    it("does not take another project's domain of the same name for the sender's", async () => {
+      // The other project's comes first, as a lookup by name alone would find it
+      await prisma.domain.deleteMany({where: {projectId}});
+      const {project: otherProject} = await factories.createUserWithProject();
+      await factories.createDomain({projectId: otherProject.id, domain: 'example.com'});
+      await factories.createDomain({projectId, domain: 'example.com'});
+
+      await fail();
+      await settle();
+
+      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].from.email).toBe('alerts@example.com');
+    });
+  });
+
+  describe('conditions', () => {
+    const warning = (bounces: number) =>
+      `7-day bounce rate (${(bounces / 2).toFixed(2)}%, ${bounces} bounces) exceeds warning threshold (5%, 5 minimum)`;
+    const complaint = 'All-time complaint rate (0.050%, 4 complaints) exceeds warning threshold (0.03%, 3 minimum)';
+    const reputation = () => prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'security:warning'}});
+
+    it('alerts on the sending reputation as needing attention, not as a failure', async () => {
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12)]);
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({label: 'Sending reputation: warning', reviewPath: '/settings?tab=security'});
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.subject).toMatch(/\] Needs attention: Sending reputation: warning$/);
+      expect(params.content.html).toContain('Seen 1 time');
+      expect(params.content.html).toContain('Details: 7-day bounce rate');
+    });
+
+    it('records conditions alerted on again only after a day, and a new condition at once', async () => {
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12)]);
+      // The rate moved, but past the same threshold
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(14)]);
+      expect(await reputation()).toMatchObject({count: 1});
+
+      // An hour later, a new condition
+      await prisma.plunkLiteFailure.updateMany({
+        where: {projectId},
+        data: {notifiedAt: new Date(Date.now() - 2 * 60 * 60 * 1000)},
+      });
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(14), complaint]);
+      expect(await reputation()).toMatchObject({count: 2});
+      // One of them went away: no news either
+      await FailureAlertService.recordReputation(projectId, 'warning', [complaint]);
+      expect(await reputation()).toMatchObject({count: 2});
+      await settle();
+      expect(sendRawEmail).toHaveBeenCalledTimes(4);
+
+      // A day later, the same conditions are recorded again
+      await redis.del(`plunk-lite:alerts:reputation:${projectId}:warning`);
+      await FailureAlertService.recordReputation(projectId, 'warning', [complaint]);
+      expect(await reputation()).toMatchObject({count: 3});
+    });
+
+    it('keeps recording a new condition that came up within the hour, until its alert goes out', async () => {
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12)]);
+      // Within the hour of that alert: recorded, but not sent yet
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12), complaint]);
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12), complaint]);
+      expect(await reputation()).toMatchObject({count: 3});
+      await settle();
+      expect(sendRawEmail).toHaveBeenCalledTimes(2);
+
+      // Past the hour, the next event sends it
+      await prisma.plunkLiteFailure.updateMany({
+        where: {projectId},
+        data: {notifiedAt: new Date(Date.now() - 2 * 60 * 60 * 1000)},
+      });
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(13), complaint]);
+      await settle();
+      expect(sendRawEmail).toHaveBeenCalledTimes(4);
+      expect(vi.mocked(sendRawEmail).mock.calls[3]![0].content.html).toContain('All-time complaint rate');
+      // And from then on, those conditions are no news
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(13), complaint]);
+      expect(await reputation()).toMatchObject({count: 4});
+    });
+
+    it('keeps warnings and critical rates apart, in the project language', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
+      await FailureAlertService.recordReputation(projectId, 'warning', [warning(12)]);
+      await FailureAlertService.recordReputation(projectId, 'critical', [warning(30)]);
+      await settle();
+
+      expect((await FailureAlertService.listOpen(projectId)).map(failure => failure.sourceKey).sort()).toEqual([
+        'security:critical',
+        'security:warning',
+      ]);
+      const subjects = vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.content.subject);
+      expect(subjects.some(subject => subject.endsWith('Requiere atención: Reputación de envío: crítico'))).toBe(true);
+      expect(subjects.some(subject => subject.endsWith('Requiere atención: Reputación de envío: aviso'))).toBe(true);
+    });
+
+    it('alerts on a domain that stopped being verified, with a link to the domains', async () => {
+      const domain = await factories.createDomain({projectId, domain: 'news.example.com', verified: false});
+      await FailureAlertService.recordDomainUnverified(projectId, domain, 'Failed');
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({
+        sourceKey: `domain:${domain.id}`,
+        label: 'news.example.com',
+        reviewPath: '/settings?tab=domains',
+      });
+      expect(open!.lastError).toContain('SES reports the domain as Failed');
+      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].content.subject).toMatch(
+        /\] Needs attention: Domain "news\.example\.com"$/,
+      );
     });
   });
 
@@ -271,6 +401,17 @@ describe('FailureAlertService', () => {
       await expect(FailureAlertService.sendTest(projectId)).rejects.toThrow('Email address is not verified.');
 
       await expect(FailureAlertService.sendTest(projectId)).rejects.toMatchObject({code: 429});
+    });
+
+    it('goes from the saved sender only, so a sender whose domain is not verified shows up', async () => {
+      await factories.createDomain({projectId, domain: 'other.example.com'});
+      await prisma.domain.updateMany({where: {projectId, domain: 'example.com'}, data: {verified: false}});
+
+      await expect(FailureAlertService.sendTest(projectId)).rejects.toMatchObject({
+        code: 403,
+        message: 'The domain of alerts@example.com is not verified',
+      });
+      expect(sendRawEmail).not.toHaveBeenCalled();
     });
 
     it('needs addresses first', async () => {
