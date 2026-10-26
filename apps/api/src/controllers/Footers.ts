@@ -13,7 +13,7 @@ import {CatchAsync} from '../utils/asyncHandler.js';
 export class Footers {
   /**
    * GET /projects/:id/footers
-   * The project's own footers by language; languages without one get Plunk's.
+   * The project's own footers by language, and only those: the dashboard has Plunk's texts.
    */
   @Get(':id/footers')
   @Middleware([requireAuth, requireEmailVerified])
@@ -44,6 +44,9 @@ export class Footers {
       throw new HttpException(403, "A project's footers can only be changed in the dashboard", ErrorCode.FORBIDDEN);
     }
     const {id} = UtilitySchemas.id.parse(req.params);
+
+    await MembershipService.requireAdminAccess(auth.userId!, id);
+
     const body = FooterSchemas.update.safeParse(req.body);
     if (!body.success) {
       throw new HttpException(400, 'The footers must be an object', ErrorCode.INVALID_REQUEST_BODY);
@@ -52,8 +55,6 @@ export class Footers {
     if (errors.length > 0) {
       throw new HttpException(400, errors.join('; '), ErrorCode.VALIDATION_ERROR);
     }
-
-    await MembershipService.requireAdminAccess(auth.userId!, id);
 
     return res.status(200).json(await ProjectFooterService.save(id, footers));
   }

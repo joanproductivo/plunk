@@ -2,10 +2,11 @@ import {describe, expect, it} from 'vitest';
 
 import {createTranslatorSync} from '../i18n/index.js';
 import {
-  customFooterParagraph,
   footerParagraph,
+  isPlunkFooter,
   plunkFooterParagraph,
-  resolveFooterLanguage,
+  plunkFooterTemplate,
+  resolveContactLanguage,
   toProjectFooters,
   unsubscribeFooterHtml,
 } from '../template/index.js';
@@ -61,12 +62,49 @@ describe('toProjectFooters', () => {
       en: {text: '', linkText: 'unsubscribe'},
       de: {text: 'Hallo', linkText: '·'},
       fr: {text: 'x'.repeat(1001), linkText: 'désabonner'},
-      it: {text: 'Ciao', linkText: '123'},
+      it: {text: 'Ciao', linkText: '...'},
     });
 
     expect(footers).toEqual({});
     expect(errors).toHaveLength(6);
     expect(errors[0]).toBe('xx: not a supported language');
+  });
+
+  it('keeps the link visible: no invisible characters, and three letters or digits', () => {
+    const filler = String.fromCharCode(0x3164);
+    const zeroWidth = String.fromCharCode(0x200b);
+    const override = String.fromCharCode(0x202e);
+    for (const linkText of [filler.repeat(3), `x${zeroWidth}${zeroWidth}`, `${override}etadpu`, 'a\nb\nc', 'ab.']) {
+      expect(toProjectFooters({es: {text: 'Hola', linkText}}).errors).toEqual([
+        'es: the link text needs 3 to 100 visible letters or digits, on one line',
+      ]);
+    }
+    expect(toProjectFooters({es: {text: `Hola ${override}`, linkText: 'baja'}}).errors).toEqual([
+      'es: the text cannot hold characters that reorder it',
+    ]);
+    // A joiner inside an emoji is fine in the text
+    const family = `\u{1F468}${String.fromCharCode(0x200d)}\u{1F469}`;
+    expect(toProjectFooters({es: {text: `Hola ${family}`, linkText: 'baja'}}).errors).toEqual([]);
+  });
+
+  it('keeps the footer short: blank lines folded, few lines, links and names', () => {
+    expect(toProjectFooters({es: {text: 'a\n\n\n\n\nb', linkText: 'baja'}}).footers.es!.text).toBe('a\n\nb');
+    expect(toProjectFooters({es: {text: 'a\n'.repeat(10) + 'b', linkText: 'baja'}}).errors).toEqual([
+      'es: the text can have at most 10 lines',
+    ]);
+    expect(toProjectFooters({es: {text: '{link}'.repeat(3), linkText: 'baja'}}).errors).toEqual([
+      'es: the text can place the link at most 2 times',
+    ]);
+    expect(toProjectFooters({es: {text: '{projectName}'.repeat(4), linkText: 'baja'}}).errors).toEqual([
+      'es: the text can name the project at most 3 times',
+    ]);
+  });
+
+  it('lists only the first few reasons', () => {
+    const many = Object.fromEntries(Array.from({length: 40}, (_, index) => [`x${index}`, {}]));
+
+    expect(toProjectFooters(many).errors).toHaveLength(6);
+    expect(toProjectFooters(many).errors.at(-1)).toBe('and 35 more');
   });
 
   it('reads anything but an object as no footers', () => {
@@ -76,26 +114,28 @@ describe('toProjectFooters', () => {
   });
 });
 
-describe('resolveFooterLanguage', () => {
+describe('resolveContactLanguage', () => {
   it("takes the contact's locale as it is, regardless of case, or its base language", () => {
-    expect(resolveFooterLanguage('de', 'es')).toBe('de');
-    expect(resolveFooterLanguage('zh-tw', 'es')).toBe('zh-TW');
+    expect(resolveContactLanguage('de', 'es')).toBe('de');
+    expect(resolveContactLanguage('zh-tw', 'es')).toBe('zh-TW');
     for (const locale of ['es-ES', 'es_ES', 'ES', ' es ']) {
-      expect(resolveFooterLanguage(locale, 'en')).toBe('es');
+      expect(resolveContactLanguage(locale, 'en')).toBe('es');
     }
   });
 
   it("falls back to the project's language, then English, whatever the locale holds", () => {
     for (const locale of [undefined, null, '', 'xx', 'zh', 'constructor', '__proto__', 42, {}]) {
-      expect(resolveFooterLanguage(locale, 'de')).toBe('de');
+      expect(resolveContactLanguage(locale, 'de')).toBe('de');
     }
-    expect(resolveFooterLanguage('xx', null)).toBe('en');
-    expect(resolveFooterLanguage('xx', 'nonsense')).toBe('en');
+    expect(resolveContactLanguage('xx', null)).toBe('en');
+    expect(resolveContactLanguage('xx', 'nonsense')).toBe('en');
   });
 });
 
-describe('customFooterParagraph', () => {
+describe('a footer of its own', () => {
   const href = 'https://app.example.com/unsubscribe/c1';
+  const customFooterParagraph = (footer: {text: string; linkText: string}, projectName: string, url: string) =>
+    footerParagraph({language: 'es', projectName, href: url, footers: {es: footer}});
 
   it('escapes the text, the link text and the project name', () => {
     const html = customFooterParagraph({text: '<b>{projectName}</b>', linkText: '<i>leave</i>'}, 'A & <B>', href);
@@ -132,5 +172,19 @@ describe('footerParagraph', () => {
       plunkFooterParagraph('de', 'Acme', href),
     );
     expect(footerParagraph({language: 'es', projectName: 'Acme', href})).toBe(plunkFooterParagraph('es', 'Acme', href));
+  });
+});
+
+describe("Plunk's footer as a starting point", () => {
+  it("sends just like Plunk's own when left as it is, and needs no footer of its own", () => {
+    for (const language of ['es', 'de', 'ja']) {
+      const template = plunkFooterTemplate(language);
+      const own = footerParagraph({language, projectName: 'Acme', href: '#', footers: {[language]: template}});
+      const flat = (html: string) => html.replace(/\s+/g, ' ');
+
+      expect(flat(own)).toBe(flat(plunkFooterParagraph(language, 'Acme', '#')));
+      expect(isPlunkFooter(template, language)).toBe(true);
+      expect(isPlunkFooter({...template, linkText: 'otro'}, language)).toBe(false);
+    }
   });
 });

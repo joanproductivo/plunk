@@ -25,8 +25,8 @@ export const wrapStoredEmail = (stored: string): string => {
 };
 
 /**
- * Visual editor content in its brand with an unsubscribe footer, `footerParagraph` being the HTML
+ * Visual editor content in its brand with an unsubscribe footer, `paragraph` being the HTML
  * inside it, placed where sending places it: at the end of a framed email's column, or at the end.
  */
-export const wrapEmailWithFooter = (htmlBody: string, brand: EmailBrand, footerParagraph: string): string =>
-  insertFooter(wrapEmailWithStyles(htmlBody, brand), unsubscribeFooterHtml(footerParagraph), isFramedBrand(brand));
+export const wrapEmailWithFooter = (htmlBody: string, brand: EmailBrand, paragraph: string): string =>
+  insertFooter(wrapEmailWithStyles(htmlBody, brand), unsubscribeFooterHtml(paragraph), isFramedBrand(brand));

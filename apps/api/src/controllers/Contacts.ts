@@ -1,7 +1,7 @@
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
-import {ContactSchemas} from '@plunk/shared';
+import {ContactSchemas, resolveContactLanguage} from '@plunk/shared';
 import type {BulkContactActionSelector} from '@plunk/types';
 import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
@@ -258,15 +258,11 @@ export class Contacts {
       throw new HttpException(404, 'Contact not found');
     }
 
-    // Get contact-level locale (overrides project language)
-    const contactLocale =
-      contact.data &&
-      typeof contact.data === 'object' &&
-      !Array.isArray(contact.data) &&
-      'locale' in contact.data &&
-      typeof contact.data.locale === 'string'
-        ? contact.data.locale
-        : null;
+    // The contact's language, chosen as for the footer that links here (their locale, else the project's)
+    const locale =
+      contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
+        ? (contact.data as Record<string, unknown>).locale
+        : undefined;
 
     return res.status(200).json({
       id: contact.id,
@@ -279,7 +275,7 @@ export class Contacts {
       // opting out of before they act. Already printed in the footer of every marketing email
       // this contact received, so it discloses nothing the link holder has not seen.
       projectName: project.name,
-      language: contactLocale || project.language || 'en',
+      language: resolveContactLanguage(locale, project.language),
     });
   }
 

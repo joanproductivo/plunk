@@ -10,7 +10,7 @@ import {
   footerParagraph,
   type ProjectFooters,
   renderTemplate,
-  resolveFooterLanguage,
+  resolveContactLanguage,
   unsubscribeFooterHtml,
 } from '@plunk/shared';
 
@@ -359,7 +359,7 @@ export class EmailService {
 
           return unsubscribeFooterHtml(
             footerParagraph({
-              language: resolveFooterLanguage(locale, project.language),
+              language: resolveContactLanguage(locale, project.language),
               projectName: project.name,
               href: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
               footers,

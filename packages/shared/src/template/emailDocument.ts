@@ -87,7 +87,7 @@ export function detectCustomHtmlPatterns(html: string): boolean {
 }
 
 /** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
-export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
+const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
 
 /** The rounding of a framed email's column, in px. Outlook for Windows ignores it and squares it. */
 export const EMAIL_COLUMN_RADIUS = 12;

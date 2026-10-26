@@ -165,6 +165,19 @@ export async function createEmailWorker() {
         return;
       }
 
+      // Classify the email once: it decides both the unsubscribe footer and the
+      // standards-based headers below.
+      const emailClass = classifyEmail({
+        sourceType: email.sourceType,
+        templateType: email.template?.type,
+        campaignType: email.campaign?.type,
+      });
+
+      // The project's own unsubscribe footers, read while the email is still pending: a failed
+      // read fails this attempt before the email is marked, so BullMQ's retry sends it, rather
+      // than it going out without the project's footer.
+      const footers = await ProjectFooterService.forEmail(emailClass, email.projectId);
+
       try {
         // Update status to sending
         await prisma.email.update({
@@ -187,14 +200,6 @@ export async function createEmailWorker() {
           },
         });
 
-        // Classify the email once: it decides both the unsubscribe footer and the
-        // standards-based headers below.
-        const emailClass = classifyEmail({
-          sourceType: email.sourceType,
-          templateType: email.template?.type,
-          campaignType: email.campaign?.type,
-        });
-
         // Compile HTML with unsubscribe footer and badge.
         // Only marketing emails get the unsubscribe footer: the project's own, or Plunk's.
         const compiledHtml = EmailService.compile({
@@ -203,7 +208,7 @@ export async function createEmailWorker() {
           project: email.project,
           includeUnsubscribe: emailClass === 'marketing',
           sourceEmailId: emailId,
-          footers: await ProjectFooterService.forEmail(emailClass, email.projectId),
+          footers,
         });
 
         // Use fromName from database if available, otherwise fall back to project name

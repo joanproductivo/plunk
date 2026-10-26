@@ -1,5 +1,6 @@
 import {type ProjectFooters, toProjectFooters} from '@plunk/shared';
 import {toPrismaJson} from '@plunk/types';
+import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 
@@ -19,7 +20,17 @@ export class ProjectFooterService {
       return hit.footers;
     }
 
-    const row = await prisma.plunkLiteProjectFooters.findUnique({where: {projectId}});
+    let row;
+    try {
+      row = await prisma.plunkLiteProjectFooters.findUnique({where: {projectId}});
+    } catch (error) {
+      // The last footers read, however old, beat none: only a project never read fails the email
+      if (hit) {
+        signale.warn(`[FOOTERS] Failed to read the footers of project ${projectId}, using the last read:`, error);
+        return hit.footers;
+      }
+      throw error;
+    }
     const {footers} = toProjectFooters(row?.footers);
     this.remember(projectId, footers);
     return footers;
@@ -27,7 +38,8 @@ export class ProjectFooterService {
 
   /**
    * The footers a marketing email is sent with; none for other emails, which carry no footer. A
-   * failed read throws, so the email is retried rather than sent without the project's footer.
+   * failed read with nothing read before throws: the worker reads them before marking the email,
+   * so the job is retried rather than the email sent without the project's footer.
    */
   public static async forEmail(emailClass: string, projectId: string): Promise<ProjectFooters | undefined> {
     return emailClass === 'marketing' ? this.get(projectId) : undefined;

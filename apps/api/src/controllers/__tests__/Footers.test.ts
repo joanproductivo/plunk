@@ -75,8 +75,17 @@ describe('/projects/:id/footers', () => {
     });
 
     expect((error as HttpException).code).toBe(400);
-    expect((error as HttpException).message).toContain('es: the link text needs 3 to 100 characters');
+    expect((error as HttpException).message).toContain('es: the link text needs 3 to 100 visible letters or digits');
     expect((error as HttpException).message).toContain('xx: not a supported language');
+    expect(ProjectFooterService.save).not.toHaveBeenCalled();
+  });
+
+  it('checks the member is an admin before reading what they sent', async () => {
+    vi.mocked(MembershipService.requireAdminAccess).mockRejectedValueOnce(new HttpException(403, 'Admin only'));
+
+    const {error} = await call('saveFooters', SESSION, {xx: {}});
+
+    expect((error as HttpException).code).toBe(403);
     expect(ProjectFooterService.save).not.toHaveBeenCalled();
   });
 

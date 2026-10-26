@@ -54,7 +54,28 @@ describe('ProjectFooterService', () => {
     expect(await ProjectFooterService.get(projectId)).toEqual(footers);
   });
 
-  it('only reads footers for marketing emails, and lets a failed read fail the email', async () => {
+  it('keeps sending with the last footers read when a later read fails', async () => {
+    vi.useFakeTimers({toFake: ['Date']});
+    await ProjectFooterService.save(projectId, footers);
+    vi.setSystemTime(Date.now() + 61_000);
+    vi.spyOn(servicePrisma.plunkLiteProjectFooters, 'findUnique').mockRejectedValueOnce(new Error('database down'));
+
+    expect(await ProjectFooterService.get(projectId)).toEqual(footers);
+  });
+
+  it('forgets everything rather than grow past 1000 projects', async () => {
+    const read = vi.spyOn(servicePrisma.plunkLiteProjectFooters, 'findUnique').mockResolvedValue(null);
+    await ProjectFooterService.get(projectId);
+    for (let index = 0; index < 1000; index++) {
+      await ProjectFooterService.get(`project-${index}`);
+    }
+
+    // Read again: remembering the thousandth project forgot the first
+    await ProjectFooterService.get(projectId);
+    expect(read).toHaveBeenCalledTimes(1002);
+  });
+
+  it('only reads footers for marketing emails, and lets a first failed read fail the email', async () => {
     expect(await ProjectFooterService.forEmail('transactional', projectId)).toBeUndefined();
     expect(await ProjectFooterService.forEmail('headless', projectId)).toBeUndefined();
 

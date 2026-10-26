@@ -65,7 +65,7 @@ describe('FooterSettings', () => {
     await render();
 
     expect(fetcher).toHaveBeenCalledWith('/projects/project-1/footers');
-    expect(text().value).toContain('aceptaste recibir correos electrónicos de {projectName}');
+    expect(text().value).toMatch(/aceptaste recibir correos electrónicos de \{projectName\}.* por favor \{link\}\.$/);
     expect(link().value).toBe('actualiza tus preferencias');
     expect(preview()).toContain('de Acme');
     expect(buttonNamed("Restore Plunk's text")!.disabled).toBe(true);
@@ -98,7 +98,7 @@ describe('FooterSettings', () => {
     await type(link(), '.');
 
     expect(buttonNamed('Save')!.disabled).toBe(true);
-    expect(container.textContent).toContain('es: the link text needs 3 to 100 characters, with letters');
+    expect(container.textContent).toContain('es: the link text needs 3 to 100 visible letters or digits, on one line');
   });
 
   it("restores Plunk's text by removing the language's own", async () => {
@@ -112,10 +112,24 @@ describe('FooterSettings', () => {
     expect(buttonNamed('Save')!.disabled).toBe(true);
   });
 
+  it("needs no footer of its own once edited back to Plunk's text", async () => {
+    await render();
+    const plunk = text().value;
+
+    await type(text(), `${plunk} Calle Mayor 1.`);
+    expect(buttonNamed('Save')!.disabled).toBe(false);
+    await type(text(), plunk);
+
+    expect(buttonNamed('Save')!.disabled).toBe(true);
+    expect(buttonNamed("Restore Plunk's text")!.disabled).toBe(true);
+  });
+
   it('does not offer saving to members who are not admins', async () => {
     await render(false);
 
     expect(buttonNamed('Save')).toBeUndefined();
     expect(container.textContent).toContain('Only admins can change the footer.');
+    expect(text().disabled).toBe(true);
+    expect(link().disabled).toBe(true);
   });
 });

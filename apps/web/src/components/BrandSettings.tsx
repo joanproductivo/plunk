@@ -6,7 +6,7 @@ import {
   normalizeHexColor,
   type ProjectBrand,
   type ProjectFooters,
-  resolveFooterLanguage,
+  resolveContactLanguage,
   toProjectBrand,
 } from '@plunk/shared';
 import {Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Checkbox, Label} from '@plunk/ui';
@@ -16,6 +16,7 @@ import useSWR from 'swr';
 
 import {wrapEmailWithFooter} from '../lib/emailStyles';
 import {network} from '../lib/network';
+
 import {ColorField, FontSelect, OptionSelect} from './EmailEditor/BlockFields';
 import {ButtonStyleFields} from './EmailEditor/ButtonDialog';
 import {brandUrl} from './EmailEditor/useEmailBrand';
@@ -42,7 +43,7 @@ export function BrandSettings({projectId, projectName, language, canEdit}: Brand
   const {data, error} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
   // The footer the project's emails end with, in its language: its own text or Plunk's
   const {data: footers} = useSWR<ProjectFooters>(footersUrl(projectId), {revalidateOnFocus: false});
-  const footer = footerParagraph({language: resolveFooterLanguage(null, language), projectName, href: '#', footers});
+  const footer = footerParagraph({language: resolveContactLanguage(null, language), projectName, href: '#', footers});
 
   return (
     <Card>
@@ -54,13 +55,13 @@ export function BrandSettings({projectId, projectName, language, canEdit}: Brand
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {error ? (
+        {data ? (
+          // Mounted once the brand loads, so the form starts from it, and again for another project
+          <BrandForm key={projectId} projectId={projectId} footer={footer} canEdit={canEdit} initial={data} />
+        ) : error ? (
           <p className="text-sm text-red-700">{error instanceof Error ? error.message : String(error)}</p>
-        ) : !data ? (
-          <p className="text-sm text-neutral-500">Loading…</p>
         ) : (
-          // Mounted once the brand loads, so the form starts from it
-          <BrandForm projectId={projectId} footer={footer} canEdit={canEdit} initial={data} />
+          <p className="text-sm text-neutral-500">Loading…</p>
         )}
       </CardContent>
     </Card>
@@ -81,7 +82,7 @@ function BrandForm({
 }) {
   const [brand, setBrand] = useState(initial);
   const [saving, setSaving] = useState(false);
-  const {mutate} = useSWR<ProjectBrand>(brandUrl(projectId));
+  const {mutate} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
 
   const set = <K extends keyof ProjectBrand>(key: K, value: ProjectBrand[K]) =>
     setBrand(prev => ({...prev, [key]: value}));

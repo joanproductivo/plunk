@@ -1,12 +1,13 @@
 import {
   BRAND_DEFAULTS,
-  createTranslatorSync,
   footerParagraph,
   type FooterSchemas,
+  isPlunkFooter,
+  plunkFooterTemplate,
   type ProjectBrand,
   type ProjectFooter,
   type ProjectFooters,
-  resolveFooterLanguage,
+  resolveContactLanguage,
   SUPPORTED_LANGUAGES,
   toProjectFooters,
 } from '@plunk/shared';
@@ -17,6 +18,7 @@ import useSWR from 'swr';
 
 import {wrapEmailWithFooter} from '../lib/emailStyles';
 import {network} from '../lib/network';
+
 import {OptionSelect} from './EmailEditor/BlockFields';
 import {brandUrl} from './EmailEditor/useEmailBrand';
 
@@ -26,14 +28,9 @@ export const footersUrl = (projectId: string) => `/projects/${projectId}/footers
 // What the preview shows above the footer
 const SAMPLE = '<p>Hi Ana, this is the end of an email.</p>';
 
-/** Plunk's own footer in `code`, as a starting point: {projectName} is left for the author. */
-function plunkFooter(code: string): ProjectFooter {
-  const translator = createTranslatorSync(code);
-  return {
-    text: translator.t('email.footer.unsubscribeText'),
-    linkText: translator.t('email.footer.updatePreferences'),
-  };
-}
+// The footers as JSON whatever order their languages were added in, to tell whether they changed
+const canonical = (footers: ProjectFooters) =>
+  JSON.stringify(Object.entries(footers).sort(([a], [b]) => a.localeCompare(b)));
 
 interface FooterSettingsProps {
   projectId: string;
@@ -55,13 +52,13 @@ export function FooterSettings(props: FooterSettingsProps) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {error ? (
+        {data ? (
+          // Mounted once the footers load, so the form starts from them, and again for another project
+          <FooterForm key={props.projectId} {...props} saved={data} />
+        ) : error ? (
           <p className="text-sm text-red-700">{error instanceof Error ? error.message : String(error)}</p>
-        ) : !data ? (
-          <p className="text-sm text-neutral-500">Loading…</p>
         ) : (
-          // Mounted once the footers load, so the form starts from them
-          <FooterForm {...props} saved={data} />
+          <p className="text-sm text-neutral-500">Loading…</p>
         )}
       </CardContent>
     </Card>
@@ -71,20 +68,24 @@ export function FooterSettings(props: FooterSettingsProps) {
 function FooterForm({projectId, projectName, language, canEdit, saved}: FooterSettingsProps & {saved: ProjectFooters}) {
   // Only languages with a footer of their own are here: the others show Plunk's and stay Plunk's
   const [footers, setFooters] = useState<ProjectFooters>(saved);
-  const [code, setCode] = useState(resolveFooterLanguage(null, language));
+  const [code, setCode] = useState(resolveContactLanguage(null, language));
   const [saving, setSaving] = useState(false);
-  const {mutate} = useSWR<ProjectFooters>(footersUrl(projectId));
+  const {mutate} = useSWR<ProjectFooters>(footersUrl(projectId), {revalidateOnFocus: false});
   const {data: brand} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
 
   const own = Object.hasOwn(footers, code) ? footers[code] : undefined;
-  const shown = own ?? plunkFooter(code);
+  const shown = own ?? plunkFooterTemplate(code);
   const {errors} = toProjectFooters(footers);
-  const changed = JSON.stringify(footers) !== JSON.stringify(saved);
+  const changed = canonical(footers) !== canonical(saved);
 
-  const edit = (field: keyof ProjectFooter, value: string) =>
-    setFooters(prev => ({...prev, [code]: {...shown, [field]: value}}));
   const restore = () =>
     setFooters(prev => Object.fromEntries(Object.entries(prev).filter(([key]) => key !== code)) as ProjectFooters);
+  // Edited back to just what Plunk's says, a language needs no footer of its own
+  const edit = (field: keyof ProjectFooter, value: string) => {
+    const next = {...shown, [field]: value};
+    if (isPlunkFooter(next, code)) restore();
+    else setFooters(prev => ({...prev, [code]: next}));
+  };
 
   const languages = Object.fromEntries(
     SUPPORTED_LANGUAGES.map(({code: key, nativeName}) => [
@@ -119,7 +120,13 @@ function FooterForm({projectId, projectName, language, canEdit, saved}: FooterSe
           <Label htmlFor="footer-text" className="text-sm font-medium mb-2 block">
             Text
           </Label>
-          <Textarea id="footer-text" rows={5} value={shown.text} onChange={e => edit('text', e.target.value)} />
+          <Textarea
+            id="footer-text"
+            rows={5}
+            value={shown.text}
+            disabled={!canEdit}
+            onChange={e => edit('text', e.target.value)}
+          />
           <p className="mt-1 text-xs text-neutral-500">
             {'{projectName}'} becomes the project&apos;s name, and {'{link}'} the link to update preferences. Without{' '}
             {'{link}'}, the link goes at the end: it is always added.
@@ -129,7 +136,12 @@ function FooterForm({projectId, projectName, language, canEdit, saved}: FooterSe
           <Label htmlFor="footer-link" className="text-sm font-medium mb-2 block">
             Link text
           </Label>
-          <Input id="footer-link" value={shown.linkText} onChange={e => edit('linkText', e.target.value)} />
+          <Input
+            id="footer-link"
+            value={shown.linkText}
+            disabled={!canEdit}
+            onChange={e => edit('linkText', e.target.value)}
+          />
         </div>
         {errors.length > 0 && <p className="text-xs text-red-700">{errors.join(' ')}</p>}
 
