@@ -5,9 +5,17 @@ import Link from 'next/link';
 import type {ReactNode} from 'react';
 import useSWR from 'swr';
 
+import {segmentName} from '../../lib/segments';
+
 /** The project's segments, as every segment picker reads them */
 export function useSegments() {
   return useSWR<Segment[]>('/segments', {revalidateOnFocus: false});
+}
+
+/** `segmentName` over the project's segments */
+export function useSegmentName() {
+  const {data: segments} = useSegments();
+  return (id: string) => segmentName(segments, id);
 }
 
 interface SegmentChipProps {

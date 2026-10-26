@@ -47,7 +47,7 @@ A `WAIT_FOR_EVENT` step on an email event resumes when that event comes from any
 
 An `UPDATE_CONTACT` step can move a contact between static segments: it applies the data and subscription changes first, then the removals, then the additions. For segments that track membership, the `exit` and `entry` events fire before the step finishes, so a workflow they start runs straight away and already sees the new data. Adding a contact who is already in a segment counts as a new entry (see [Segments](/concepts/segments)). A segment that has been deleted or is dynamic is skipped, listed in the step's `skippedSegments`, and the workflow carries on.
 
-A `CONDITION` step can check `segment.<segmentId>`: `true` when the contact is in that segment as the step runs — a current member of a static segment, or a match for a dynamic segment's filter. In the dashboard these fields appear under **Segments**, by name.
+A `CONDITION` step can check `segment.<segmentId>`: `true` when the contact is in that segment as the step runs — a current member of a static segment, or a match for a dynamic segment's filter. In the dashboard these fields appear under **Segments**, by name, both in the field picker and on the condition step in the canvas.
 
 Workflows that add contacts to each other's trigger segments can loop; see [Segments](/concepts/segments#tracking-membership-changes) for when, and keep **Allow re-entry** off unless a workflow needs it.
 

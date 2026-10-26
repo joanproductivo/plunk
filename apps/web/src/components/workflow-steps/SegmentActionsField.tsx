@@ -2,7 +2,7 @@ import {WORKFLOW_SEGMENT_CHANGES_MAX} from '@plunk/shared';
 import type {UpdateContactSegmentChanges} from '@plunk/types';
 import {Label} from '@plunk/ui';
 
-import {SegmentChip, StaticSegmentSelect, useSegments} from '../segments/SegmentPicker';
+import {SegmentChip, StaticSegmentSelect, useSegmentName} from '../segments/SegmentPicker';
 
 const ROWS: Array<{key: keyof UpdateContactSegmentChanges; label: string; verb: string; placeholder: string}> = [
   {key: 'add', label: 'Add to segments', verb: 'add to', placeholder: 'Add to a segment…'},
@@ -20,10 +20,8 @@ interface SegmentActionsFieldProps {
  * the step does not drop them silently.
  */
 export function SegmentActionsField({value, onChange}: SegmentActionsFieldProps) {
-  const {data: segments} = useSegments();
+  const nameOf = useSegmentName();
   const chosen = [...value.add, ...value.remove];
-  const nameOf = (id: string) =>
-    segments ? (segments.find(segment => segment.id === id)?.name ?? 'Deleted segment') : '…';
 
   return (
     <div className="space-y-3">
