@@ -1,4 +1,4 @@
-import {BRAND_DEFAULTS, type EmailBrand} from './brand.js';
+import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
 import {EMAIL_FONT_FAMILY, EMAIL_FONTS} from './emailFonts.js';
 
 /** The font stack of an email in `brand`. */
@@ -18,9 +18,13 @@ export function emailFontFamily(brand: EmailBrand): string {
  */
 export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = false} = {}): string {
   const font = emailFontFamily(brand);
+  // A framed email's background and spacing are drawn by its outer table (see emailDocument)
+  const bodyBox = isFramedBrand(brand)
+    ? `padding: 0;${brand.backgroundColor ? `\n  background-color: ${brand.backgroundColor};` : ''}`
+    : 'padding: 16px;';
   return `${preview ? '* { box-sizing: border-box; }\n' : ''}body {
   margin: 0;
-  padding: 16px;
+  ${bodyBox}
   font-family: ${font};
   line-height: 1.5;
   color: #111827;

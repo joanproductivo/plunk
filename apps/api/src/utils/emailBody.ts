@@ -1,9 +1,13 @@
 import {
+  BRAND_DEFAULTS,
   BUTTON_PADDING,
   detectCustomHtmlPatterns,
-  EMAIL_FONT_FAMILY,
+  EMAIL_FOOTER_SLOT,
   emailDocument,
+  emailFontFamily,
   emailProseCss,
+  type EmailBrand,
+  isFramedBrand,
   isSafeButtonHref,
   readButtonStyle,
   readSpacerHeight,
@@ -64,9 +68,10 @@ function hairSpaces(px: number): [percent: number, count: number] {
  * inline-block on links, so, as react-email's Button does (MIT), invisible Outlook-only spacers
  * either side of the label stand in for the horizontal padding and mso-text-raise for the
  * vertical one; every other client keeps the link's own padding. The font goes inline too, as
- * Word does not always inherit it. A button whose link is not one a button may have loses it.
+ * Word does not always inherit it: the email's font, unless the button has one of its own. A
+ * button whose link is not one a button may have loses it.
  */
-function addOutlookButtonPadding($: CheerioAPI): void {
+function addOutlookButtonPadding($: CheerioAPI, emailFont: string): void {
   $('a.email-button').each((_, element) => {
     const link = $(element);
     if (!isSafeButtonHref(link.attr('href'))) {
@@ -80,7 +85,7 @@ function addOutlookButtonPadding($: CheerioAPI): void {
     const spaces = '&#8202;'.repeat(count);
     const style = (link.attr('style') ?? '').trim().replace(/;$/, '');
     // Unless the button carries a font of its own
-    const font = /(^|;)\s*font-family\s*:/i.test(style) ? '' : `; font-family: ${EMAIL_FONT_FAMILY}`;
+    const font = /(^|;)\s*font-family\s*:/i.test(style) ? '' : `; font-family: ${emailFont}`;
 
     link.attr('style', `${style}${font}; max-width: 100%; mso-padding-alt: 0px`);
     link.html(
@@ -106,21 +111,21 @@ function convertSpacers($: CheerioAPI): void {
 }
 
 /**
- * Wraps visual editor content in a document with the prose styles inlined.
+ * Wraps visual editor content in a document in its brand, with the prose styles inlined.
  *
  * Inlining differs from the preview in two small ways: ::before/::after rules (the backticks
  * around inline code) cannot be inlined, and juice drops !important from existing inline styles.
  * If inlining throws, the email goes out with the <style> block instead, as it always used to.
  */
-function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
+function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: string): string {
   try {
-    const $ = load(emailDocument(htmlBody), {xml: {xmlMode: false, decodeEntities: false}});
+    const $ = load(emailDocument(htmlBody, brand), {xml: {xmlMode: false, decodeEntities: false}});
     // Browsers serialise quoted font names in a style attribute as &quot;, which juice, reading
     // the text undecoded, would take for the end of a declaration
     $('[style]').each((_, element) => {
       element.attribs.style = element.attribs.style!.replace(/&quot;/g, "'");
     });
-    juice.inlineDocument($, emailProseCss(), {
+    juice.inlineDocument($, emailProseCss(brand), {
       applyWidthAttributes: false,
       applyHeightAttributes: false,
       applyAttributesTableElements: false,
@@ -141,7 +146,7 @@ function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
       );
     }
     try {
-      addOutlookButtonPadding($);
+      addOutlookButtonPadding($, emailFontFamily(brand));
     } catch (error) {
       // Buttons without the spacers still render as buttons everywhere but Outlook for Windows
       warnAtMostEveryMinute(
@@ -157,7 +162,7 @@ function wrapWithEmailStyles(htmlBody: string, emailId?: string): string {
       `[EMAIL] Failed to inline the email styles${emailId ? ` of email ${emailId}` : ''}, sending them in a <style> block:`,
       error,
     );
-    return emailDocument(htmlBody, emailProseCss());
+    return emailDocument(htmlBody, brand, emailProseCss(brand));
   }
 }
 
@@ -184,13 +189,35 @@ function insertPreheader(html: string, preheader: string): string {
 }
 
 /**
- * The HTML of an email body as it is sent, before any per-recipient footer. Visual editor
- * content is wrapped in a styled document; custom HTML (from the HTML editor) already carries its
- * own styles and is used as-is. Either way the preheader, if any, goes at the top.
+ * Places the footer (unsubscribe link and badge) in a framed email's slot, so it sits on the
+ * email's background, or else before the last closing body tag, or at the end. The slot is only
+ * looked for in documents framed here, after their content: contact data in the body cannot
+ * move the footer. An earlier </body> can come from contact data inside the hidden preheader.
  */
-export function renderBody(content: string, emailId?: string): string {
-  const {preheader, body} = splitEmailMarkers(content);
-  const wrapped = detectCustomHtmlPatterns(body) ? body : wrapWithEmailStyles(body, emailId);
+function insertFooter(html: string, footer: string, framed: boolean): string {
+  const slot = framed ? html.lastIndexOf(EMAIL_FOOTER_SLOT) : -1;
+  if (slot !== -1) {
+    return `${html.slice(0, slot)}${footer}${html.slice(slot + EMAIL_FOOTER_SLOT.length)}`;
+  }
+
+  const bodyEnd = html.lastIndexOf('</body>');
+  if (bodyEnd !== -1) {
+    return `${html.slice(0, bodyEnd)}${footer}${html.slice(bodyEnd)}`;
+  }
+  return `${html}${footer}`;
+}
+
+/**
+ * The HTML of an email body as it is sent, with `footer` (the per-recipient unsubscribe footer,
+ * if any) in place. Visual editor content is wrapped in a styled document in its brand; custom
+ * HTML (from the HTML editor) already carries its own styles and is used as-is. Either way the
+ * preheader, if any, goes at the top.
+ */
+export function renderBody(content: string, emailId?: string, footer = ''): string {
+  const {preheader, brand, body} = splitEmailMarkers(content);
+  const custom = detectCustomHtmlPatterns(body);
+  const look = brand ?? BRAND_DEFAULTS;
+  const wrapped = custom ? body : wrapWithEmailStyles(body, look, emailId);
   const html = insertPreheader(wrapped, preheader);
 
   const bytes = Buffer.byteLength(html);
@@ -201,5 +228,5 @@ export function renderBody(content: string, emailId?: string): string {
     );
   }
 
-  return html;
+  return insertFooter(html, footer, !custom && isFramedBrand(look));
 }

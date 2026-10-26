@@ -30,6 +30,7 @@ import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';
 import {Analytics} from './controllers/Analytics.js';
 import {Auth} from './controllers/Auth.js';
+import {Brand} from './controllers/Brand.js';
 import {Campaigns} from './controllers/Campaigns.js';
 import {Contacts} from './controllers/Contacts.js';
 import {Domains} from './controllers/Domains.js';
@@ -165,6 +166,7 @@ const server = new (class extends Server {
       new Activity(),
       new Analytics(),
       new Auth(),
+      new Brand(),
       new Campaigns(),
       new Oauth(),
       new Users(),

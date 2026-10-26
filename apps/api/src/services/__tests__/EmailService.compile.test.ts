@@ -1,4 +1,5 @@
 import type {Contact, Project} from '@plunk/db';
+import {joinEmailMarkers, toEmailBrand} from '@plunk/shared';
 import {describe, expect, it} from 'vitest';
 
 import {EmailService} from '../EmailService';
@@ -49,5 +50,40 @@ describe('EmailService.compile — unsubscribe footer', () => {
 
     expect(footer).toBeGreaterThan(preheaderEnd);
     expect(html.lastIndexOf('</body>')).toBeGreaterThan(footer);
+  });
+});
+
+describe('EmailService.compile — brands', () => {
+  const brand = toEmailBrand({textColor: '#222222', backgroundColor: '#f3f4f6', contentWidth: 600});
+
+  it('renders Liquid around both markers and sends the email in its brand, footer on its background', () => {
+    const body = joinEmailMarkers({preheader: 'Hi {{name}}', brand, body: '<p>Hello {{name}}</p>'});
+    const formatted = EmailService.format({subject: 'x', body, data: {name: 'Ana'}});
+
+    const html = EmailService.compile({content: formatted.body, contact, project});
+
+    expect(html).toContain('>Hi Ana<');
+    expect(html).toMatch(/<p style="[^"]*">Hello Ana<\/p>/);
+    expect(html).toContain('bgcolor="#f3f4f6"');
+    expect(html).not.toContain('plunk:brand');
+    // The footer sits inside the background's table, which closes right before </body>
+    const footer = html.indexOf('unsubscribe/contact-1');
+    expect(footer).toBeGreaterThan(html.indexOf('Hello Ana'));
+    expect(html.slice(footer)).toMatch(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>\s*<\/html>$/);
+    expect(html).not.toContain('plunk:footer');
+  });
+
+  it('keeps the footer at the end however contact data imitates its slot', () => {
+    const slot = '<!--plunk:footer-->';
+    // In a framed visual email, and in custom HTML, which has no slot of its own
+    for (const template of [
+      joinEmailMarkers({preheader: '', brand, body: '<p>{{x}}</p><p>After</p>'}),
+      joinEmailMarkers({preheader: '', brand, body: '<table><tr><td>{{x}}</td></tr></table><p>After</p>'}),
+    ]) {
+      const formatted = EmailService.format({subject: 'x', body: template, data: {x: slot}});
+      const html = EmailService.compile({content: formatted.body, contact, project});
+
+      expect(html.indexOf('unsubscribe/contact-1')).toBeGreaterThan(html.indexOf('After'));
+    }
   });
 });

@@ -74,6 +74,11 @@ export function toProjectBrand(value: unknown): ProjectBrand {
   return {...toEmailBrand(data), button: toButtonStyle(data.button)};
 }
 
+/** Whether an email in `brand` is framed: drawn on a background, or in a column of its own width. */
+export function isFramedBrand(brand: EmailBrand): boolean {
+  return brand.backgroundColor !== null || brand.contentWidth !== null;
+}
+
 /** Whether two brands give an email the same look. */
 export function sameEmailBrand(a: EmailBrand, b: EmailBrand): boolean {
   return (Object.keys(BRAND_DEFAULTS) as (keyof EmailBrand)[]).every(key => a[key] === b[key]);

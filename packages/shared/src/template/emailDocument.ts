@@ -1,3 +1,4 @@
+import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
 import {EDITOR_BLOCK_CLASSES} from './emailBlocks.js';
 
 /**
@@ -85,18 +86,56 @@ export function detectCustomHtmlPatterns(html: string): boolean {
   );
 }
 
-/** A full email document around visual editor content. `styleBlock` is only used as a fallback. */
-export function emailDocument(htmlBody: string, styleBlock?: string): string {
-  return `<!DOCTYPE html>
+/** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
+export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
+
+/**
+ * A full email document around visual editor content. `styleBlock` is for the preview, and as a
+ * fallback when sending cannot inline it.
+ *
+ * In a framed brand the content sits in a centred column on the background, as MJML lays emails
+ * out (MIT): the background on an outer table, since Gmail drops <body>'s styles; the width as the
+ * column's max-width, which narrower screens shrink, and as an Outlook-only table, since Outlook
+ * for Windows ignores max-width.
+ */
+export function emailDocument(htmlBody: string, brand: EmailBrand = BRAND_DEFAULTS, styleBlock?: string): string {
+  const head = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">${styleBlock ? `\n  <style>\n${styleBlock}\n  </style>` : ''}
-</head>
+</head>`;
+
+  if (!isFramedBrand(brand)) {
+    return `${head}
 <body>
   <div class="prose prose-sm max-w-none">
     ${htmlBody}
   </div>
+</body>
+</html>`;
+  }
+
+  const {backgroundColor: background, contentColor, contentWidth: width} = brand;
+  const outer = background ? ` bgcolor="${background}" style="background-color: ${background};"` : '';
+  return `${head}
+<body>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"${outer}>
+    <tr>
+      <td align="center" style="padding: 16px;">${
+        width
+          ? `\n        <!--[if mso]><table role="presentation" width="${width}" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->`
+          : ''
+      }
+        <div style="${width ? `max-width: ${width}px; ` : ''}margin: 0 auto; padding: 24px; background-color: ${contentColor}; text-align: left;">
+          <div class="prose prose-sm max-w-none">
+            ${htmlBody}
+          </div>
+        </div>${width ? '\n        <!--[if mso]></td></tr></table><![endif]-->' : ''}
+        ${EMAIL_FOOTER_SLOT}
+      </td>
+    </tr>
+  </table>
 </body>
 </html>`;
 }
