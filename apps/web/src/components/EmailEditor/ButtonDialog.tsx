@@ -12,8 +12,9 @@ import {
 import {Button, Checkbox, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {useState} from 'react';
 
-import {ColorField, OptionSelect} from './ButtonFields';
+import {ColorField, OptionSelect} from './BlockFields';
 import {type ButtonAttrs, ButtonFace} from './EmailButton';
+import type {BlockDialogProps} from './useBlockDialog';
 
 // New buttons start from the look of the last one created in this browser.
 const LAST_STYLE_KEY = 'plunk:email-button-style';
@@ -53,13 +54,7 @@ const FONTS: Record<ButtonFont | typeof EMAIL_FONT, string> = {
   'monospace': 'Monospace',
 };
 
-export interface ButtonDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  /** The button being edited, or null to insert a new one. */
-  initial: ButtonAttrs | null;
-  onSubmit: (attrs: ButtonAttrs) => void;
-}
+type ButtonDialogProps = BlockDialogProps<ButtonAttrs>;
 
 export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDialogProps) {
   return (

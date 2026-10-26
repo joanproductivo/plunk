@@ -11,9 +11,9 @@ import {LogicMention} from './LogicMention';
 import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
-import {EmailButton} from './EmailButton';
+import {type ButtonAttrs, EmailButton} from './EmailButton';
 import {ButtonDialog} from './ButtonDialog';
-import {useButtonDialog} from './useButtonDialog';
+import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
 import {PreheaderField} from './PreheaderField';
@@ -172,7 +172,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     },
   });
 
-  const {openButtonDialog, buttonDialogProps} = useButtonDialog(editor);
+  const button = useBlockDialog<ButtonAttrs>(editor, 'button');
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -466,7 +466,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             editor={editor}
             onInsertVariable={() => setShowVariableDialog(true)}
             onInsertImage={() => setShowImageDialog(true)}
-            onButton={openButtonDialog}
+            onButton={button.onToolbar}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
@@ -789,7 +789,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         variant="destructive"
       />
 
-      <ButtonDialog {...buttonDialogProps} />
+      <ButtonDialog {...button.dialogProps} />
 
       {/* Image insertion dialog */}
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
@@ -948,7 +948,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           max-width: 100%;
         }
 
-        .resizable-image-container.selected {
+        .resizable-image-container.selected,
+        .ProseMirror .ProseMirror-selectednode > [data-node-view-wrapper] {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
         }

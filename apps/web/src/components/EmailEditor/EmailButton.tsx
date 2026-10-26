@@ -19,19 +19,6 @@ export interface ButtonAttrs extends ButtonStyle {
   href: string;
 }
 
-declare module '@tiptap/core' {
-  interface Commands<ReturnType> {
-    button: {
-      setButton: (attrs: ButtonAttrs) => ReturnType;
-    };
-  }
-
-  interface EditorEvents {
-    /** A button in the editor was double-clicked, to open its dialog (see useButtonDialog). */
-    editButton: {pos: number};
-  }
-}
-
 // A button's label is plain text; one with markup inside is custom HTML (see emailStyles).
 const BUTTON = 'a.email-button';
 
@@ -87,7 +74,7 @@ function ButtonView({node, editor, getPos}: ReactNodeViewProps) {
         title="Double-click to edit"
         onDoubleClick={() => {
           const pos = getPos();
-          if (typeof pos === 'number') editor.emit('editButton', {pos});
+          if (typeof pos === 'number') editor.emit('editBlock', {pos});
         }}
         style={{cursor: 'pointer'}}
       />
@@ -165,14 +152,5 @@ export const EmailButton = Node.create({
 
   addNodeView() {
     return ReactNodeViewRenderer(ButtonView);
-  },
-
-  addCommands() {
-    return {
-      setButton:
-        attrs =>
-        ({commands}) =>
-          commands.insertContent({type: this.name, attrs}),
-    };
   },
 });

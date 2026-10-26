@@ -137,7 +137,8 @@ describe('EmailButton', () => {
     createEditor('<p>a</p>');
     editor.commands.setTextSelection(2);
 
-    editor.commands.setButton({...RED, text: 'Shop now', href: 'https://example.com'});
+    // As useBlockDialog inserts a new one
+    editor.commands.insertContent({type: 'button', attrs: {...RED, text: 'Shop now', href: 'https://example.com'}});
 
     expect(editor.getHTML()).toContain(LEFT);
   });
