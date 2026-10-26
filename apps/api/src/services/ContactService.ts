@@ -771,7 +771,7 @@ export class ContactService {
       }
 
       for (const [projectId, contactIds] of byProject) {
-        await this.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
+        await EventService.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
           reason: 'snooze_expired',
         });
       }
@@ -1086,7 +1086,7 @@ export class ContactService {
       data: {subscribed: true, snoozedUntil: null},
     });
 
-    this.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
+    EventService.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
       if (process.env.NODE_ENV !== 'test') {
         console.error('[ContactService] Failed to track bulk subscribe events:', error);
       }
@@ -1136,7 +1136,7 @@ export class ContactService {
       return {updated: 0, unchanged};
     }
 
-    this.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
+    EventService.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
       if (process.env.NODE_ENV !== 'test') {
         console.error('[ContactService] Failed to track bulk unsubscribe events:', error);
       }
@@ -1202,30 +1202,5 @@ export class ContactService {
     }
 
     return false;
-  }
-
-  /**
-   * Track events sequentially to avoid database deadlocks
-   * Processes events one at a time with error handling
-   *
-   * @private
-   */
-  private static async trackEventsSequentially(
-    projectId: string,
-    eventName: string,
-    contactIds: string[],
-    data?: Record<string, unknown>,
-  ): Promise<void> {
-    for (const contactId of contactIds) {
-      try {
-        await EventService.trackEvent(projectId, eventName, contactId, undefined, data);
-      } catch (error) {
-        // Log error but continue processing remaining events
-        // Suppress logging in test environments to reduce noise from cleanup race conditions
-        if (process.env.NODE_ENV !== 'test') {
-          console.error(`[ContactService] Failed to track event ${eventName} for contact ${contactId}:`, error);
-        }
-      }
-    }
   }
 }

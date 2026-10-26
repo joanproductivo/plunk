@@ -3,6 +3,8 @@ import type {FilterCondition, FilterGroup} from '@plunk/types';
 import {SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
+import {SEGMENT_MEMBERS_MAX} from '../segments.js';
+
 const literalSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.date()]);
 type Literal = z.infer<typeof literalSchema>;
 type Json = Literal | {[key: string]: Json} | Json[];
@@ -193,7 +195,9 @@ export const SegmentSchemas = {
     trackMembership: z.boolean().optional(),
   }),
   members: z.object({
-    emails: z.array(z.string().email()).min(1).max(500),
+    // No format check: contacts are matched by their stored email, and imports accept addresses
+    // a strict validator would reject
+    emails: z.array(z.string().trim().min(1).max(320)).min(1).max(SEGMENT_MEMBERS_MAX),
     createMissing: z.boolean().optional(),
     subscribed: z.boolean().optional(),
   }),

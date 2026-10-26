@@ -14,7 +14,7 @@ Segments let you create named groups of contacts that can be targeted in campaig
 | `condition` field            | Required — describes the filters                           | Must be omitted                                         |
 | Add/remove members via API   | Not allowed (the filter decides)                           | `POST` / `DELETE` `/segments/:id/members`               |
 | Membership recomputation     | Re-evaluated in the background when tracked                | N/A — membership only changes when you call the API     |
-| Entry/exit events            | Fired only when **Track membership changes** is enabled    | Not fired by add/remove API calls                       |
+| Entry/exit events            | Fired only when **Track membership changes** is enabled    | Fired on add/remove when **Track membership changes** is enabled |
 | Updating the filter          | Member count is recomputed                                 | `condition` is silently ignored on update               |
 
 Use dynamic segments for behavioural targeting ("subscribed users on the Pro plan who opened any email in the last 14 days"). Use static segments for one-off curated lists like beta testers, conference attendees, or contacts imported from an external system.
@@ -48,20 +48,24 @@ Open a static segment and use the **Add Members** search to find contacts. The s
 Programmatically, use:
 
 - `POST /segments/:id/members` — add contacts by email. Body: `{ emails: string[], createMissing?: boolean, subscribed?: boolean }`. With `createMissing: true`, contacts that don't exist yet are created (and start subscribed unless you pass `subscribed: false`). The response reports `{ added, created, notFound }`.
-- `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`.
+- `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`, the number of contacts that were in the segment and left it.
 
-Both endpoints **only** accept static segments. Calling them on a dynamic segment returns `400`.
+Both endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`.
 
-Membership changes via these API calls are immediate but **do not** fire `entry`/`exit` events — those are reserved for dynamic, tracked segments.
+Membership changes via these API calls are immediate. When the segment has **Track membership changes** enabled, they also fire the `entry` / `exit` events described below, a moment after the response.
+
+Adding a contact who is already a member counts as a new entry: the `entry` event fires again. That is what lets someone who signs up twice go through the same workflow twice — as long as that workflow has **Allow re-entry** turned on. If their first run is still waiting (on a delay or for an event), the second one runs alongside it.
 
 ## Tracking membership changes
 
-Dynamic segments can opt into **Track membership changes**. When enabled, Plunk fires events whenever a contact enters or leaves the segment:
+Segments can opt into **Track membership changes**. When enabled, Plunk fires events whenever a contact enters or leaves the segment — for dynamic segments when the background recomputation notices, for static segments when members are added or removed:
 
 - `segment.<slug>.entry` — contact joined
 - `segment.<slug>.exit` — contact left
 
-The `<slug>` is derived from the segment name: lowercased, accents and punctuation stripped, whitespace replaced with hyphens, repeated hyphens collapsed. `"VIP Customers"` becomes `segment.vip-customers.entry`. Pick segment names that produce stable slugs — renaming a segment changes the event name.
+The `<slug>` is derived from the segment name: lowercased, every character other than `a-z`, `0-9`, `_`, spaces and hyphens removed, whitespace replaced with hyphens, repeated hyphens collapsed. `"VIP Customers"` becomes `segment.vip-customers.entry`. Pick segment names that produce stable slugs — renaming a segment changes the event name. Accented letters are removed rather than replaced (`"Código"` becomes `cdigo`), so two names can end up with the same slug; the dashboard shows each tracked segment's event names and warns about clashes. The event data carries `segmentId` and `segmentName`, so a workflow condition can tell such segments apart.
+
+Workflows that add contacts to each other's segments can loop when they have **Allow re-entry** turned on and a delay in between. Keep **Allow re-entry** off unless a workflow is meant to run more than once per contact.
 
 Use these events to drive workflows (welcome a contact when they enter a "Trial users" segment, send a re-engagement email when they exit "Active users", etc.). See [Webhooks](/guides/webhooks) for the payload format.
 

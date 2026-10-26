@@ -16,6 +16,7 @@ import type {Contact, Segment} from '@plunk/db';
 import type {PaginatedResponse} from '@plunk/types';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {network} from '../../lib/network';
+import {addSegmentMembers} from '../../lib/segmentMembers';
 import {ArrowLeft, Database, Filter, Layers, MailCheck, MailX, RefreshCw, Save, Trash2, UserMinus, Users} from 'lucide-react';
 import Link from 'next/link';
 import {useRouter} from 'next/router';
@@ -27,6 +28,7 @@ import type {FilterCondition} from '@plunk/types';
 import {SegmentSchemas} from '@plunk/shared';
 import {SegmentFilterBuilder} from '../../components/SegmentFilterBuilder';
 import {ContactPicker} from '../../components/ContactPicker';
+import {SegmentEventNames} from '../../components/SegmentEventNames';
 import dayjs from 'dayjs';
 
 type SegmentType = 'DYNAMIC' | 'STATIC';
@@ -130,11 +132,7 @@ export default function SegmentDetailPage() {
   const handleAddMembers = async (emails: string[], subscribed = true) => {
     setIsAddingMembers(true);
     try {
-      const result = await network.fetch<{added: number; created: number; notFound: string[]}, typeof SegmentSchemas.members>(
-        'POST',
-        `/segments/${id}/members`,
-        {emails, createMissing: true, subscribed},
-      );
+      const result = await addSegmentMembers(String(id), emails, {createMissing: true, subscribed});
 
       const msg = result.created > 0
         ? `Added ${result.added} contact${result.added !== 1 ? 's' : ''} (${result.created} new)`
@@ -286,6 +284,11 @@ export default function SegmentDetailPage() {
                       <p className="text-xs text-neutral-500 mt-1">
                         When enabled, segment entry and exit events will be tracked for use in workflows and analytics
                       </p>
+                      {segment.trackMembership && (
+                        <div className="mt-3">
+                          <SegmentEventNames segment={segment} />
+                        </div>
+                      )}
                     </div>
                   </div>
                 </CardContent>
