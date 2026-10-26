@@ -64,8 +64,9 @@ function VideoView({node, editor, getPos}: ReactNodeViewProps) {
     <NodeViewWrapper
       style={{
         margin: '1em auto',
+        // As sent in an email without a brand width (see @plunk/shared videoImageStyle)
         width: `${VIDEO_SIZES[attrs.size]}%`,
-        maxWidth: attrs.size === 'large' ? undefined : videoMaxWidth(attrs.size),
+        maxWidth: videoMaxWidth(attrs.size),
       }}
     >
       {/* An image, not a link: the editor is no place to follow it. */}

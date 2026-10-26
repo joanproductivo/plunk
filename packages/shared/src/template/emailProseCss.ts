@@ -331,7 +331,7 @@ export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = fal
   margin: 0;
 }
 
-/* Videos no wider than the email's text, however wide the window: their own size caps them less */
+/* Videos no wider than the email's text, however wide the window; their own size may cap them narrower */
 .prose .email-video img {
   max-width: ${columnTextWidth(brand)}px;
 }

@@ -252,4 +252,15 @@ describe('VideoDialog sizes', () => {
 
     expect(onSubmit).toHaveBeenCalledWith({...EDITED});
   });
+
+  it("saves an edited video's new size without uploading its poster again", async () => {
+    await render(EDITED);
+
+    await click(document.querySelector('[role="combobox"]')!);
+    await click([...document.querySelectorAll('[role="option"]')].find(option => option.textContent === 'Small')!);
+    await click(buttonNamed('Save')!);
+
+    expect(network.upload).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledWith({...EDITED, size: 'small'});
+  });
 });
