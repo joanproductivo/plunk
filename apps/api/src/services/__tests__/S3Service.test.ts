@@ -127,6 +127,18 @@ describe('S3Service', () => {
       expect(S3Service.imageNameFromKey('p/1761400000000-0123456789abcdef.foto final')).toBeNull();
     });
 
+    it('refuses content types that are not images, names on every object included', async () => {
+      const S3Service = await loadS3Service('');
+
+      for (const contentType of ['text/html', 'constructor', 'toString']) {
+        await expect(
+          S3Service.uploadFile({file: Buffer.from('x'), filename: 'x', contentType, projectId: 'project-1'}),
+        ).rejects.toThrow('Unsupported image type');
+      }
+      expect(S3Service.isImageType('constructor')).toBe(false);
+      expect(sentInput('PutObject')).toBeUndefined();
+    });
+
     it('ignores leading and trailing slashes in S3_PREFIX', async () => {
       const S3Service = await loadS3Service('/tenants/plunk/');
 
@@ -175,6 +187,23 @@ describe('S3Service', () => {
       expect(listRequests().map(command => command.input.ContinuationToken)).toEqual([undefined, 'two', 'three']);
       expect(images).toHaveLength(1000);
       expect(images[0]!.url).toContain(`/${1_000_000 + 2009}-`);
+      expect(truncated).toBe(true);
+    });
+
+    it('reads 50 pages at most, and says the list is cut short', async () => {
+      const S3Service = await loadS3Service('');
+      for (let page = 0; page < 60; page++) {
+        listReplies.push({
+          Contents: [object(1000 + page)],
+          IsTruncated: true,
+          NextContinuationToken: `page-${page + 1}`,
+        });
+      }
+
+      const {images, truncated} = await S3Service.listImages('project-1');
+
+      expect(listRequests()).toHaveLength(50);
+      expect(images).toHaveLength(50);
       expect(truncated).toBe(true);
     });
 

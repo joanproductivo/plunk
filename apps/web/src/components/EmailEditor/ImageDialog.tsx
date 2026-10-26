@@ -20,31 +20,50 @@ interface ImageDialogProps {
  * before. The gallery of uploaded images is only listed once asked for (see ImageGallery).
  */
 export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Insert image</DialogTitle>
+        </DialogHeader>
+        <ImageForm
+          canUpload={canUpload}
+          onInsert={src => {
+            onInsert(src);
+            onOpenChange(false);
+          }}
+          onCancel={() => onOpenChange(false)}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The dialog's fields. The dialog unmounts them however it closes, so each opening starts empty,
+ * with the gallery folded away: it is only listed again once asked for.
+ */
+function ImageForm({
+  canUpload,
+  onInsert,
+  onCancel,
+}: {
+  canUpload: boolean;
+  onInsert: (src: string) => void;
+  onCancel: () => void;
+}) {
   const [imageUrl, setImageUrl] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [showGallery, setShowGallery] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const {mutate} = useSWRConfig();
 
-  // Closing folds the gallery away again; its list stays cached for the session
-  const changeOpen = (next: boolean) => {
-    if (!next) setShowGallery(false);
-    onOpenChange(next);
-  };
-
-  const pick = (src: string) => {
-    onInsert(src);
-    setImageUrl('');
-    setImageFile(null);
-    changeOpen(false);
-  };
-
   const handleImageUpload = async () => {
     if (!imageFile && !imageUrl) return;
 
     if (imageUrl) {
       // Insert external URL
-      pick(imageUrl);
+      onInsert(imageUrl);
     } else if (imageFile) {
       try {
         // Upload to S3/Minio
@@ -55,7 +74,7 @@ export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDial
 
         // The gallery lists it next time it is opened, rather than relisting now
         void mutate(UPLOADED_IMAGES_KEY, undefined, {revalidate: false});
-        pick(response.url);
+        onInsert(response.url);
       } catch (error) {
         console.error('Failed to upload image:', error);
         alert('Couldn’t upload the image. Try again.');
@@ -64,90 +83,78 @@ export function ImageDialog({open, onOpenChange, canUpload, onInsert}: ImageDial
   };
 
   return (
-    <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Insert image</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4">
+    <div className="space-y-4">
+      <div>
+        <Label htmlFor="image-url" className="text-sm font-medium mb-2 block">
+          Image URL
+        </Label>
+        <Input
+          id="image-url"
+          value={imageUrl}
+          onChange={e => setImageUrl(e.target.value)}
+          placeholder="https://example.com/image.jpg"
+          type="url"
+        />
+      </div>
+
+      {canUpload && (
+        <>
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t border-neutral-200" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-white px-2 text-neutral-500">Or upload</span>
+            </div>
+          </div>
+
           <div>
-            <Label htmlFor="image-url" className="text-sm font-medium mb-2 block">
-              Image URL
-            </Label>
-            <Input
-              id="image-url"
-              value={imageUrl}
-              onChange={e => setImageUrl(e.target.value)}
-              placeholder="https://example.com/image.jpg"
-              type="url"
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file) {
+                  setImageFile(file);
+                  setImageUrl('');
+                }
+              }}
+              className="hidden"
             />
+            <Button type="button" variant="outline" onClick={() => fileInputRef.current?.click()} className="w-full">
+              <Upload className="h-4 w-4 mr-2" />
+              Choose file
+            </Button>
+            {imageFile && (
+              <div className="mt-2 flex items-center justify-between p-2 bg-neutral-50 rounded border border-neutral-200">
+                <span className="text-sm text-neutral-700 truncate">{imageFile.name}</span>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
           </div>
 
-          {canUpload && (
-            <>
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <span className="w-full border-t border-neutral-200" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-white px-2 text-neutral-500">Or upload</span>
-                </div>
-              </div>
-
-              <div>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  onChange={e => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      setImageFile(file);
-                      setImageUrl('');
-                    }
-                  }}
-                  className="hidden"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full"
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  Choose file
-                </Button>
-                {imageFile && (
-                  <div className="mt-2 flex items-center justify-between p-2 bg-neutral-50 rounded border border-neutral-200">
-                    <span className="text-sm text-neutral-700 truncate">{imageFile.name}</span>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-
-              {showGallery ? (
-                <ImageGallery onPick={pick} />
-              ) : (
-                <Button type="button" variant="outline" onClick={() => setShowGallery(true)} className="w-full">
-                  <Images className="h-4 w-4 mr-2" />
-                  My images
-                </Button>
-              )}
-            </>
+          {showGallery ? (
+            <ImageGallery onPick={onInsert} />
+          ) : (
+            <Button type="button" variant="outline" onClick={() => setShowGallery(true)} className="w-full">
+              <Images className="h-4 w-4 mr-2" />
+              My images
+            </Button>
           )}
+        </>
+      )}
 
-          <div className="flex gap-2 justify-end">
-            <Button type="button" variant="outline" onClick={() => changeOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
-              Insert
-            </Button>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+      <div className="flex gap-2 justify-end">
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
+          Insert
+        </Button>
+      </div>
+    </div>
   );
 }

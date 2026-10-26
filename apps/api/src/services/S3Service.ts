@@ -7,6 +7,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import {slugify} from '@plunk/shared';
+import type {UploadedImagesResponse} from '@plunk/types';
 import crypto from 'crypto';
 import signale from 'signale';
 
@@ -129,6 +130,12 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
 };
 
+/** Whether images of this content type can be uploaded. */
+export const isImageType = (contentType: string) => Object.hasOwn(IMAGE_EXTENSIONS, contentType);
+
+// Each path segment encoded: older keys took their extension from the file name, spaces and all
+const publicUrl = (key: string) => `${S3_PUBLIC_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
+
 interface UploadFileParams {
   file: Buffer;
   filename: string;
@@ -150,10 +157,10 @@ export async function uploadFile(params: UploadFileParams): Promise<UploadFileRe
   }
 
   const {file, filename, contentType, projectId} = params;
-  const extension = IMAGE_EXTENSIONS[contentType];
-  if (!extension) {
+  if (!isImageType(contentType)) {
     throw new Error(`Unsupported image type: ${contentType}`);
   }
+  const extension = IMAGE_EXTENSIONS[contentType]!;
 
   // A unique key, readable in the image gallery: the original name (without its extension) as a slug
   const timestamp = Date.now();
@@ -171,10 +178,7 @@ export async function uploadFile(params: UploadFileParams): Promise<UploadFileRe
     }),
   );
 
-  // Construct public URL
-  const url = `${S3_PUBLIC_URL}/${key}`;
-
-  return {url, key};
+  return {url: publicUrl(key), key};
 }
 
 /** The name an upload's key carries (see uploadFile), or null for keys from before names were kept. */
@@ -183,32 +187,31 @@ export function imageNameFromKey(key: string): string | null {
   return /^\d+-[0-9a-f]{16}-([a-z0-9-]+)\.\w+$/.exec(file)?.[1] ?? null;
 }
 
-export interface StoredImage {
-  url: string;
-  /** From the key (see imageNameFromKey); null for older uploads. */
-  name: string | null;
-  uploadedAt: string | null;
+/** How many of the latest images are listed, how many keys a list page holds, and how many pages are read at most. */
+const LISTED_IMAGES = 1000;
+const PAGE_SIZE = 1000;
+const MAX_LIST_PAGES = 50;
+
+interface ListedObject {
+  key: string;
+  uploadedAt: Date | undefined;
   size: number;
 }
 
-/** How many of a project's latest images are listed, and how many pages are read at most. */
-const LISTED_IMAGES = 1000;
-const MAX_LIST_PAGES = 50;
-
-// Each path segment encoded: older keys took their extension from the file name, spaces and all
-const publicUrl = (key: string) => `${S3_PUBLIC_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
+// Keys start with the upload time, so the latest sort first
+const newestFirst = (a: ListedObject, b: ListedObject) => (a.key < b.key ? 1 : -1);
 
 /**
  * A project's uploaded images, latest first. Storage lists keys oldest first (they start with the
  * upload time), so every page is read, keeping the latest ones; each page of up to 1000 keys is one
  * billed list request. `truncated` when there were more than are returned.
  */
-export async function listImages(projectId: string): Promise<{images: StoredImage[]; truncated: boolean}> {
+export async function listImages(projectId: string): Promise<UploadedImagesResponse> {
   if (!s3Client) {
     throw new Error('S3 is not enabled');
   }
 
-  let latest: {key: string; uploadedAt: Date | undefined; size: number}[] = [];
+  let latest: ListedObject[] = [];
   let truncated = false;
   let token: string | undefined;
 
@@ -217,7 +220,7 @@ export async function listImages(projectId: string): Promise<{images: StoredImag
       new ListObjectsV2Command({
         Bucket: S3_BUCKET,
         Prefix: `${KEY_PREFIX}${projectId}/`,
-        MaxKeys: 1000,
+        MaxKeys: PAGE_SIZE,
         ContinuationToken: token,
       }),
     );
@@ -228,7 +231,7 @@ export async function listImages(projectId: string): Promise<{images: StoredImag
       }
     }
     if (latest.length > LISTED_IMAGES) {
-      latest.sort((a, b) => (a.key < b.key ? 1 : -1));
+      latest.sort(newestFirst);
       latest = latest.slice(0, LISTED_IMAGES);
       truncated = true;
     }
@@ -238,7 +241,7 @@ export async function listImages(projectId: string): Promise<{images: StoredImag
     if (page === MAX_LIST_PAGES - 1) truncated = true;
   }
 
-  latest.sort((a, b) => (a.key < b.key ? 1 : -1));
+  latest.sort(newestFirst);
   return {
     images: latest.map(image => ({
       url: publicUrl(image.key),

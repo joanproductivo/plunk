@@ -31,9 +31,7 @@ const uploadOptions: multer.Options & {defParamCharset: string} = {
     fileSize: 10 * 1024 * 1024, // 10MB max file size
   },
   fileFilter: (_req, file, cb) => {
-    const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
-
-    if (allowedMimeTypes.includes(file.mimetype)) {
+    if (S3Service.isImageType(file.mimetype)) {
       cb(null, true);
     } else {
       cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP)'));

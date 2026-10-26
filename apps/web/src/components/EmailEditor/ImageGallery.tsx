@@ -1,17 +1,10 @@
+import type {UploadedImage, UploadedImagesResponse} from '@plunk/types';
 import {Button} from '@plunk/ui';
 import {useState} from 'react';
 import useSWRImmutable from 'swr/immutable';
 
 /** The SWR key of the project's uploaded images, cleared after an upload (see ImageDialog). */
 export const UPLOADED_IMAGES_KEY = '/uploads/images';
-
-interface UploadedImage {
-  url: string;
-  /** From the stored key; null for images uploaded before names were kept. */
-  name: string | null;
-  uploadedAt: string | null;
-  size: number;
-}
 
 // Thumbnails are the full images, so they are shown a few at a time
 const BATCH = 24;
@@ -27,7 +20,9 @@ function describe(image: UploadedImage): string {
  * dialog nor coming back to the window lists them again.
  */
 export function ImageGallery({onPick}: {onPick: (url: string) => void}) {
-  const {data, error, isLoading} = useSWRImmutable<{images: UploadedImage[]; truncated: boolean}>(UPLOADED_IMAGES_KEY);
+  // No deduping: right after an upload clears the list, reopening must list it again rather than
+  // wait on the request that listed it before
+  const {data, error, isLoading} = useSWRImmutable<UploadedImagesResponse>(UPLOADED_IMAGES_KEY, {dedupingInterval: 0});
   const [shown, setShown] = useState(BATCH);
 
   if (error) {
@@ -69,7 +64,7 @@ export function ImageGallery({onPick}: {onPick: (url: string) => void}) {
           Show more
         </Button>
       )}
-      {data.truncated && <p className="text-xs text-neutral-500">Showing your latest {data.images.length} images</p>}
+      {data.truncated && <p className="text-xs text-neutral-500">Showing {data.images.length} of your images</p>}
     </div>
   );
 }
