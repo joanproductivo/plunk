@@ -5,7 +5,7 @@ import {
   isSafeButtonHref,
   readButtonStyle,
   readSpacerHeight,
-  splitPreheader,
+  splitEmailMarkers,
 } from '@plunk/shared';
 import {type CheerioAPI, load} from 'cheerio/slim';
 import makeJuiceClient from 'juice/lib/inline.js';
@@ -285,7 +285,7 @@ function insertPreheader(html: string, preheader: string): string {
  * own styles and is used as-is. Either way the preheader, if any, goes at the top.
  */
 export function renderBody(content: string, emailId?: string): string {
-  const {preheader, body} = splitPreheader(content);
+  const {preheader, body} = splitEmailMarkers(content);
   const wrapped = detectCustomHtmlPatterns(body) ? body : wrapWithEmailStyles(body, emailId);
   const html = insertPreheader(wrapped, preheader);
 

@@ -27,7 +27,7 @@ import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {renderTemplate, splitPreheader, withPreheader} from '@plunk/shared';
+import {joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -69,11 +69,11 @@ const commonVariables = [
 ];
 
 export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
-  // The preview text travels with the body; the editors below only ever see the body
-  const {preheader, body} = splitPreheader(value);
-  const preheaderRef = useRef(preheader);
-  preheaderRef.current = preheader;
-  const emitChange = (html: string) => onChange(withPreheader(preheaderRef.current, html));
+  // The preview text and the brand travel with the body; the editors below only ever see the body
+  const {preheader, brand, body} = splitEmailMarkers(value);
+  const markersRef = useRef({preheader, brand});
+  markersRef.current = {preheader, brand};
+  const emitChange = (html: string) => onChange(joinEmailMarkers({...markersRef.current, body: html}));
 
   // Detect if initial value has custom HTML and start in appropriate mode
   const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
@@ -423,7 +423,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </div>
       </div>
 
-      <PreheaderField value={preheader} onChange={next => onChange(withPreheader(next, body))} />
+      <PreheaderField value={preheader} onChange={next => onChange(joinEmailMarkers({preheader: next, brand, body}))} />
 
       {/* Template syntax errors, reported as you type rather than on save */}
       {syntaxIssue && !suggestionOpen && (

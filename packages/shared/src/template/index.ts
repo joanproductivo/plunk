@@ -8,7 +8,8 @@ export * from './emailBlocks.js';
 export * from './emailButton.js';
 export * from './emailFonts.js';
 export {escapeHtml} from './html.js';
-export {preheaderToText, splitPreheader, textToPreheader, withPreheader} from './preheader.js';
+export * from './brand.js';
+export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
 
 /** A template parsed once and ready to be rendered against many recipients. */
 export interface CompiledTemplate {
