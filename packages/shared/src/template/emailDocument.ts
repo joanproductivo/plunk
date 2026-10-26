@@ -89,6 +89,9 @@ export function detectCustomHtmlPatterns(html: string): boolean {
 /** Where the API puts the unsubscribe footer in a framed email, so it sits on the email's background. */
 export const EMAIL_FOOTER_SLOT = '<!--plunk:footer-->';
 
+/** The rounding of a framed email's column, in px. Outlook for Windows ignores it and squares it. */
+export const EMAIL_COLUMN_RADIUS = 12;
+
 // WCAG relative luminance of a `#rrggbb` colour
 function luminance(hex: string): number {
   const [r, g, b] = [1, 3, 5].map(at => {
@@ -145,7 +148,7 @@ export function emailDocument(htmlBody: string, brand: EmailBrand = BRAND_DEFAUL
           ? `\n        <!--[if mso]><table role="presentation" width="${width}" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->`
           : ''
       }
-        <div style="${width ? `max-width: ${width}px; ` : ''}margin: 0 auto; padding: 24px; background-color: ${contentColor}; text-align: left;">
+        <div style="${width ? `max-width: ${width}px; ` : ''}margin: 0 auto; padding: 24px; background-color: ${contentColor}; border-radius: ${EMAIL_COLUMN_RADIUS}px; text-align: left;">
           <div class="prose prose-sm max-w-none">
             ${htmlBody}
           </div>

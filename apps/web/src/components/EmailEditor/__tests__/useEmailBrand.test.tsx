@@ -66,7 +66,7 @@ describe('editor styles', () => {
     expect(canvasStyle(BRAND_DEFAULTS)).toEqual({outer: {backgroundColor: undefined, padding: undefined}, inner: {}});
     expect(canvasStyle({...BRAND_DEFAULTS, contentWidth: 600})).toEqual({
       outer: {backgroundColor: undefined, padding: 16},
-      inner: {maxWidth: 600, margin: '0 auto', backgroundColor: '#ffffff'},
+      inner: {maxWidth: 600, margin: '0 auto', backgroundColor: '#ffffff', borderRadius: 12},
     });
   });
 });

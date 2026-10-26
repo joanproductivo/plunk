@@ -410,7 +410,7 @@ describe('renderBody', () => {
       );
       expect(html).toContain('<!--[if mso]><table role="presentation" width="600" align="center"');
       expect(html).toContain(
-        '<div style="max-width: 600px; margin: 0 auto; padding: 24px; background-color: #fffbeb; text-align: left;">',
+        '<div style="max-width: 600px; margin: 0 auto; padding: 24px; background-color: #fffbeb; border-radius: 12px; text-align: left;">',
       );
       expect(styleOf(html, 'body')).toContain('padding: 0;');
       expect(styleOf(html, 'body')).toContain('background-color: #f3f4f6;');
