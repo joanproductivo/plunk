@@ -5,7 +5,6 @@ import {
   type ButtonStyle,
   isSafeButtonHref,
   normalizeHexColor,
-  toButtonStyle,
 } from '@plunk/shared';
 import {Button, Checkbox, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {useState} from 'react';
@@ -13,25 +12,6 @@ import {useState} from 'react';
 import {ColorField, FontSelect, OptionSelect} from './BlockFields';
 import {type ButtonAttrs, ButtonFace} from './EmailButton';
 import type {BlockDialogProps} from './useBlockDialog';
-
-// New buttons start from the look of the last one created in this browser.
-const LAST_STYLE_KEY = 'plunk:email-button-style';
-
-function lastStyle(): ButtonStyle {
-  try {
-    return toButtonStyle(JSON.parse(localStorage.getItem(LAST_STYLE_KEY) ?? 'null'));
-  } catch {
-    return BUTTON_DEFAULTS;
-  }
-}
-
-function rememberStyle(button: ButtonStyle) {
-  try {
-    localStorage.setItem(LAST_STYLE_KEY, JSON.stringify(toButtonStyle(button)));
-  } catch {
-    // Private windows and blocked storage only lose the convenience.
-  }
-}
 
 // Spaces outside Liquid tags would break the link (and read as custom HTML attributes).
 function isValidHref(href: string): boolean {
@@ -41,9 +21,12 @@ function isValidHref(href: string): boolean {
 const SHAPES: Record<ButtonShape, string> = {rectangle: 'Rectangle', rounded: 'Rounded', pill: 'Pill'};
 const SIZES: Record<ButtonSize, string> = {small: 'Small', medium: 'Medium', large: 'Large'};
 
-type ButtonDialogProps = BlockDialogProps<ButtonAttrs>;
+type ButtonDialogProps = BlockDialogProps<ButtonAttrs> & {
+  /** The look new buttons start from: the project brand's button, once loaded. */
+  defaultStyle?: ButtonStyle;
+};
 
-export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDialogProps) {
+export function ButtonDialog({open, onOpenChange, initial, onSubmit, defaultStyle}: ButtonDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -51,7 +34,12 @@ export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDial
           <DialogTitle>{initial ? 'Edit button' : 'Insert button'}</DialogTitle>
         </DialogHeader>
         {/* The content unmounts when the dialog closes, so each opening starts from `initial` */}
-        <ButtonForm initial={initial} onSubmit={onSubmit} onCancel={() => onOpenChange(false)} />
+        <ButtonForm
+          initial={initial}
+          defaultStyle={defaultStyle}
+          onSubmit={onSubmit}
+          onCancel={() => onOpenChange(false)}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -59,10 +47,13 @@ export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDial
 
 function ButtonForm({
   initial,
+  defaultStyle,
   onSubmit,
   onCancel,
 }: Omit<ButtonDialogProps, 'open' | 'onOpenChange'> & {onCancel: () => void}) {
-  const [attrs, setAttrs] = useState<ButtonAttrs>(() => initial ?? {...lastStyle(), text: '', href: ''});
+  const [attrs, setAttrs] = useState<ButtonAttrs>(
+    () => initial ?? {...(defaultStyle ?? BUTTON_DEFAULTS), text: '', href: ''},
+  );
 
   const set = <K extends keyof ButtonAttrs>(key: K, value: ButtonAttrs[K]) =>
     setAttrs(prev => ({...prev, [key]: value}));
@@ -72,9 +63,7 @@ function ButtonForm({
 
   const submit = () => {
     if (!valid) return;
-    const result = {...attrs, text: attrs.text.trim(), href: attrs.href.trim(), backgroundColor, textColor};
-    if (!initial) rememberStyle(result);
-    onSubmit(result);
+    onSubmit({...attrs, text: attrs.text.trim(), href: attrs.href.trim(), backgroundColor, textColor});
   };
 
   return (

@@ -13,6 +13,7 @@ import useSWR from 'swr';
 
 import {ColorField, FontSelect, OptionSelect} from './EmailEditor/BlockFields';
 import {ButtonStyleFields} from './EmailEditor/ButtonDialog';
+import {brandUrl} from './EmailEditor/useEmailBrand';
 import {network} from '../lib/network';
 import {wrapEmailWithStyles} from '../lib/emailStyles';
 
@@ -24,9 +25,6 @@ const sample = (brand: ProjectBrand) =>
   '<h1>Your weekly update</h1><p>Hi Ana, here is <strong>what changed</strong> this week and ' +
   '<a href="#">what comes next</a>.</p><h2>Highlights</h2><ul><li><p>A new look for every email</p></li></ul>' +
   `<p style="text-align: center;"><a class="email-button" href="#" style="${buttonStyle(brand.button)}">Read more</a></p>`;
-
-/** The URL a project's brand is read from and saved to; the editor reads it too. */
-export const brandUrl = (projectId: string) => `/projects/${projectId}/brand`;
 
 export function BrandSettings({projectId, canEdit}: {projectId: string; canEdit: boolean}) {
   const {data, error} = useSWR<ProjectBrand>(brandUrl(projectId), {revalidateOnFocus: false});
