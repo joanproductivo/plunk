@@ -4,8 +4,9 @@ import type {SuggestionProps} from '@tiptap/suggestion';
 import {escapeHtml} from '@plunk/shared';
 
 /**
- * The part of a suggestion list the popup needs to drive. Both the `{{` variable list
- * and the `{%` logic list implement this; everything else here is item-agnostic.
+ * The part of a suggestion list the popup needs to drive. The editor's suggestion menus
+ * (`{{` variables, `{%` logic and `/` blocks) implement this; everything else here is
+ * item-agnostic.
  */
 export interface SuggestionListView {
   element: HTMLElement;
@@ -15,21 +16,24 @@ export interface SuggestionListView {
 }
 
 /**
- * One row. Both menus use the same three slots so inserting a value and inserting a
- * block are recognisably the same gesture: what you are choosing, what it will write,
- * and what the editor knows about it.
+ * One row. The menus use the same three slots so inserting a value and inserting a
+ * block are recognisably the same gesture: what you are choosing, what writes it, and
+ * what the editor knows about it.
  */
 export interface SuggestionRow {
   /** What the author is choosing, in their words. Leads the row. */
   label: string;
-  /** The Liquid this writes. Secondary — shown so the syntax is learned in passing. */
-  syntax: string;
+  /**
+   * The syntax or shortcut that writes it. Secondary — shown so it is learned in passing.
+   * Rows with no shortcut of their own leave it out.
+   */
+  syntax?: string;
   /** Optional qualifier: a field's type, or how many contacts actually have it. */
   meta?: string;
 }
 
 /**
- * The list rendered inside the popup, shared by both triggers.
+ * The list rendered inside the popup, shared by every trigger.
  *
  * Selection is single-sourced: moving the pointer over a row *moves the selection* to
  * it rather than painting a second, competing highlight. Two differently-highlighted
@@ -67,7 +71,7 @@ export class SuggestionMenu<T extends SuggestionRow> implements SuggestionListVi
             <span class="suggestion-row-label">${escapeHtml(item.label)}</span>
             ${item.meta ? `<span class="suggestion-row-meta">${escapeHtml(item.meta)}</span>` : ''}
           </div>
-          <code class="suggestion-row-syntax">${escapeHtml(item.syntax)}</code>
+          ${item.syntax ? `<code class="suggestion-row-syntax">${escapeHtml(item.syntax)}</code>` : ''}
         </div>
       `,
       )
@@ -107,6 +111,12 @@ export class SuggestionMenu<T extends SuggestionRow> implements SuggestionListVi
   }
 
   onKeyDown(event: KeyboardEvent): boolean {
+    // With nothing to choose, keys belong to the editor: a `/` in prose ("10 /month") must
+    // not swallow the Enter that ends the line.
+    if (this.items.length === 0) {
+      return false;
+    }
+
     if (event.key === 'ArrowUp') {
       this.move(-1);
       return true;
@@ -126,10 +136,6 @@ export class SuggestionMenu<T extends SuggestionRow> implements SuggestionListVi
   }
 
   private move(delta: number) {
-    if (this.items.length === 0) {
-      return;
-    }
-
     this.selectedIndex = (this.selectedIndex + delta + this.items.length) % this.items.length;
     this.syncSelection();
   }
@@ -156,7 +162,7 @@ export class SuggestionMenu<T extends SuggestionRow> implements SuggestionListVi
  * A half-typed trigger — `{%ema` with the menu open on it — is not valid Liquid, so
  * syntax validation would report an error on markup the author is in the middle of
  * completing, using the very menu that completes it. Consumers subscribe to stay quiet
- * while a menu is up. Counted rather than boolean so two triggers can't unset each other.
+ * while a menu is up. Counted rather than boolean so triggers can't unset each other.
  */
 let openMenus = 0;
 const openListeners = new Set<(open: boolean) => void>();
