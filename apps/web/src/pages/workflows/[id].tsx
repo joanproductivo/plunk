@@ -75,7 +75,13 @@ interface PaginatedExecutions {
 export default function WorkflowEditorPage() {
   const router = useRouter();
   const {id} = router.query;
-  const [activeTab, setActiveTab] = useState<'builder' | 'executions'>('builder');
+  // In the URL, so a link (a failure alert's) can open the executions
+  const activeTab: 'builder' | 'executions' = router.query.tab === 'executions' ? 'executions' : 'builder';
+  const setActiveTab = (tab: 'builder' | 'executions') => {
+    if (router.isReady) {
+      void router.push({pathname: router.pathname, query: {...router.query, tab}}, undefined, {shallow: true});
+    }
+  };
 
   type WorkflowDialog =
     | {type: 'none'}
