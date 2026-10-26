@@ -368,8 +368,6 @@ export class EmailService {
      */
     sourceEmailId?: string;
   }): string {
-    let html = renderBody(content, sourceEmailId);
-
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
           // Get contact-level locale (overrides project language)
@@ -439,19 +437,8 @@ export class EmailService {
         </table>`
         : '';
 
-    // Combine footer and badge
-    const footerHtml = `${unsubscribeHtml}${badgeHtml}`;
-
-    // Insert before the last closing body tag if it exists, otherwise append. An earlier </body>
-    // can come from contact data inside the hidden preheader.
-    const bodyEnd = html.lastIndexOf('</body>');
-    if (bodyEnd !== -1) {
-      html = `${html.slice(0, bodyEnd)}${footerHtml}${html.slice(bodyEnd)}`;
-    } else {
-      html = `${html}${footerHtml}`;
-    }
-
-    return html;
+    // The footer and badge go at the end of the email, on its background if it has one
+    return renderBody(content, sourceEmailId, `${unsubscribeHtml}${badgeHtml}`);
   }
 
   /**

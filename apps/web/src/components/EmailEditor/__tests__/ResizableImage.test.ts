@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
+import {detectCustomHtmlPatterns} from '@plunk/shared';
 import {Editor} from '@tiptap/core';
 import {NodeSelection} from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import {afterEach, describe, expect, it} from 'vitest';
 
-import {detectCustomHtmlPatterns} from '../../../lib/emailStyles';
 import {EmailTextAlign} from '../EmailTextAlign';
 import {ResizableImage} from '../ResizableImage';
 

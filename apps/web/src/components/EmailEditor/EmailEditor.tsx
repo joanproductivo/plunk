@@ -23,11 +23,13 @@ import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
 import {PreheaderField} from './PreheaderField';
+import {brandOnChange, canvasStyle, editorAttributes, useEmailBrand} from './useEmailBrand';
+import {useActiveProject} from '../../lib/contexts/ActiveProjectProvider';
 import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks/useContacts';
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {renderTemplate, splitPreheader, withPreheader} from '@plunk/shared';
+import {detectCustomHtmlPatterns, joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -44,7 +46,7 @@ import {
   SelectValue,
 } from '@plunk/ui';
 import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet} from 'lucide-react';
-import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
+import {wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
 interface EmailEditorProps {
@@ -69,11 +71,23 @@ const commonVariables = [
 ];
 
 export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
-  // The preview text travels with the body; the editors below only ever see the body
-  const {preheader, body} = splitPreheader(value);
-  const preheaderRef = useRef(preheader);
-  preheaderRef.current = preheader;
-  const emitChange = (html: string) => onChange(withPreheader(preheaderRef.current, html));
+  // The preview text and the brand travel with the body; the editors below only ever see the body
+  const {preheader, brand, body} = splitEmailMarkers(value);
+  const {activeProject} = useActiveProject();
+  const emailBrand = useEmailBrand(activeProject?.id, brand, body);
+  const markersRef = useRef({preheader, brand, body, project: emailBrand.project});
+  markersRef.current = {preheader, brand, body, project: emailBrand.project};
+  // A change keeps the email's brand, or gives an email that was empty the project's
+  const withMarkers = (html: string, nextPreheader?: string) => {
+    const current = markersRef.current;
+    return joinEmailMarkers({
+      preheader: nextPreheader ?? current.preheader,
+      brand: brandOnChange(current.brand, current.body, current.project),
+      body: html,
+    });
+  };
+  const emitChange = (html: string) => onChange(withMarkers(html));
+  const canvas = canvasStyle(emailBrand.look);
 
   // Detect if initial value has custom HTML and start in appropriate mode
   const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
@@ -173,9 +187,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     // If starting in HTML mode (due to custom HTML), keep editor empty
     content: initialMode === 'visual' ? body || '' : '',
     editorProps: {
-      attributes: {
-        class: 'prose prose-sm max-w-none focus:outline-none min-h-[400px] px-4 py-3 text-neutral-900',
-      },
+      // In the email's brand; useEditor applies these again whenever they change
+      attributes: editorAttributes(emailBrand.look),
     },
     onUpdate: ({editor}) => {
       const html = editor.getHTML();
@@ -338,7 +351,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
       if (iframeDoc) {
         const previewContent = getPreviewHtml();
-        const fullHtml = wrapEmailWithStyles(previewContent);
+        const fullHtml = wrapEmailWithStyles(previewContent, emailBrand.look);
 
         iframeDoc.open();
         iframeDoc.write(fullHtml);
@@ -372,7 +385,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger]);
+  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger, JSON.stringify(emailBrand.look)]);
 
   return (
     <div className="border border-neutral-200 rounded-lg bg-white">
@@ -423,7 +436,22 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </div>
       </div>
 
-      <PreheaderField value={preheader} onChange={next => onChange(withPreheader(next, body))} />
+      <PreheaderField value={preheader} onChange={next => onChange(withMarkers(body, next))} />
+
+      {mode === 'visual' && emailBrand.differs && (
+        <div className="flex items-center justify-between gap-3 border-t border-sky-200 bg-sky-50 px-4 py-2">
+          <p className="text-xs text-sky-900">This email uses different styles from the project&apos;s brand.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 text-xs"
+            onClick={() => onChange(joinEmailMarkers({preheader, brand: emailBrand.project, body}))}
+          >
+            Apply brand
+          </Button>
+        </div>
+      )}
 
       {/* Template syntax errors, reported as you type rather than on save */}
       {syntaxIssue && !suggestionOpen && (
@@ -473,8 +501,10 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onSpacer={spacer.onToolbar}
             canUploadImages={canUploadImages}
           />
-          <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
-            <EditorContent editor={editor} />
+          <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
+            <div style={canvas.inner}>
+              <EditorContent editor={editor} />
+            </div>
           </div>
           {selectedContactId && (
             <>
@@ -793,7 +823,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         variant="destructive"
       />
 
-      <ButtonDialog {...button.dialogProps} />
+      <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} />
       <DividerDialog {...divider.dialogProps} />
       <SpacerDialog {...spacer.dialogProps} />
 

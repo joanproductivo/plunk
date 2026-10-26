@@ -1,39 +1,17 @@
 import {
   BUTTON_DEFAULTS,
-  BUTTON_FONTS,
-  type ButtonFont,
   type ButtonShape,
   type ButtonSize,
   type ButtonStyle,
   isSafeButtonHref,
   normalizeHexColor,
-  toButtonStyle,
 } from '@plunk/shared';
 import {Button, Checkbox, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {useState} from 'react';
 
-import {ColorField, OptionSelect} from './BlockFields';
+import {ColorField, FontSelect, OptionSelect} from './BlockFields';
 import {type ButtonAttrs, ButtonFace} from './EmailButton';
 import type {BlockDialogProps} from './useBlockDialog';
-
-// New buttons start from the look of the last one created in this browser.
-const LAST_STYLE_KEY = 'plunk:email-button-style';
-
-function lastStyle(): ButtonStyle {
-  try {
-    return toButtonStyle(JSON.parse(localStorage.getItem(LAST_STYLE_KEY) ?? 'null'));
-  } catch {
-    return BUTTON_DEFAULTS;
-  }
-}
-
-function rememberStyle(button: ButtonStyle) {
-  try {
-    localStorage.setItem(LAST_STYLE_KEY, JSON.stringify(toButtonStyle(button)));
-  } catch {
-    // Private windows and blocked storage only lose the convenience.
-  }
-}
 
 // Spaces outside Liquid tags would break the link (and read as custom HTML attributes).
 function isValidHref(href: string): boolean {
@@ -42,21 +20,13 @@ function isValidHref(href: string): boolean {
 
 const SHAPES: Record<ButtonShape, string> = {rectangle: 'Rectangle', rounded: 'Rounded', pill: 'Pill'};
 const SIZES: Record<ButtonSize, string> = {small: 'Small', medium: 'Medium', large: 'Large'};
-// The email's own font is stored as no font of the button's own.
-const EMAIL_FONT = 'email';
-const FONTS: Record<ButtonFont | typeof EMAIL_FONT, string> = {
-  [EMAIL_FONT]: "Email's font",
-  'modern-sans': 'Modern sans',
-  'geometric-sans': 'Geometric sans',
-  'rounded-sans': 'Rounded sans',
-  'modern-serif': 'Modern serif',
-  'book-serif': 'Book serif',
-  'monospace': 'Monospace',
+
+type ButtonDialogProps = BlockDialogProps<ButtonAttrs> & {
+  /** The look new buttons start from: the project brand's button, once loaded. */
+  defaultStyle?: ButtonStyle;
 };
 
-type ButtonDialogProps = BlockDialogProps<ButtonAttrs>;
-
-export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDialogProps) {
+export function ButtonDialog({open, onOpenChange, initial, onSubmit, defaultStyle}: ButtonDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -64,7 +34,12 @@ export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDial
           <DialogTitle>{initial ? 'Edit button' : 'Insert button'}</DialogTitle>
         </DialogHeader>
         {/* The content unmounts when the dialog closes, so each opening starts from `initial` */}
-        <ButtonForm initial={initial} onSubmit={onSubmit} onCancel={() => onOpenChange(false)} />
+        <ButtonForm
+          initial={initial}
+          defaultStyle={defaultStyle}
+          onSubmit={onSubmit}
+          onCancel={() => onOpenChange(false)}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -72,10 +47,13 @@ export function ButtonDialog({open, onOpenChange, initial, onSubmit}: ButtonDial
 
 function ButtonForm({
   initial,
+  defaultStyle,
   onSubmit,
   onCancel,
 }: Omit<ButtonDialogProps, 'open' | 'onOpenChange'> & {onCancel: () => void}) {
-  const [attrs, setAttrs] = useState<ButtonAttrs>(() => initial ?? {...lastStyle(), text: '', href: ''});
+  const [attrs, setAttrs] = useState<ButtonAttrs>(
+    () => initial ?? {...(defaultStyle ?? BUTTON_DEFAULTS), text: '', href: ''},
+  );
 
   const set = <K extends keyof ButtonAttrs>(key: K, value: ButtonAttrs[K]) =>
     setAttrs(prev => ({...prev, [key]: value}));
@@ -85,9 +63,7 @@ function ButtonForm({
 
   const submit = () => {
     if (!valid) return;
-    const result = {...attrs, text: attrs.text.trim(), href: attrs.href.trim(), backgroundColor, textColor};
-    if (!initial) rememberStyle(result);
-    onSubmit(result);
+    onSubmit({...attrs, text: attrs.text.trim(), href: attrs.href.trim(), backgroundColor, textColor});
   };
 
   return (
@@ -115,41 +91,7 @@ function ButtonForm({
           </p>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <ColorField
-          id="button-background"
-          label="Background"
-          value={attrs.backgroundColor}
-          onChange={value => set('backgroundColor', value)}
-        />
-        <ColorField
-          id="button-color"
-          label="Text color"
-          value={attrs.textColor}
-          onChange={value => set('textColor', value)}
-        />
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        <OptionSelect label="Shape" value={attrs.shape} options={SHAPES} onChange={value => set('shape', value)} />
-        <OptionSelect label="Size" value={attrs.size} options={SIZES} onChange={value => set('size', value)} />
-        <OptionSelect
-          label="Font"
-          value={attrs.font ?? EMAIL_FONT}
-          options={FONTS}
-          onChange={value => set('font', value === EMAIL_FONT ? null : value)}
-          optionStyle={value => ({fontFamily: value === EMAIL_FONT ? undefined : BUTTON_FONTS[value]})}
-        />
-      </div>
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id="button-full-width"
-          checked={attrs.fullWidth}
-          onCheckedChange={v => set('fullWidth', v === true)}
-        />
-        <Label htmlFor="button-full-width" className="text-sm">
-          Full width
-        </Label>
-      </div>
+      <ButtonStyleFields idPrefix="button" value={attrs} onChange={style => setAttrs(prev => ({...prev, ...style}))} />
       <div className="rounded border border-neutral-200 bg-neutral-50 p-4">
         <ButtonFace
           button={{
@@ -169,5 +111,52 @@ function ButtonForm({
         </Button>
       </div>
     </div>
+  );
+}
+
+/** A button's look: its colours, shape, size, font and width. Also edits the brand's default button. */
+export function ButtonStyleFields({
+  idPrefix,
+  value,
+  onChange,
+}: {
+  idPrefix: string;
+  value: ButtonStyle;
+  onChange: (value: ButtonStyle) => void;
+}) {
+  const set = <K extends keyof ButtonStyle>(key: K, next: ButtonStyle[K]) => onChange({...value, [key]: next});
+
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <ColorField
+          id={`${idPrefix}-background`}
+          label="Background"
+          value={value.backgroundColor}
+          onChange={next => set('backgroundColor', next)}
+        />
+        <ColorField
+          id={`${idPrefix}-color`}
+          label="Text color"
+          value={value.textColor}
+          onChange={next => set('textColor', next)}
+        />
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <OptionSelect label="Shape" value={value.shape} options={SHAPES} onChange={next => set('shape', next)} />
+        <OptionSelect label="Size" value={value.size} options={SIZES} onChange={next => set('size', next)} />
+        <FontSelect label="Font" value={value.font} ownFont="Email's font" onChange={next => set('font', next)} />
+      </div>
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id={`${idPrefix}-full-width`}
+          checked={value.fullWidth}
+          onCheckedChange={checked => set('fullWidth', checked === true)}
+        />
+        <Label htmlFor={`${idPrefix}-full-width`} className="text-sm">
+          Full width
+        </Label>
+      </div>
+    </>
   );
 }

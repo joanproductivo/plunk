@@ -1,7 +1,7 @@
 import {Dialog, DialogContent, DialogDescription, DialogTitle, IconSpinner, cn} from '@plunk/ui';
 import {useEffect, useRef, useState} from 'react';
 
-import {wrapEmailWithStyles} from '../lib/emailStyles';
+import {wrapStoredEmail} from '../lib/emailStyles';
 import {Segmented} from './Segmented';
 
 export interface EmailPreviewModalProps {
@@ -124,7 +124,7 @@ function EmailBody({html}: {html: string}) {
   const [height, setHeight] = useState(320);
   const [loaded, setLoaded] = useState(false);
 
-  const srcDoc = withNewTabLinks(wrapEmailWithStyles(html));
+  const srcDoc = withNewTabLinks(wrapStoredEmail(html));
 
   useEffect(() => {
     const iframe = frame.current;

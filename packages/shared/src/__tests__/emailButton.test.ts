@@ -2,9 +2,9 @@ import {describe, expect, it} from 'vitest';
 
 import {
   BUTTON_DEFAULTS,
-  BUTTON_FONTS,
   buttonStyle,
   type ButtonStyle,
+  EMAIL_FONTS,
   isSafeButtonHref,
   normalizeHexColor,
   readButtonStyle,
@@ -67,7 +67,7 @@ describe('button style', () => {
   });
 
   it('recognises a font after juice turns its double quotes into single ones', () => {
-    const stack = BUTTON_FONTS['modern-sans'].replace(/'/g, '"');
+    const stack = EMAIL_FONTS['modern-sans'].replace(/'/g, '"');
 
     expect(readButtonStyle(`font-family: ${stack}`).font).toBe('modern-sans');
   });

@@ -4,6 +4,7 @@ import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
 import {SEGMENT_MEMBERS_MAX} from '../segments.js';
+import type {ProjectBrand} from '../template/brand.js';
 
 const literalSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.date()]);
 type Literal = z.infer<typeof literalSchema>;
@@ -621,4 +622,15 @@ export const MembershipSchemas = {
   updateRole: z.object({
     role: z.enum(['ADMIN', 'MEMBER']),
   }),
+} as const;
+
+/**
+ * A project's brand as sent to the API: any object, which the API then reads through
+ * toProjectBrand's allowlist, keeping only known fonts, colours and widths.
+ */
+export const BrandSchemas = {
+  update: z.custom<Partial<ProjectBrand>>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The brand must be an object',
+  ),
 } as const;

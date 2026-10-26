@@ -1,12 +1,11 @@
 // @vitest-environment happy-dom
-import {BUTTON_DEFAULTS, buttonStyle, type ButtonStyle} from '@plunk/shared';
+import {BUTTON_DEFAULTS, buttonStyle, type ButtonStyle, detectCustomHtmlPatterns} from '@plunk/shared';
 import {Editor} from '@tiptap/core';
 import {Link} from '@tiptap/extension-link';
 import {NodeSelection} from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import {afterEach, describe, expect, it} from 'vitest';
 
-import {detectCustomHtmlPatterns} from '../../../lib/emailStyles';
 import {EmailButton} from '../EmailButton';
 import {EmailTextAlign} from '../EmailTextAlign';
 

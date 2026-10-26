@@ -884,3 +884,14 @@ enum EmailStatus {
   COMPLAINED // Marked as spam
   FAILED // Failed to send
 }
+
+/// Plunk Lite: a project's brand, which new emails are written in (font, colours, background,
+/// width and default button; see BrandService). A table of its own with no relation to Project,
+/// so that Plunk's own tables stay as upstream has them; a deleted project only leaves its row.
+model PlunkLiteProjectBrand {
+  projectId String   @id
+  brand     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("plunk_lite_project_brands")
+}

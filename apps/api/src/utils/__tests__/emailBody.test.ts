@@ -1,4 +1,14 @@
-import {buttonStyle, BUTTON_DEFAULTS, readButtonStyle, readSpacerHeight, spacerStyle} from '@plunk/shared';
+import {
+  buttonStyle,
+  BUTTON_DEFAULTS,
+  type EmailBrand,
+  EMAIL_FONTS,
+  joinEmailMarkers,
+  readButtonStyle,
+  readSpacerHeight,
+  spacerStyle,
+  toEmailBrand,
+} from '@plunk/shared';
 import {load} from 'cheerio/slim';
 import signale from 'signale';
 import {afterEach, describe, expect, it, vi} from 'vitest';
@@ -362,6 +372,127 @@ describe('renderBody', () => {
       renderBody('<p>Hello</p>');
 
       expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('brands', () => {
+    const branded = (
+      brand: Partial<EmailBrand>,
+      body = '<h1>Hi</h1><p>Text with <a href="https://a.com">a link</a></p>',
+    ) => joinEmailMarkers({preheader: '', brand: toEmailBrand(brand), body});
+
+    it("inlines the brand's font and colours", () => {
+      const html = renderBody(
+        branded({font: 'book-serif', textColor: '#222222', headingColor: '#000000', linkColor: '#0a7c3e'}),
+      );
+
+      expect(styleOf(html, 'div class="prose prose-sm max-w-none')).toContain('color: #222222;');
+      expect(styleOf(html, 'div class="prose prose-sm max-w-none')).toContain(
+        `font-family: ${EMAIL_FONTS['book-serif']}`,
+      );
+      expect(styleOf(html, 'h1')).toContain('color: #000000;');
+      expect(styleOf(html, 'a')).toContain('color: #0a7c3e;');
+      expect(html).not.toContain('plunk:brand');
+    });
+
+    it('sends a brand without background or width in the same document as before', () => {
+      const html = renderBody(branded({textColor: '#222222'}), undefined, '<p>footer</p>');
+
+      expect(html).not.toContain('<table');
+      expect(html).toMatch(/<p>footer<\/p><\/body>\s*<\/html>$/);
+    });
+
+    it('draws the background on an outer table and centres a column of the chosen width', () => {
+      const html = renderBody(branded({backgroundColor: '#f3f4f6', contentColor: '#fffbeb', contentWidth: 600}));
+
+      expect(html).toContain(
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f3f4f6" style="background-color: #f3f4f6;">',
+      );
+      expect(html).toContain('<!--[if mso]><table role="presentation" width="600" align="center"');
+      expect(html).toContain(
+        '<div style="max-width: 600px; margin: 0 auto; padding: 24px; background-color: #fffbeb; text-align: left;">',
+      );
+      expect(styleOf(html, 'body')).toContain('padding: 0;');
+      expect(styleOf(html, 'body')).toContain('background-color: #f3f4f6;');
+      // The prose styles stay inside the column, off the layout tables
+      expect(styleOf(html, 'td')).toBe('padding: 16px;');
+    });
+
+    it('puts the footer at the end of the column, and leaves no slot behind without one', () => {
+      const withFooter = renderBody(branded({backgroundColor: '#f3f4f6'}), undefined, '<p>footer</p>');
+      const without = renderBody(branded({backgroundColor: '#f3f4f6'}));
+
+      expect(withFooter).toMatch(/<\/div>\s*<p>footer<\/p>\s*<\/div>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/);
+      expect(without).not.toContain('plunk:footer');
+    });
+
+    it('keeps the footer legible on a dark content colour', () => {
+      const light = renderBody(
+        branded({backgroundColor: '#000000', contentColor: '#ffffff'}),
+        undefined,
+        '<p>footer</p>',
+      );
+      const dark = renderBody(
+        branded({backgroundColor: '#000000', contentColor: '#1f2937'}),
+        undefined,
+        '<p>footer</p>',
+      );
+
+      expect(light).not.toContain('<div style="background-color: #ffffff; padding: 8px 16px;">');
+      expect(dark).toContain('<div style="background-color: #ffffff; padding: 8px 16px;"><p>footer</p></div>');
+    });
+
+    it('keeps the footer out of reach of the content it follows', () => {
+      // As contact data rendered by Liquid could leave the body: an unclosed comment, or closing
+      // tags followed by a hidden element
+      for (const body of ['<p>a</p><!-- open', '<p>a</p></div></div><span style="display:none">']) {
+        for (const brand of [{backgroundColor: '#eeeeee'}, {contentWidth: 600}]) {
+          const html = renderBody(branded(brand, body), undefined, '<p id="footer">footer</p>');
+          const footer = html.indexOf('<p id="footer">');
+          const before = html.slice(0, footer);
+
+          expect(footer).toBeGreaterThan(-1);
+          // Not inside a comment, nor inside the hidden span
+          expect(before.lastIndexOf('<!--')).toBeLessThanOrEqual(before.lastIndexOf('-->'));
+          expect(before.lastIndexOf('<span')).toBeLessThanOrEqual(before.lastIndexOf('</span>'));
+        }
+      }
+    });
+
+    it('keeps entities in a framed email exactly as written', () => {
+      const html = renderBody(branded({contentWidth: 600}, '<p>Im&aacute;genes &amp; &lt;b&gt; “x”</p>'));
+
+      expect(html).toContain('Im&aacute;genes &amp; &lt;b&gt; “x”</p>');
+    });
+
+    it("gives buttons without a font of their own the brand's font", () => {
+      const html = renderBody(
+        branded(
+          {font: 'modern-serif'},
+          `<p><a class="email-button" href="https://a.com" style="${buttonStyle(BUTTON_DEFAULTS)}">Go</a></p>`,
+        ),
+      );
+
+      expect(styleOf(html, 'a')).toContain(`font-family: ${EMAIL_FONTS['modern-serif']}`);
+    });
+
+    it('ignores the brand of custom HTML, which carries its own styles', () => {
+      const custom = '<table><tr><td style="color: red">Hi</td></tr></table>';
+
+      expect(renderBody(branded({backgroundColor: '#000000'}, custom))).toBe(custom);
+    });
+
+    it('falls back to a <style> block in the brand when inlining fails', () => {
+      vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
+      vi.mocked(load).mockImplementationOnce(() => {
+        throw new Error('boom');
+      });
+
+      const html = renderBody(branded({backgroundColor: '#f3f4f6', linkColor: '#0a7c3e'}));
+
+      expect(html).toContain('<style>');
+      expect(html).toContain('color: #0a7c3e;');
+      expect(html).toContain('bgcolor="#f3f4f6"');
     });
   });
 });

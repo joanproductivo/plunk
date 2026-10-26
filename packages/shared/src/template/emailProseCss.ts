@@ -1,32 +1,35 @@
-/** The email's own font, which buttons without a font of their own also get when sent. */
-export const EMAIL_FONT_FAMILY =
-  "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
+import {emailFontFamily} from './emailFonts.js';
 
 /**
- * Typography for visual editor emails. Mirrors the stylesheet in apps/web/src/lib/emailStyles.ts,
- * which the preview keeps in a <style> block. Sending moves it into style attributes instead,
+ * Typography for visual editor emails in `brand`. Sending moves it into style attributes,
  * because several clients drop <style> (Gmail on the mobile web, Gmail apps with non-Google
  * accounts) or <body> (Outlook for Mac, Yahoo apps), hence the font on .prose as well as body.
  *
- * The preview's `* { box-sizing }` reset is left out: inlined, it lands on every element and adds
- * about a fifth to the size, which brings long emails closer to Gmail's 102 KB clipping.
- *
- * The blockquote's `quotes` is left out too: it only feeds ::before/::after content, which
- * cannot be inlined, and its escaped value is the kind some clients' sanitisers reject.
+ * Only the preview, which keeps it in a <style> block, gets the `* { box-sizing }` reset (inlined,
+ * it lands on every element and adds about a fifth to the size, which brings long emails closer to
+ * Gmail's 102 KB clipping) and the blockquote's `quotes` (it only feeds ::before/::after content,
+ * which cannot be inlined, and its escaped value is the kind some clients' sanitisers reject).
  */
-export const EMAIL_PROSE_CSS = `body {
+export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = false} = {}): string {
+  const font = emailFontFamily(brand);
+  // A framed email's background and spacing are drawn by its outer table (see emailDocument)
+  const bodyBox = isFramedBrand(brand)
+    ? `padding: 0;${brand.backgroundColor ? `\n  background-color: ${brand.backgroundColor};` : ''}`
+    : 'padding: 16px;';
+  return `${preview ? '* { box-sizing: border-box; }\n' : ''}body {
   margin: 0;
-  padding: 16px;
-  font-family: ${EMAIL_FONT_FAMILY};
+  ${bodyBox}
+  font-family: ${font};
   line-height: 1.5;
   color: #111827;
 }
 
 /* Tailwind Typography (prose) base styles */
 .prose {
-  color: #374151;
+  color: ${brand.textColor};
   max-width: 600px;
-  font-family: ${EMAIL_FONT_FAMILY};
+  font-family: ${font};
 }
 .prose [class~="lead"] {
   color: #4b5563;
@@ -36,12 +39,12 @@ export const EMAIL_PROSE_CSS = `body {
   margin-bottom: 1.2em;
 }
 .prose a {
-  color: #3b82f6;
+  color: ${brand.linkColor};
   text-decoration: underline;
   font-weight: 500;
 }
 .prose strong {
-  color: #111827;
+  color: ${brand.headingColor};
   font-weight: 600;
 }
 .prose ol, .prose ul {
@@ -91,7 +94,7 @@ export const EMAIL_PROSE_CSS = `body {
   color: #111827;
   border-left-width: 0.25rem;
   border-left-style: solid;
-  border-left-color: #e5e7eb;
+  border-left-color: #e5e7eb;${preview ? '\n  quotes: "\\201C""\\201D""\\2018""\\2019";' : ''}
   margin-top: 1.6em;
   margin-bottom: 1.6em;
   margin-left: 40px;
@@ -99,7 +102,7 @@ export const EMAIL_PROSE_CSS = `body {
   padding-left: 1em;
 }
 .prose h1 {
-  color: #111827;
+  color: ${brand.headingColor};
   font-weight: 800;
   font-size: 2.25em;
   margin-top: 0;
@@ -107,7 +110,7 @@ export const EMAIL_PROSE_CSS = `body {
   line-height: 1.1111111;
 }
 .prose h2 {
-  color: #111827;
+  color: ${brand.headingColor};
   font-weight: 700;
   font-size: 1.5em;
   margin-top: 2em;
@@ -115,7 +118,7 @@ export const EMAIL_PROSE_CSS = `body {
   line-height: 1.3333333;
 }
 .prose h3 {
-  color: #111827;
+  color: ${brand.headingColor};
   font-weight: 600;
   font-size: 1.25em;
   margin-top: 1.6em;
@@ -123,7 +126,7 @@ export const EMAIL_PROSE_CSS = `body {
   line-height: 1.6;
 }
 .prose h4 {
-  color: #111827;
+  color: ${brand.headingColor};
   font-weight: 600;
   margin-top: 1.5em;
   margin-bottom: 0.5em;
@@ -325,3 +328,4 @@ export const EMAIL_PROSE_CSS = `body {
 .prose .resizable-image-container img {
   margin: 0;
 }`;
+}

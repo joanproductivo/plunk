@@ -4,18 +4,11 @@
  * agree on what a button is without a column of its own.
  */
 
+import {EMAIL_FONTS, type EmailFont} from './emailFonts.js';
 import {declarations} from './inlineStyle.js';
 
 export type ButtonShape = 'rectangle' | 'rounded' | 'pill';
 export type ButtonSize = 'small' | 'medium' | 'large';
-export type ButtonFont =
-  | 'modern-sans'
-  | 'geometric-sans'
-  | 'rounded-sans'
-  | 'modern-serif'
-  | 'book-serif'
-  | 'monospace';
-
 export interface ButtonStyle {
   backgroundColor: string;
   textColor: string;
@@ -23,7 +16,7 @@ export interface ButtonStyle {
   size: ButtonSize;
   fullWidth: boolean;
   /** null keeps the email's own font. */
-  font: ButtonFont | null;
+  font: EmailFont | null;
 }
 
 export const BUTTON_DEFAULTS: ButtonStyle = {
@@ -42,17 +35,6 @@ export const BUTTON_PADDING: Record<ButtonSize, readonly [number, number]> = {
   small: [8, 12],
   medium: [12, 20],
   large: [16, 32],
-};
-
-// Font stacks that degrade well across email clients, from usewaypoint/email-builder-js (MIT).
-export const BUTTON_FONTS: Record<ButtonFont, string> = {
-  'modern-sans': "'Helvetica Neue', 'Arial Nova', 'Nimbus Sans', Arial, sans-serif",
-  'geometric-sans': "Avenir, 'Avenir Next LT Pro', Montserrat, Corbel, 'URW Gothic', source-sans-pro, sans-serif",
-  'rounded-sans':
-    "ui-rounded, 'Hiragino Maru Gothic ProN', Quicksand, Comfortaa, Manjari, 'Arial Rounded MT Bold', Calibri, source-sans-pro, sans-serif",
-  'modern-serif': "Charter, 'Bitstream Charter', 'Sitka Text', Cambria, serif",
-  'book-serif': "'Iowan Old Style', 'Palatino Linotype', 'URW Palladio L', P052, serif",
-  'monospace': "'Nimbus Mono PS', 'Courier New', 'Cutive Mono', monospace",
 };
 
 /**
@@ -103,14 +85,16 @@ export function toButtonStyle(value: unknown): ButtonStyle {
   const data = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const known = <T extends string>(table: Record<T, unknown>, key: unknown): key is T =>
     typeof key === 'string' && Object.hasOwn(table, key);
+  // Only strings: String() of an object that cannot convert would throw
+  const hex = (color: unknown) => normalizeHexColor(typeof color === 'string' ? color : '');
 
   return {
-    backgroundColor: normalizeHexColor(String(data.backgroundColor ?? '')) ?? BUTTON_DEFAULTS.backgroundColor,
-    textColor: normalizeHexColor(String(data.textColor ?? '')) ?? BUTTON_DEFAULTS.textColor,
+    backgroundColor: hex(data.backgroundColor) ?? BUTTON_DEFAULTS.backgroundColor,
+    textColor: hex(data.textColor) ?? BUTTON_DEFAULTS.textColor,
     shape: known(BUTTON_RADIUS, data.shape) ? data.shape : BUTTON_DEFAULTS.shape,
     size: known(BUTTON_PADDING, data.size) ? data.size : BUTTON_DEFAULTS.size,
     fullWidth: typeof data.fullWidth === 'boolean' ? data.fullWidth : BUTTON_DEFAULTS.fullWidth,
-    font: known(BUTTON_FONTS, data.font) ? data.font : null,
+    font: known(EMAIL_FONTS, data.font) ? data.font : null,
   };
 }
 
@@ -134,7 +118,7 @@ export function readButtonStyle(style: string | null | undefined): ButtonStyle {
     ) ?? BUTTON_DEFAULTS.size;
 
   const family = fontKey(values.get('font-family') ?? '');
-  const font = (Object.keys(BUTTON_FONTS) as ButtonFont[]).find(key => fontKey(BUTTON_FONTS[key]) === family) ?? null;
+  const font = (Object.keys(EMAIL_FONTS) as EmailFont[]).find(key => fontKey(EMAIL_FONTS[key]) === family) ?? null;
 
   return {
     backgroundColor: normalizeHexColor(values.get('background-color')) ?? BUTTON_DEFAULTS.backgroundColor,
@@ -158,7 +142,7 @@ export function buttonStyle(button: ButtonStyle): string {
     'font-weight: 600',
     'line-height: 1.2',
     `border-radius: ${BUTTON_RADIUS[button.shape]}px`,
-    ...(button.font ? [`font-family: ${BUTTON_FONTS[button.font]}`] : []),
+    ...(button.font ? [`font-family: ${EMAIL_FONTS[button.font]}`] : []),
   ]
     .map(declaration => `${declaration};`)
     .join(' ');
