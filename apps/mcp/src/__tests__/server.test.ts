@@ -150,6 +150,22 @@ describe('read-only mode', () => {
   });
 });
 
+/**
+ * A segment API: GET /segments/:id answers the segment, and every write is recorded with its
+ * body and answered with `answer`.
+ */
+function segmentApi(answer: unknown, {trackMembership = false} = {}) {
+  const writes: Array<{url: string; method?: string; body?: unknown}> = [];
+  mockApi((url, init) => {
+    if (!init?.method || init.method === 'GET') {
+      return json({id: url.split('/').pop(), name: 'Workshop', type: 'STATIC', trackMembership});
+    }
+    writes.push({url, method: init.method, body: init.body ? JSON.parse(String(init.body)) : undefined});
+    return json(answer);
+  });
+  return writes;
+}
+
 describe('tool behaviour', () => {
   it('lists contacts and reports the total', async () => {
     mockApi(() => json({data: [{id: '1', email: 'ada@example.com'}], cursor: null, hasMore: false, total: 1}));
@@ -198,12 +214,7 @@ describe('tool behaviour', () => {
   });
 
   it('adds contacts to a static segment by email, creating none unless asked', async () => {
-    const calls: Array<{url: string; method?: string; body?: unknown}> = [];
-
-    mockApi((url, init) => {
-      calls.push({url, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined});
-      return json({added: 2, created: 0, notFound: ['nobody@example.com']});
-    });
+    const calls = segmentApi({added: 2, created: 0, notFound: ['nobody@example.com']});
 
     const {client, close} = await connect(baseConfig);
     const segmentId = '11111111-1111-4111-8111-111111111111';
@@ -229,12 +240,7 @@ describe('tool behaviour', () => {
   });
 
   it('removes contacts from a static segment by email', async () => {
-    const calls: Array<{url: string; method?: string; body?: unknown}> = [];
-
-    mockApi((url, init) => {
-      calls.push({url, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined});
-      return json({removed: 1});
-    });
+    const calls = segmentApi({removed: 1});
 
     const {client, close} = await connect(baseConfig);
     const segmentId = '11111111-1111-4111-8111-111111111111';
@@ -258,11 +264,7 @@ describe('tool behaviour', () => {
   });
 
   it('creates missing contacts with the subscription asked for', async () => {
-    const bodies: unknown[] = [];
-    mockApi((_url, init) => {
-      bodies.push(JSON.parse(String(init?.body)));
-      return json({added: 1, created: 1, notFound: []});
-    });
+    const writes = segmentApi({added: 1, created: 1, notFound: []});
 
     const {client, close} = await connect(baseConfig);
 
@@ -277,8 +279,41 @@ describe('tool behaviour', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    expect(bodies).toEqual([{emails: ['new@example.com'], createMissing: true, subscribed: false}]);
+    expect(writes.map(w => w.body)).toEqual([{emails: ['new@example.com'], createMissing: true, subscribed: false}]);
 
+    await close();
+  });
+
+  it.each(['plunk_add_to_segment', 'plunk_remove_from_segment'])(
+    '%s changes nothing in a segment that tracks membership until the user confirms',
+    async name => {
+      const writes = segmentApi({added: 1, created: 0, notFound: [], removed: 1}, {trackMembership: true});
+      const {client, close} = await connect(baseConfig);
+
+      await client
+        .callTool({name, arguments: {segmentId: '11111111-1111-4111-8111-111111111111', emails: ['a@example.com']}})
+        .catch(() => undefined);
+
+      expect(writes).toEqual([]);
+
+      await close();
+    },
+  );
+
+  it('changes a tracked segment without asking when confirmation is waived', async () => {
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const writes = segmentApi({added: 1, created: 0, notFound: []}, {trackMembership: true});
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_add_to_segment',
+      arguments: {segmentId: '11111111-1111-4111-8111-111111111111', emails: ['a@example.com']},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(writes).toHaveLength(1);
+
+    delete process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS;
     await close();
   });
 

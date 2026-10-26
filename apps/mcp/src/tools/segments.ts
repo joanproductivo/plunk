@@ -3,10 +3,33 @@ import * as z from 'zod';
 import type {PlunkClient} from '../client.js';
 import {FILTER_HELP, filterCondition} from '../schemas.js';
 
-import {errorResult, jsonResult, register, runTool, type ToolContext} from './shared.js';
+import {errorResult, jsonResult, register, requireConfirmation, runTool, type ToolContext} from './shared.js';
 
 /** Most emails one call to the segment members endpoints takes */
 const MAX_EMAILS = 500;
+
+/**
+ * Asks before changing the members of a segment that tracks membership: each change fires its
+ * entry or exit event, and workflows started by it can send email. Undefined when no prompt is
+ * needed (the segment does not track membership, or the user confirmed).
+ */
+async function confirmTrackedChange(
+  client: PlunkClient,
+  context: unknown,
+  segmentId: string,
+  change: {key: string; question: (name: string) => string},
+) {
+  const segment = await client.request<{name?: string; trackMembership?: boolean}>({path: `/segments/${segmentId}`});
+  if (!segment.trackMembership) {
+    return undefined;
+  }
+
+  return requireConfirmation(
+    context as {mcpReq?: {inputResponses?: unknown}},
+    change.key,
+    `${change.question(segment.name ?? segmentId)} Workflows started by it can send email, which cannot be recalled.`,
+  );
+}
 
 /** Emails as the members endpoints take them: trimmed, up to 320 characters, at most MAX_EMAILS */
 const emailList = z
@@ -109,7 +132,7 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
         '',
         '**Side effects:** When the segment tracks membership, each contact added fires',
         '`segment.<slug>.entry` — also a current member, which counts as a new entry — and that can start',
-        'workflows (and their emails) for them.',
+        'workflows (and their emails) for them, so the user is asked to confirm first.',
         '',
         '**Key trigger phrases:** "add them to the segment", "put these people in", "tag these contacts"',
       ].join('\n'),
@@ -124,8 +147,18 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
       }),
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true},
     },
-    async ({segmentId, ...body}) =>
+    async ({segmentId, ...body}, context) =>
       runTool(async () => {
+        const pending = await confirmTrackedChange(client, context, segmentId, {
+          key: 'confirm_segment_add',
+          question: name =>
+            `Add ${body.emails.length} contact(s) to "${name}"? It tracks membership, so each one fires its ` +
+            'entry event, current members included.',
+        });
+        if (pending) {
+          return pending;
+        }
+
         const result = await client.request<{added: number; created: number; notFound: string[]}>({
           method: 'POST',
           path: `/segments/${segmentId}/members`,
@@ -154,7 +187,7 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
         'or whose contact was not in the segment, are ignored.',
         '',
         '**Side effects:** When the segment tracks membership, each contact that leaves fires',
-        '`segment.<slug>.exit`, which can start workflows for them.',
+        '`segment.<slug>.exit`, which can start workflows for them, so the user is asked to confirm first.',
         '',
         '**Key trigger phrases:** "take them out of the segment", "remove these people from"',
       ].join('\n'),
@@ -164,8 +197,18 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
       }),
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true},
     },
-    async ({segmentId, emails}) =>
+    async ({segmentId, emails}, context) =>
       runTool(async () => {
+        const pending = await confirmTrackedChange(client, context, segmentId, {
+          key: 'confirm_segment_remove',
+          question: name =>
+            `Remove ${emails.length} contact(s) from "${name}"? It tracks membership, so each member fires its ` +
+            'exit event.',
+        });
+        if (pending) {
+          return pending;
+        }
+
         const result = await client.request<{removed: number}>({
           method: 'DELETE',
           path: `/segments/${segmentId}/members`,
