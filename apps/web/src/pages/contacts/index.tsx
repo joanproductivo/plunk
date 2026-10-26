@@ -15,7 +15,7 @@ import {
   Label,
   Switch,
 } from '@plunk/ui';
-import type {Contact, Segment} from '@plunk/db';
+import type {Contact} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
 import type {
   BulkContactActionSelector,
@@ -37,6 +37,7 @@ import {
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {ExportContactsButton} from '../../components/ExportContactsButton';
 import {BulkActionsDialog} from '../../components/contacts/BulkActionsDialog';
+import {useSegments} from '../../components/segments/SegmentPicker';
 import {
   BulkActionBar,
   DataTable,
@@ -132,7 +133,7 @@ export default function ContactsPage() {
   const pageSize = 50;
 
   // Only static segments have members you can filter by and change by hand
-  const {data: segments} = useSWR<Segment[]>('/segments', {revalidateOnFocus: false});
+  const {data: segments} = useSegments();
   const staticSegments = useMemo(() => (segments ?? []).filter(s => s.type === 'STATIC'), [segments]);
 
   // The active list filters, as the API's selector takes them. The list below is fetched from

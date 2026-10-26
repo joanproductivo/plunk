@@ -1,19 +1,6 @@
-import type {Segment} from '@plunk/db';
 import type {SegmentSchemas} from '@plunk/shared';
 import type {ContactSegments, SegmentRef} from '@plunk/types';
-import {
-  Badge,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@plunk/ui';
-import {X} from 'lucide-react';
+import {Badge, Card, CardContent, CardHeader, CardTitle} from '@plunk/ui';
 import Link from 'next/link';
 import {useState} from 'react';
 import {toast} from 'sonner';
@@ -21,6 +8,7 @@ import useSWR from 'swr';
 
 import {network} from '../../lib/network';
 import {addSegmentMembers} from '../../lib/segmentMembers';
+import {SegmentChip, StaticSegmentSelect} from '../segments/SegmentPicker';
 
 interface ContactSegmentsCardProps {
   contactId: string;
@@ -34,12 +22,7 @@ interface ContactSegmentsCardProps {
  */
 export function ContactSegmentsCard({contactId, email}: ContactSegmentsCardProps) {
   const {data: segments, error, mutate} = useSWR<ContactSegments>(`/contacts/${contactId}/segments`);
-  const {data: allSegments} = useSWR<Segment[]>('/segments', {revalidateOnFocus: false});
   const [isBusy, setIsBusy] = useState(false);
-
-  const joinable = (allSegments ?? []).filter(
-    segment => segment.type === 'STATIC' && !segments?.static.some(s => s.id === segment.id),
-  );
 
   const changeMembership = async (segment: SegmentRef, action: 'add' | 'remove') => {
     setIsBusy(true);
@@ -86,44 +69,23 @@ export function ContactSegmentsCard({contactId, email}: ContactSegmentsCardProps
               ) : (
                 <div className="flex flex-wrap gap-1.5">
                   {segments.static.map(segment => (
-                    <Badge key={segment.id} variant="outline" className="gap-1 pr-1 font-medium">
-                      <Link href={`/segments/${segment.id}`} className="hover:underline">
-                        {segment.name}
-                      </Link>
-                      <button
-                        type="button"
-                        onClick={() => void changeMembership(segment, 'remove')}
-                        disabled={isBusy}
-                        className="rounded-full p-0.5 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-50"
-                        aria-label={`Remove from ${segment.name}`}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </Badge>
+                    <SegmentChip
+                      key={segment.id}
+                      name={segment.name}
+                      href={`/segments/${segment.id}`}
+                      onRemove={() => void changeMembership(segment, 'remove')}
+                      removeLabel={`Remove from ${segment.name}`}
+                      disabled={isBusy}
+                    />
                   ))}
                 </div>
               )}
-              {joinable.length > 0 && (
-                <Select
-                  value=""
-                  onValueChange={segmentId => {
-                    const segment = joinable.find(s => s.id === segmentId);
-                    if (segment) void changeMembership(segment, 'add');
-                  }}
-                  disabled={isBusy}
-                >
-                  <SelectTrigger className="h-8 text-xs" aria-label="Add to a static segment">
-                    <SelectValue placeholder="Add to a segment…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {joinable.map(segment => (
-                      <SelectItem key={segment.id} value={segment.id}>
-                        {segment.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
+              <StaticSegmentSelect
+                exclude={segments.static.map(segment => segment.id)}
+                onSelect={segment => void changeMembership(segment, 'add')}
+                placeholder="Add to a segment…"
+                disabled={isBusy}
+              />
             </div>
 
             {segments.dynamic.length > 0 && (

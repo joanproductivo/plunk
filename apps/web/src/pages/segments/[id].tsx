@@ -444,8 +444,8 @@ export default function SegmentDetailPage() {
                               contactsData.data.every(c => selectedEmails.has(c.email))
                                 ? true
                                 : selectedEmails.size > 0
-                                ? 'indeterminate'
-                                : false
+                                  ? 'indeterminate'
+                                  : false
                             }
                             onCheckedChange={checked =>
                               setSelectedEmails(
