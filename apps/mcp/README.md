@@ -135,6 +135,8 @@ Writing tools:
 | `plunk_send_campaign`              | Send or schedule a campaign *(destructive, irreversible)* |
 | `plunk_cancel_campaign`            | Stop a scheduled or in-flight campaign *(destructive)*    |
 | `plunk_create_segment`             | Create an audience segment                                |
+| `plunk_add_to_segment`             | Add contacts to a static segment by email                 |
+| `plunk_remove_from_segment`        | Remove contacts from a static segment by email            |
 | `plunk_create_workflow`            | Create a workflow, disabled, triggered by an event        |
 | `plunk_update_workflow`            | Rename, change the trigger event, or allow re-entry       |
 | `plunk_duplicate_workflow`         | Copy a workflow, disabled, e.g. for another language      |

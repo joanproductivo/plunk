@@ -5,6 +5,16 @@ import {FILTER_HELP, filterCondition} from '../schemas.js';
 
 import {errorResult, jsonResult, register, runTool, type ToolContext} from './shared.js';
 
+/** Most emails one call to the segment members endpoints takes */
+const MAX_EMAILS = 500;
+
+/** Emails as the members endpoints take them: trimmed, up to 320 characters, at most MAX_EMAILS */
+const emailList = z
+  .array(z.string().trim().min(1).max(320))
+  .min(1)
+  .max(MAX_EMAILS)
+  .describe(`Up to ${MAX_EMAILS} email addresses.`);
+
 export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): void {
   register(
     ctx,
@@ -80,6 +90,89 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
 
         const segment = await client.request({method: 'POST', path: '/segments', body: input});
         return jsonResult('Segment created:', segment);
+      }),
+  );
+
+  register(
+    ctx,
+    'plunk_add_to_segment',
+    {
+      title: 'Add contacts to a segment',
+      description: [
+        '**Purpose:** Add contacts to a STATIC segment by email. With `createMissing`, contacts that do',
+        'not exist yet are created first.',
+        '',
+        '**NOT for:** DYNAMIC segments — their filter decides who is in them, and the API refuses.',
+        '',
+        '**Returns:** `added` (contacts that entered, including current members, who re-enter), `created`',
+        '(contacts created first) and `notFound` (emails with no contact, when `createMissing` is false).',
+        '',
+        '**Side effects:** When the segment tracks membership, each contact added fires',
+        '`segment.<slug>.entry` — also a current member, which counts as a new entry — and that can start',
+        'workflows (and their emails) for them.',
+        '',
+        '**Key trigger phrases:** "add them to the segment", "put these people in", "tag these contacts"',
+      ].join('\n'),
+      inputSchema: z.object({
+        segmentId: z.string().uuid().describe('ID of the STATIC segment (from plunk_list_segments).'),
+        emails: emailList,
+        createMissing: z
+          .boolean()
+          .default(false)
+          .describe('Create contacts for emails that do not exist yet (subscribed unless `subscribed` is false).'),
+        subscribed: z.boolean().optional().describe('With createMissing: subscription state of the created contacts.'),
+      }),
+      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true},
+    },
+    async ({segmentId, ...body}) =>
+      runTool(async () => {
+        const result = await client.request<{added: number; created: number; notFound: string[]}>({
+          method: 'POST',
+          path: `/segments/${segmentId}/members`,
+          body,
+        });
+
+        const notFound =
+          result.notFound.length > 0
+            ? ` ${result.notFound.length} email(s) have no contact; pass createMissing: true to create them.`
+            : '';
+        return jsonResult(`Added ${result.added} contact(s); created ${result.created}.${notFound}`, result);
+      }),
+  );
+
+  register(
+    ctx,
+    'plunk_remove_from_segment',
+    {
+      title: 'Remove contacts from a segment',
+      description: [
+        '**Purpose:** Remove contacts from a STATIC segment by email. The contacts themselves are kept.',
+        '',
+        '**NOT for:** DYNAMIC segments (the API refuses), or deleting contacts.',
+        '',
+        '**Returns:** `removed`, the contacts that were in the segment and left it. Emails with no contact,',
+        'or whose contact was not in the segment, are ignored.',
+        '',
+        '**Side effects:** When the segment tracks membership, each contact that leaves fires',
+        '`segment.<slug>.exit`, which can start workflows for them.',
+        '',
+        '**Key trigger phrases:** "take them out of the segment", "remove these people from"',
+      ].join('\n'),
+      inputSchema: z.object({
+        segmentId: z.string().uuid().describe('ID of the STATIC segment (from plunk_list_segments).'),
+        emails: emailList,
+      }),
+      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true},
+    },
+    async ({segmentId, emails}) =>
+      runTool(async () => {
+        const result = await client.request<{removed: number}>({
+          method: 'DELETE',
+          path: `/segments/${segmentId}/members`,
+          body: {emails},
+        });
+
+        return jsonResult(`Removed ${result.removed} contact(s) from the segment.`, result);
       }),
   );
 }
