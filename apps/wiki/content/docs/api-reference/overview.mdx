@@ -215,6 +215,7 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`. |
 | POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`.             |
 | GET    | `/contacts/:id`                       | Get a single contact.                                                                        |
+| GET    | `/contacts/:id/segments`              | The contact's segments: `{ static, dynamic }`, each a list of `{ id, name }` sorted by name. Dynamic ones are those whose filter it matches now. |
 | PATCH  | `/contacts/:id`                       | Update a contact's email, subscription state, or `data` fields.                              |
 | DELETE | `/contacts/:id`                       | Delete a contact.                                                                            |
 | POST   | `/contacts/lookup`                    | Bulk email-existence check (max 500 emails per call).                                        |
