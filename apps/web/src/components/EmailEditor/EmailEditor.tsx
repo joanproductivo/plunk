@@ -13,6 +13,8 @@ import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
 import {type ButtonAttrs, EmailButton} from './EmailButton';
 import {ButtonDialog} from './ButtonDialog';
+import {BoxDialog, useBoxDialog} from './BoxDialog';
+import {EmailBox, EmailDocument} from './EmailBox';
 import {ImageDialog} from './ImageDialog';
 import {type DividerAttrs, EmailDivider} from './EmailDivider';
 import {DividerDialog} from './DividerDialog';
@@ -31,7 +33,13 @@ import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {detectCustomHtmlPatterns, joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
+import {
+  BUTTON_DEFAULTS,
+  detectCustomHtmlPatterns,
+  joinEmailMarkers,
+  renderTemplate,
+  splitEmailMarkers,
+} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -154,10 +162,13 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     immediatelyRender: false,
     extensions: [
       StarterKit.configure({
+        // Boxes go at the top of the document, beside blocks (see EmailBox)
+        document: false,
         heading: {
           levels: [1, 2, 3],
         },
       }),
+      EmailDocument,
       EmailTextAlign,
       Color,
       TextStyle,
@@ -172,6 +183,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       EmailDivider,
       EmailSpacer,
       EmailVideo,
+      EmailBox,
       Variable,
       VariableMention,
       LogicMention,
@@ -207,6 +219,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
   const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
   const video = useBlockDialog<VideoAttrs>(editor, 'video');
+  const box = useBoxDialog(editor, emailBrand.look);
 
   // The slash menu's image row opens the same dialog as the toolbar
   useEffect(() => {
@@ -504,6 +517,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onDivider={divider.onToolbar}
             onSpacer={spacer.onToolbar}
             onVideo={video.onToolbar}
+            onBox={box.onToolbar}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
@@ -832,6 +846,10 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       <DividerDialog {...divider.dialogProps} />
       <SpacerDialog {...spacer.dialogProps} />
       <VideoDialog {...video.dialogProps} />
+      <BoxDialog
+        {...box.dialogProps}
+        buttonColor={emailBrand.button?.backgroundColor ?? BUTTON_DEFAULTS.backgroundColor}
+      />
 
       <ImageDialog
         open={showImageDialog}
@@ -913,6 +931,32 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           margin: 16px 0;
         }
 
+        /* Boxes: their text colour for what the prose styles colour, as when sending */
+        .ProseMirror [data-box] h1,
+        .ProseMirror [data-box] h2,
+        .ProseMirror [data-box] h3,
+        .ProseMirror [data-box] strong,
+        .ProseMirror [data-box] code,
+        .ProseMirror [data-box] blockquote {
+          color: inherit;
+        }
+        .ProseMirror [data-box] blockquote {
+          border-left-color: currentColor;
+        }
+        .ProseMirror [data-box] [data-node-view-content] > :first-child {
+          margin-top: 0;
+        }
+        .ProseMirror [data-box] [data-node-view-content] > :last-child {
+          margin-bottom: 0;
+        }
+        .ProseMirror [data-box] .box-settings {
+          opacity: 0.4;
+        }
+        .ProseMirror [data-box]:hover .box-settings,
+        .ProseMirror [data-box]:focus-within .box-settings {
+          opacity: 1;
+        }
+
         .resizable-image-container {
           display: inline-block;
           position: relative;
@@ -923,6 +967,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         .ProseMirror .node-button.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror .node-spacer.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror .node-video.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-box.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;

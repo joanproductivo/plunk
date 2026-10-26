@@ -110,6 +110,13 @@ const SLASH_ITEMS: SlashItem[] = [
     offered: (editor, options) => takesBlocks(editor) && options.canInsertImages(),
     run: opensDialog('video'),
   },
+  // Wraps the line it is typed on; boxes do not go inside boxes, lists or quotes
+  {
+    label: 'Box',
+    aliases: ['background', 'section', 'card'],
+    offered: editor => takesBlocks(editor) && !editor.isActive('box'),
+    run: opensDialog('box'),
+  },
   {
     label: 'Divider',
     syntax: '---',
