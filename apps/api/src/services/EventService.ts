@@ -48,15 +48,17 @@ export class EventService {
 
   /**
    * Track the same event for several contacts, one at a time to avoid database deadlocks.
-   * A failure is logged and the remaining contacts are still processed.
+   * A failure is logged and the remaining contacts are still processed. `onTracked` runs after
+   * each contact, failed or not, with how many are done; if it throws, the loop stops.
    */
   public static async trackEventsSequentially(
     projectId: string,
     eventName: string,
     contactIds: string[],
     data?: Record<string, unknown>,
+    {onTracked}: {onTracked?: (done: number) => Promise<void>} = {},
   ): Promise<void> {
-    for (const contactId of contactIds) {
+    for (const [index, contactId] of contactIds.entries()) {
       try {
         await this.trackEvent(projectId, eventName, contactId, undefined, data);
       } catch (error) {
@@ -65,6 +67,7 @@ export class EventService {
           signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
         }
       }
+      await onTracked?.(index + 1);
     }
   }
 

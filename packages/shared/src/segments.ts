@@ -1,3 +1,5 @@
+import type {SegmentEventKind} from '@plunk/types';
+
 /**
  * Convert segment name to a URL-safe slug for event names
  * Example: "VIP Customers" -> "vip-customers"
@@ -11,8 +13,6 @@ export function slugifySegmentName(name: string): string {
     .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
     .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
 }
-
-export type SegmentEventKind = 'entry' | 'exit';
 
 /** Most emails one call to the static segment members endpoints takes */
 export const SEGMENT_MEMBERS_MAX = 500;

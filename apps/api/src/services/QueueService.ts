@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
 import {type Job, Queue} from 'bullmq';
 import type {RedisOptions} from 'ioredis';
@@ -18,6 +20,7 @@ import type {
   MeterEventJobData,
   ScheduledCampaignJobData,
   SegmentCountJobData,
+  SegmentMembershipEventsJobData,
   SendEmailJobData,
   SnoozeSweepJobData,
   WorkflowStepJobData,
@@ -273,6 +276,23 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
     },
     removeOnComplete: 20,
     removeOnFail: 50,
+  },
+});
+
+/**
+ * Static segment entry/exit events fired outside the request that changed the membership.
+ * Retries are safe: the worker records how far it got and resumes from there.
+ */
+export const segmentMembershipEventsQueue = new Queue<SegmentMembershipEventsJobData>('segment-membership-events', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 5000,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 500,
   },
 });
 
@@ -569,6 +589,18 @@ export class QueueService {
   }
 
   /**
+   * Queue the entry/exit events of a static segment membership change. The job ID is set here so
+   * a command the Redis client resends after a dropped connection cannot add the job twice.
+   */
+  public static async queueSegmentMembershipEvents(
+    data: SegmentMembershipEventsJobData,
+  ): Promise<Job<SegmentMembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add('track-segment-membership-events', data, {
+      jobId: `segment-events-${crypto.randomUUID()}`,
+    });
+  }
+
+  /**
    * Get queue statistics
    */
   public static async getStats() {
@@ -584,6 +616,7 @@ export class QueueService {
       idempotencyKeyCleanupCounts,
       bulkContactCounts,
       meterCounts,
+      segmentMembershipEventsCounts,
     ] = await Promise.all([
       emailQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       campaignQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
@@ -596,6 +629,7 @@ export class QueueService {
       idempotencyKeyCleanupQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       bulkContactQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       meterQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      segmentMembershipEventsQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
     ]);
 
     return {
@@ -610,6 +644,7 @@ export class QueueService {
       idempotencyKeyCleanup: idempotencyKeyCleanupCounts,
       bulkContact: bulkContactCounts,
       meter: meterCounts,
+      segmentMembershipEvents: segmentMembershipEventsCounts,
     };
   }
 
@@ -793,6 +828,7 @@ export class QueueService {
       apiRequestCleanupQueue.close(),
       bulkContactQueue.close(),
       meterQueue.close(),
+      segmentMembershipEventsQueue.close(),
     ]);
   }
 }
