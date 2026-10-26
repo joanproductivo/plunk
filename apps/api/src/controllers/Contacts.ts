@@ -4,8 +4,14 @@ import {pipeline} from 'node:stream/promises';
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
-import {ContactSchemas} from '@plunk/shared';
-import type {BulkContactActionSelector, ContactSubscriptionStatus} from '@plunk/types';
+import {ContactSchemas, UtilitySchemas} from '@plunk/shared';
+import type {
+  BulkContactActionJobData,
+  BulkContactActionSelector,
+  BulkContactRecordOperation,
+  BulkSegmentOperation,
+  ContactSubscriptionStatus,
+} from '@plunk/types';
 import {CONTACT_SUBSCRIPTION_STATUSES} from '@plunk/types';
 import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
@@ -14,6 +20,7 @@ import {HttpException} from '../exceptions/index.js';
 import {ContactExportService} from '../services/ContactExportService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
+import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 // Configure multer for file uploads (memory storage)
@@ -74,9 +81,17 @@ export class Contacts {
     const dirParam = req.query.dir as string | undefined;
     const dir = dirParam === 'asc' ? 'asc' : dirParam === 'desc' ? 'desc' : undefined;
 
+    // Optional `?segmentId=`: only the contacts currently in that segment.
+    const segmentIdParam = req.query.segmentId;
+    if (segmentIdParam !== undefined && !UtilitySchemas.id.safeParse({id: segmentIdParam}).success) {
+      throw new HttpException(400, 'segmentId must be a valid UUID');
+    }
+    const segmentId = segmentIdParam as string | undefined;
+
     const result = await ContactService.list(auth.projectId!, limit, cursor, search, {
       status,
       subscribed,
+      segmentId,
       sort,
       dir,
     });
@@ -587,6 +602,28 @@ export class Contacts {
   }
 
   /**
+   * POST /contacts/bulk-add-to-segment
+   * Queue adding contacts to a static segment. Contacts already in it re-enter it.
+   */
+  @Post('bulk-add-to-segment')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkAddToSegment(req: Request, res: Response, _next: NextFunction) {
+    return queueBulkSegmentAction(req, res, 'addToSegment');
+  }
+
+  /**
+   * POST /contacts/bulk-remove-from-segment
+   * Queue removing contacts from a static segment
+   */
+  @Post('bulk-remove-from-segment')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkRemoveFromSegment(req: Request, res: Response, _next: NextFunction) {
+    return queueBulkSegmentAction(req, res, 'removeFromSegment');
+  }
+
+  /**
    * GET /contacts/bulk/:jobId
    * Get bulk action job status
    */
@@ -618,13 +655,17 @@ export class Contacts {
   }
 }
 
-async function queueBulkAction(
-  req: Request,
-  res: Response,
-  operation: 'subscribe' | 'unsubscribe' | 'delete',
-) {
-  const auth = res.locals.auth;
+/**
+ * The selector part of a parsed bulk payload, without any other fields it carried. Repeated ids
+ * are dropped: a contact listed twice would otherwise enter a segment twice.
+ */
+function toSelector(data: BulkContactActionSelector): BulkContactActionSelector {
+  return data.mode === 'ids'
+    ? {mode: 'ids', contactIds: [...new Set(data.contactIds)]}
+    : {mode: 'query', filter: data.filter, excludeIds: data.excludeIds};
+}
 
+async function queueBulkAction(req: Request, res: Response, operation: BulkContactRecordOperation) {
   const parsed = ContactSchemas.bulkAction.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -632,21 +673,39 @@ async function queueBulkAction(
     });
   }
 
-  const selector: BulkContactActionSelector =
-    parsed.data.mode === 'ids'
-      ? {mode: 'ids', contactIds: parsed.data.contactIds}
-      : {mode: 'query', filter: parsed.data.filter, excludeIds: parsed.data.excludeIds};
+  return queueBulkJob(res, {projectId: res.locals.auth.projectId!, operation, selector: toSelector(parsed.data)});
+}
 
+async function queueBulkSegmentAction(req: Request, res: Response, operation: BulkSegmentOperation) {
+  const projectId = res.locals.auth.projectId!;
+
+  const parsed = ContactSchemas.bulkSegmentAction.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.errors[0];
+    throw new HttpException(
+      400,
+      issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'Invalid bulk action payload',
+    );
+  }
+
+  // Reject a missing or dynamic segment now rather than in a job the user only sees fail later
+  const {targetSegmentId} = parsed.data;
+  await SegmentMembershipService.getStaticSegment(projectId, targetSegmentId, BULK_SEGMENT_ACTION[operation]);
+
+  return queueBulkJob(res, {projectId, operation, targetSegmentId, selector: toSelector(parsed.data)});
+}
+
+async function queueBulkJob(res: Response, data: BulkContactActionJobData) {
   try {
-    const job = await QueueService.queueBulkContactAction(auth.projectId!, selector, operation);
+    const job = await QueueService.queueBulkContactAction(data);
     return res.status(202).json({
-      message: `Bulk ${operation} queued successfully`,
+      message: `Bulk ${data.operation} queued successfully`,
       jobId: job.id,
     });
   } catch (error) {
-    signale.error(`[CONTACTS] Failed to queue bulk ${operation}:`, error);
+    signale.error(`[CONTACTS] Failed to queue bulk ${data.operation}:`, error);
     return res.status(500).json({
-      error: error instanceof Error ? error.message : `Failed to queue bulk ${operation}`,
+      error: error instanceof Error ? error.message : `Failed to queue bulk ${data.operation}`,
     });
   }
 }

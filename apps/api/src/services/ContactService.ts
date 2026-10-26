@@ -1,6 +1,7 @@
 import {type Contact, Prisma} from '@plunk/db';
 import type {
   BulkContactActionSelector,
+  ContactListFilter,
   ContactSubscriptionStatus,
   CursorPaginatedResponse,
   FilterCondition,
@@ -31,24 +32,25 @@ export class ContactService {
   }
 
   /**
-   * Build the where-clause for the contacts list filters: the email search plus the
-   * subscription status. Shared by the list and the select-all bulk actions so "all matching"
-   * always means exactly the rows the dashboard shows.
+   * Build the where-clause for the contacts list filters: the email search, the subscription
+   * status and the segment. Shared by the list, the select-all bulk actions and the export so
+   * "all matching" always means exactly the rows the dashboard shows.
    *
    * `snoozed` is derived, not stored -- it is `subscribed = false` with a snooze date still
    * set. `unsubscribed` therefore has to exclude snoozed contacts explicitly, or the two
    * filters would overlap and the dashboard's counts would not add up.
    *
    * Falls back to the legacy `subscribed` boolean when no status is given.
+   *
+   * The segment filter reads stored memberships, so it suits static segments; a dynamic
+   * segment's stored members only exist when it tracks membership, and lag its rules.
    */
-  public static buildFilterWhere(
-    projectId: string,
-    filter: {search?: string; status?: ContactSubscriptionStatus; subscribed?: boolean} = {},
-  ): Prisma.ContactWhereInput {
+  public static buildFilterWhere(projectId: string, filter: ContactListFilter = {}): Prisma.ContactWhereInput {
     return {
       projectId,
       ...(filter.search ? {email: {contains: filter.search, mode: 'insensitive' as const}} : {}),
       ...this.buildStatusWhere(filter.status, filter.subscribed),
+      ...(filter.segmentId ? {segmentMemberships: {some: {segmentId: filter.segmentId, exitedAt: null}}} : {}),
     };
   }
 
@@ -92,24 +94,20 @@ export class ContactService {
     limit = 20,
     cursor?: string,
     search?: string,
-    options?: {
-      /**
-       * Filter by subscription state, including the derived `snoozed` state.
-       * The `subscribed` and `unsubscribed` branches are backed by the
-       * `(projectId, subscribed)` index; `snoozed` narrows that further on `snoozedUntil`.
-       */
-      status?: ContactSubscriptionStatus;
-      /**
-       * Legacy boolean filter, kept so existing `?subscribed=true|false` callers keep working.
-       * Ignored when `status` is given.
-       */
-      subscribed?: boolean;
-      /** Sortable columns. `email` is covered by the `(projectId, email)` unique index. */
-      sort?: 'email' | 'createdAt';
-      dir?: 'asc' | 'desc';
-    },
+    /**
+     * The list filters other than the search (see {@link ContactListFilter}). The `subscribed`
+     * and `unsubscribed` statuses are backed by the `(projectId, subscribed)` index; `snoozed`
+     * narrows that further on `snoozedUntil`. `sort` picks the column: `email` is covered by the
+     * `(projectId, email)` unique index.
+     */
+    options?: Omit<ContactListFilter, 'search'> & {sort?: 'email' | 'createdAt'; dir?: 'asc' | 'desc'},
   ): Promise<CursorPaginatedResponse<Contact>> {
-    const where = this.buildFilterWhere(projectId, {search, status: options?.status, subscribed: options?.subscribed});
+    const where = this.buildFilterWhere(projectId, {
+      search,
+      status: options?.status,
+      subscribed: options?.subscribed,
+      segmentId: options?.segmentId,
+    });
 
     // The chosen sort column leads; `id` is always the stable tiebreaker the
     // cursor (`{id}`) keys off, so keyset pagination stays correct under any

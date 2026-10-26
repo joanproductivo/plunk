@@ -6,6 +6,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   ConfirmDialog,
   EmptyState,
   IconSpinner,
@@ -73,6 +74,24 @@ export default function SegmentDetailPage() {
   const [pickedEmails, setPickedEmails] = useState<string[]>([]);
   const [isAddingMembers, setIsAddingMembers] = useState(false);
   const [removingEmail, setRemovingEmail] = useState<string | null>(null);
+  // Members ticked on the current page, by email (what DELETE /segments/:id/members takes)
+  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
+  const [isRemovingSelected, setIsRemovingSelected] = useState(false);
+
+  // Keep the page and the ticks in step with the list: removing the members of the last page
+  // empties it, and members removed elsewhere drop out of it
+  useEffect(() => {
+    if (!contactsData) return;
+    if (contactsPage > 1 && contactsPage > contactsData.totalPages) {
+      setContactsPage(Math.max(1, contactsData.totalPages));
+      return;
+    }
+    const onPage = new Set(contactsData.data.map(c => c.email));
+    setSelectedEmails(prev => {
+      const kept = new Set(Array.from(prev).filter(e => onPage.has(e)));
+      return kept.size === prev.size ? prev : kept;
+    });
+  }, [contactsData, contactsPage]);
 
   useEffect(() => {
     if (segment) {
@@ -148,15 +167,50 @@ export default function SegmentDetailPage() {
     }
   };
 
+  const goToContactsPage = (page: number) => {
+    setContactsPage(page);
+    setSelectedEmails(new Set());
+  };
+
+  const toggleSelectedEmail = (email: string) => {
+    setSelectedEmails(prev => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email);
+      else next.add(email);
+      return next;
+    });
+  };
+
+  /** Remove members by email, then refresh the segment and the list. Returns how many left. */
+  const removeMembers = async (emails: string[]) => {
+    const result = await network.fetch<{removed: number}, typeof SegmentSchemas.members>(
+      'DELETE',
+      `/segments/${id}/members`,
+      {emails},
+    );
+    setSelectedEmails(prev => new Set(Array.from(prev).filter(e => !emails.includes(e))));
+    void mutate();
+    void mutateContacts();
+    return result.removed;
+  };
+
+  const handleRemoveSelected = async () => {
+    setIsRemovingSelected(true);
+    try {
+      const removed = await removeMembers(Array.from(selectedEmails));
+      toast.success(`Removed ${removed} contact${removed !== 1 ? 's' : ''} from segment`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Couldn’t remove the contacts. Try again.');
+    } finally {
+      setIsRemovingSelected(false);
+    }
+  };
+
   const handleRemoveMember = async (email: string) => {
     setRemovingEmail(email);
     try {
-      await network.fetch<{removed: number}, typeof SegmentSchemas.members>('DELETE', `/segments/${id}/members`, {
-        emails: [email],
-      });
+      await removeMembers([email]);
       toast.success(`Removed ${email} from segment`);
-      void mutate();
-      void mutateContacts();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Couldn’t remove the contact. Try again.');
     } finally {
@@ -355,6 +409,12 @@ export default function SegmentDetailPage() {
                       {isStatic ? 'Contacts in this static segment' : "Contacts that match this segment's filters"}
                     </CardDescription>
                   </div>
+                  {isStatic && selectedEmails.size > 0 && (
+                    <Button variant="outline" size="sm" onClick={handleRemoveSelected} disabled={isRemovingSelected}>
+                      <UserMinus className="h-4 w-4" />
+                      {isRemovingSelected ? 'Removing…' : `Remove ${selectedEmails.size} selected`}
+                    </Button>
+                  )}
                   {!isStatic && trackMembership && (
                     <Button variant="outline" size="sm" onClick={handleComputeMembership} disabled={isComputing}>
                       <RefreshCw className={`h-4 w-4 ${isComputing ? 'animate-spin' : ''}`} />
@@ -377,9 +437,35 @@ export default function SegmentDetailPage() {
                 ) : (
                   <>
                     <div className="space-y-2">
+                      {isStatic && contactsData && contactsData.data.length > 1 && (
+                        <label className="flex items-center gap-2 px-3 text-sm text-neutral-500">
+                          <Checkbox
+                            checked={
+                              contactsData.data.every(c => selectedEmails.has(c.email))
+                                ? true
+                                : selectedEmails.size > 0
+                                ? 'indeterminate'
+                                : false
+                            }
+                            onCheckedChange={checked =>
+                              setSelectedEmails(
+                                checked === true ? new Set(contactsData.data.map(c => c.email)) : new Set(),
+                              )
+                            }
+                          />
+                          Select all on this page
+                        </label>
+                      )}
                       {contactsData?.data.map(contact => (
                         <div key={contact.id} className="flex items-center justify-between p-3 border rounded-lg">
                           <div className="flex items-center gap-2">
+                            {isStatic && (
+                              <Checkbox
+                                checked={selectedEmails.has(contact.email)}
+                                onCheckedChange={() => toggleSelectedEmail(contact.email)}
+                                aria-label={`Select ${contact.email}`}
+                              />
+                            )}
                             {contact.subscribed ? (
                               <MailCheck className="h-4 w-4 text-green-600" />
                             ) : (
@@ -416,7 +502,7 @@ export default function SegmentDetailPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setContactsPage(p => p - 1)}
+                            onClick={() => goToContactsPage(contactsPage - 1)}
                             disabled={contactsPage === 1}
                           >
                             Previous
@@ -424,7 +510,7 @@ export default function SegmentDetailPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setContactsPage(p => p + 1)}
+                            onClick={() => goToContactsPage(contactsPage + 1)}
                             disabled={contactsPage === contactsData.totalPages}
                           >
                             Next

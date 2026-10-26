@@ -7,7 +7,6 @@ import signale from 'signale';
 import type {
   ApiRequestCleanupJobData,
   BulkContactActionJobData,
-  BulkContactActionSelector,
   CampaignBatchJobData,
   CampaignStatsSweepJobData,
   CardVerificationJobData,
@@ -528,18 +527,10 @@ export class QueueService {
   /**
    * Queue bulk contact action job
    */
-  public static async queueBulkContactAction(
-    projectId: string,
-    selector: BulkContactActionSelector,
-    operation: 'subscribe' | 'unsubscribe' | 'delete',
-  ): Promise<Job<BulkContactActionJobData>> {
-    return bulkContactQueue.add(
-      'bulk-contact-action',
-      {projectId, operation, selector},
-      {
-        jobId: `bulk-${operation}-${projectId}-${Date.now()}`,
-      },
-    );
+  public static async queueBulkContactAction(data: BulkContactActionJobData): Promise<Job<BulkContactActionJobData>> {
+    return bulkContactQueue.add('bulk-contact-action', data, {
+      jobId: `bulk-${data.operation}-${data.projectId}-${Date.now()}`,
+    });
   }
 
   /**

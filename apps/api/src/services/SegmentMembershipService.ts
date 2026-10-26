@@ -1,6 +1,6 @@
 import type {Segment} from '@plunk/db';
 import {segmentEventName} from '@plunk/shared';
-import type {SegmentEventKind} from '@plunk/types';
+import type {BulkSegmentOperation, SegmentEventKind} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
@@ -14,15 +14,23 @@ const QUEUE_WAIT_MS = 3000;
 
 /**
  * How a static segment membership change behaves:
- * - `await`: entry/exit events are tracked before returning (bulk jobs, workflow steps)
- * - `background`: events go to the segment-membership-events queue, so HTTP callers are not held
- *   up by workflows and the events survive a restart
+ * - `await`: entry/exit events, and the workflows they start, run before returning
+ * - `background`: events go to the segment-membership-events queue, so callers (HTTP requests,
+ *   bulk jobs) are not held up by workflows and the events survive a restart
  * - `silent`: imports. No events, and contacts already in the segment are left as they are
  *
  * Outside `silent`, adding a contact who is already a member counts as a new entry: `enteredAt`
  * is reset and the entry event fires again, so e.g. signing up twice re-runs the workflow.
  */
 export type MembershipMode = 'await' | 'background' | 'silent';
+
+type MembershipAction = 'add contacts to' | 'remove contacts from';
+
+/** The action each bulk segment operation names in `getStaticSegment`'s errors */
+export const BULK_SEGMENT_ACTION: Record<BulkSegmentOperation, MembershipAction> = {
+  addToSegment: 'add contacts to',
+  removeFromSegment: 'remove contacts from',
+};
 
 /**
  * Writes static segment memberships by contact ID and fires the segment's entry/exit events when
@@ -42,7 +50,7 @@ export class SegmentMembershipService {
   public static async getStaticSegment(
     projectId: string,
     segmentId: string,
-    action: 'add contacts to' | 'remove contacts from',
+    action: MembershipAction,
   ): Promise<Segment> {
     const segment = await prisma.segment.findFirst({where: {id: segmentId, projectId}});
 

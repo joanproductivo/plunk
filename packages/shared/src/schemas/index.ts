@@ -101,29 +101,34 @@ export const ProjectSchemas = {
   }),
 } as const;
 
+const bulkAction = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('ids'),
+    contactIds: z.array(uuid).min(1).max(1000),
+  }),
+  z.object({
+    mode: z.literal('query'),
+    filter: z
+      .object({
+        search: z.string().max(255).optional(),
+        status: z.enum(CONTACT_SUBSCRIPTION_STATUSES).optional(),
+        subscribed: z.boolean().optional(),
+        segmentId: uuid.optional(),
+      })
+      .default({}),
+    excludeIds: z.array(uuid).max(10000).optional(),
+  }),
+]);
+
 export const ContactSchemas = {
   create: z.object({
     email,
     subscribed: z.boolean().default(true),
     data: jsonSchema.optional(),
   }),
-  bulkAction: z.discriminatedUnion('mode', [
-    z.object({
-      mode: z.literal('ids'),
-      contactIds: z.array(uuid).min(1).max(1000),
-    }),
-    z.object({
-      mode: z.literal('query'),
-      filter: z
-        .object({
-          search: z.string().max(255).optional(),
-          status: z.enum(CONTACT_SUBSCRIPTION_STATUSES).optional(),
-          subscribed: z.boolean().optional(),
-        })
-        .default({}),
-      excludeIds: z.array(uuid).max(10000).optional(),
-    }),
-  ]),
+  bulkAction,
+  /** Body of the bulk add-to / remove-from segment routes: a selector plus the static segment. */
+  bulkSegmentAction: bulkAction.and(z.object({targetSegmentId: uuid})),
   lookup: z.object({
     emails: z.array(z.string().email()).min(1).max(500),
   }),
