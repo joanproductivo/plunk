@@ -22,8 +22,13 @@ import {DASHBOARD_URI} from '../app/constants.js';
 
 import {RECIPIENT_OVERRIDE_HEADER} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+
+// A failing step is rethrown through the catch of every step before it in the same run, so this
+// set keeps the errors already recorded for the project's alerts, to count each once.
+const recordedFailures = new WeakSet<object>();
 
 type StepConfig = Prisma.JsonValue;
 type StepResult = Record<string, unknown>;
@@ -288,6 +293,17 @@ export class WorkflowExecutionService {
           },
         },
       });
+
+      const isObject = typeof error === 'object' && error !== null;
+      if (!isObject || !recordedFailures.has(error)) {
+        if (isObject) recordedFailures.add(error);
+        await FailureAlertService.record(failedExecution.workflow.project.id, {
+          sourceKey: `workflow:${failedExecution.workflowId}`,
+          label: failedExecution.workflow.name,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          contactEmail: failedExecution.contact.email,
+        });
+      }
 
       // Send notification about workflow execution failure
       await NtfyService.notifyWorkflowExecutionFailed(
