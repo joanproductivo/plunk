@@ -129,19 +129,12 @@ describe('importStatusSubscription', () => {
     for (const status of ['subscribed', 'Confirmed', 'ACTIVE']) {
       expect(importStatusSubscription(status)).toBe(true);
     }
-    for (const status of [
-      'unsubscribed',
-      'bounced',
-      'complained',
-      'cleaned',
-      'inactive',
-      'unconfirmed',
-      'pending',
-      'cancelled',
-    ]) {
+    for (const status of ['unsubscribed', 'Complained']) {
       expect(importStatusSubscription(status)).toBe(false);
     }
-    expect(importStatusSubscription(' Snoozed ')).toBe('snoozed');
+    for (const status of [' Snoozed ', 'bounced', 'cleaned', 'inactive', 'unconfirmed', 'pending', 'cancelled']) {
+      expect(importStatusSubscription(status)).toBe('notMailable');
+    }
     expect(importStatusSubscription('vip')).toBeUndefined();
   });
 });
@@ -153,16 +146,20 @@ describe('importedSubscription', () => {
     expect(importedSubscription(rowWith({status: 'confirmed'}), false)).toBe(true);
     expect(importedSubscription(rowWith({status: 'unsubscribed'}), false)).toBe(false);
     expect(importedSubscription(rowWith({status: 'snoozed'}), false)).toBe(false);
+    expect(importedSubscription(rowWith({status: 'bounced'}), false)).toBe(false);
     expect(importedSubscription(rowWith({status: 'vip'}), false)).toBe(false);
     expect(importedSubscription(splitImportRecord({email: 'a@example.com'}, {statusOnly: true}), false)).toBe(false);
     // Neither column: upsert creates the contact subscribed
     expect(importedSubscription(rowWith({}), false)).toBeUndefined();
   });
 
-  it('only ever unsubscribes an existing contact from status', () => {
+  it('only ever unsubscribes an existing contact from status, and only on an opt-out', () => {
     expect(importedSubscription(rowWith({status: 'confirmed'}), true)).toBeUndefined();
     expect(importedSubscription(rowWith({status: 'unsubscribed'}), true)).toBe(false);
+    expect(importedSubscription(rowWith({status: 'complained'}), true)).toBe(false);
     expect(importedSubscription(rowWith({status: 'snoozed'}), true)).toBeUndefined();
+    expect(importedSubscription(rowWith({status: 'bounced'}), true)).toBeUndefined();
+    expect(importedSubscription(rowWith({status: 'unconfirmed'}), true)).toBeUndefined();
     expect(importedSubscription(rowWith({status: 'vip'}), true)).toBeUndefined();
   });
 

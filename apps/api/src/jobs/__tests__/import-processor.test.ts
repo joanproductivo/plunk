@@ -472,6 +472,17 @@ describe('processContactImport', () => {
     expect(await prisma.event.count({where: {contactId: subscribed.id, name: 'contact.unsubscribed'}})).toBe(1);
   });
 
+  it('leaves an existing contact alone on a status that is not an opt-out, but imports a new one unsubscribed', async () => {
+    const subscribed = await factories.createContact({projectId, email: 'kept@example.test', subscribed: true});
+
+    const result = await runImport('email,status\nkept@example.test,bounced\nfresh@example.test,unconfirmed');
+
+    expect((await contactNamed('kept@example.test')).subscribed).toBe(true);
+    expect(await prisma.event.count({where: {contactId: subscribed.id}})).toBe(0);
+    expect((await contactNamed('fresh@example.test')).subscribed).toBe(false);
+    expect(result.warnings).toEqual([]);
+  });
+
   it('imports new contacts with an unknown status unsubscribed, and warns once per status', async () => {
     const result = await runImport(
       'email,subscribed,status,createdAt\nx@example.test,,Weird,2026-02-30\ny@example.test,,weird,\nz@example.test,,,',

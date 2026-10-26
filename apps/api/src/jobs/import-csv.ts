@@ -41,7 +41,7 @@ export interface ImportRecord {
   /** The `createdAt` cell is filled but holds no usable date. */
   invalidCreatedAt: boolean;
   /** What the `status` cell says (see `importStatusSubscription`); read only without a `subscribed` cell. */
-  statusSubscription?: boolean | 'snoozed';
+  statusSubscription?: boolean | 'notMailable';
   /**
    * A `status` the import does not know, lowercased; read only without a `subscribed` cell. Blank
    * (`''`) when only `status` speaks for the file and this row's is empty.
@@ -75,7 +75,7 @@ export function splitImportRecord(
   const keepSnooze = subscribed === false && statusValue === 'snoozed';
 
   // Without a `subscribed` cell, `status` speaks for the subscription: it is all Flodesk exports.
-  let statusSubscription: boolean | 'snoozed' | undefined;
+  let statusSubscription: boolean | 'notMailable' | undefined;
   let unknownStatus: string | undefined;
   if (subscribed === undefined && (statusValue !== '' || statusOnly)) {
     statusSubscription = importStatusSubscription(statusValue);
@@ -109,7 +109,7 @@ export function splitImportRecord(
  * then created subscribed). A `subscribed` cell decides. Without one, `status` decides and fails
  * closed: a new contact is subscribed only by a status that says so (a snooze cannot carry over,
  * and an unknown status is reported), and an existing contact is only ever unsubscribed by it,
- * never resubscribed.
+ * on an opt-out, never resubscribed.
  */
 export function importedSubscription(row: ImportRecord, isUpdate: boolean): boolean | undefined {
   if (row.subscribed !== undefined) {
@@ -128,10 +128,12 @@ export function importedSubscription(row: ImportRecord, isUpdate: boolean): bool
 
 // Statuses of Plunk's export and of other providers' (Flodesk, Mailchimp, ...), lowercased
 const STATUS_SUBSCRIBED = new Set(['subscribed', 'confirmed', 'active']);
-const STATUS_UNSUBSCRIBED = new Set([
-  'unsubscribed',
+// The person's own decision to stop receiving email
+const STATUS_OPTED_OUT = new Set(['unsubscribed', 'complained']);
+// Not mailable at the source, but not the person's decision: a snooze, a bounce, a list cleanup
+const STATUS_NOT_MAILABLE = new Set([
+  'snoozed',
   'bounced',
-  'complained',
   'cleaned',
   'inactive',
   'unconfirmed',
@@ -140,14 +142,15 @@ const STATUS_UNSUBSCRIBED = new Set([
 ]);
 
 /**
- * What a `status` cell says about the subscription: `true`, `false`, `'snoozed'`, or `undefined`
- * for a status this map does not know. Case-insensitive.
+ * What a `status` cell says about the subscription: `true` to subscribe, `false` for an opt-out,
+ * `'notMailable'` for a status that is neither (new contacts arrive unsubscribed, existing ones
+ * are left as they are), or `undefined` for a status this map does not know. Case-insensitive.
  */
-export function importStatusSubscription(value: string): boolean | 'snoozed' | undefined {
+export function importStatusSubscription(value: string): boolean | 'notMailable' | undefined {
   const status = value.trim().toLowerCase();
   if (STATUS_SUBSCRIBED.has(status)) return true;
-  if (STATUS_UNSUBSCRIBED.has(status)) return false;
-  if (status === 'snoozed') return 'snoozed';
+  if (STATUS_OPTED_OUT.has(status)) return false;
+  if (STATUS_NOT_MAILABLE.has(status)) return 'notMailable';
   return undefined;
 }
 
