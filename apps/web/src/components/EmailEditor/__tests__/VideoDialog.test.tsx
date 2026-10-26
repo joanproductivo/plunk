@@ -33,6 +33,7 @@ const EDITED: VideoAttrs = {
   alt: 'Old alt',
   width: 1280,
   height: 720,
+  size: 'large',
 };
 
 let root: Root;
@@ -122,6 +123,7 @@ describe('VideoDialog', () => {
     expect(onSubmit).toHaveBeenCalledWith({
       href: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s',
       alt: 'Never gonna',
+      size: 'medium',
       src: SRC,
       width: 1280,
       height: 720,
@@ -227,5 +229,38 @@ describe('VideoDialog', () => {
 
     await click(buttonNamed('Insert')!);
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('VideoDialog sizes', () => {
+  it('makes new videos medium, and inserts them at the size chosen', async () => {
+    await render();
+    await type('#video-link', 'https://youtu.be/dQw4w9WgXcQ');
+    expect(text()).toContain('Medium');
+
+    await click(document.querySelector('[role="combobox"]')!);
+    await click([...document.querySelectorAll('[role="option"]')].find(option => option.textContent === 'Small')!);
+    await click(buttonNamed('Insert')!);
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({size: 'small', src: SRC}));
+  });
+
+  it("keeps an edited video's size unless it is changed, and its alt text", async () => {
+    await render(EDITED);
+
+    await click(buttonNamed('Save')!);
+
+    expect(onSubmit).toHaveBeenCalledWith({...EDITED});
+  });
+
+  it("saves an edited video's new size without uploading its poster again", async () => {
+    await render(EDITED);
+
+    await click(document.querySelector('[role="combobox"]')!);
+    await click([...document.querySelectorAll('[role="option"]')].find(option => option.textContent === 'Small')!);
+    await click(buttonNamed('Save')!);
+
+    expect(network.upload).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledWith({...EDITED, size: 'small'});
   });
 });

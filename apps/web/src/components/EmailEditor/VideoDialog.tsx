@@ -1,11 +1,17 @@
-import {parseYouTubeLink, visualAttributeText, youTubeWatchUrl} from '@plunk/shared';
+import {parseYouTubeLink, type VideoSize, visualAttributeText, youTubeWatchUrl} from '@plunk/shared';
 import {Button, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import {useEffect, useRef, useState} from 'react';
 
+import {OptionSelect} from './BlockFields';
 import type {VideoAttrs} from './EmailVideo';
 import type {BlockDialogProps} from './useBlockDialog';
 import {useImageUpload} from './useImageUpload';
 import {composeVideoPoster, VideoNotFoundError, type VideoPoster} from './videoPoster';
+
+const SIZES: Record<VideoSize, string> = {small: 'Small', medium: 'Medium', large: 'Large'};
+
+/** How wide new videos are: a full column was too wide for a desktop. */
+const NEW_VIDEO_SIZE: VideoSize = 'medium';
 
 /** The alt text of a video whose title YouTube does not give. */
 const DEFAULT_ALT = 'Vídeo de YouTube';
@@ -44,6 +50,7 @@ function VideoForm({
 }) {
   const [link, setLink] = useState(initial?.href ?? '');
   const [alt, setAlt] = useState(initial?.alt ?? '');
+  const [size, setSize] = useState<VideoSize>(initial?.size ?? NEW_VIDEO_SIZE);
   // Read when a poster arrives: the new video's title fills in the alt text unless it was written
   const altEdited = useRef(false);
   const [poster, setPoster] = useState<Poster | null>(null);
@@ -105,7 +112,7 @@ function VideoForm({
 
   const submit = async () => {
     if (!valid || !video) return;
-    const attrs = {href: youTubeWatchUrl(video), alt: visualAttributeText(alt) || DEFAULT_ALT};
+    const attrs = {href: youTubeWatchUrl(video), alt: visualAttributeText(alt) || DEFAULT_ALT, size};
     if (!needsPoster && initial) {
       submitRef.current({...initial, ...attrs});
       return;
@@ -170,6 +177,8 @@ function VideoForm({
           <p className="text-sm text-neutral-500">{video ? 'Loading the video…' : 'The video’s poster shows here.'}</p>
         )}
       </div>
+
+      <OptionSelect label="Size" value={size} options={SIZES} onChange={setSize} />
 
       <div>
         <Label htmlFor="video-alt" className="text-sm font-medium mb-2 block">

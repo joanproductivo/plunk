@@ -13,9 +13,15 @@ function tools(posters: Record<string, {width: number; height: number} | null>) 
   const loaded: string[] = [];
   const drawn: unknown[][] = [];
   const canvases: {width: number; height: number}[] = [];
+  // The colour of each shape filled, as set when it was filled
+  const fills: unknown[] = [];
   const context = new Proxy({} as Record<string, unknown>, {
     get: (target, key) =>
-      key === 'drawImage' ? (...args: unknown[]) => drawn.push(args) : (target[key as string] ?? (() => undefined)),
+      key === 'drawImage'
+        ? (...args: unknown[]) => drawn.push(args)
+        : key === 'fill'
+          ? () => fills.push(target.fillStyle)
+          : (target[key as string] ?? (() => undefined)),
   });
   const fake: PosterTools = {
     loadImage: async src => {
@@ -31,7 +37,7 @@ function tools(posters: Record<string, {width: number; height: number} | null>) 
       } as unknown as HTMLCanvasElement;
     },
   };
-  return {fake, loaded, drawn, canvases};
+  return {fake, loaded, drawn, canvases, fills};
 }
 
 function oEmbed(response: {status: number; body?: unknown} | Error) {
@@ -68,9 +74,12 @@ describe('cropTo', () => {
 describe('composeVideoPoster', () => {
   it('draws the largest poster with a play button and gives the title', async () => {
     oEmbed({status: 200, body: {title: ' Never gonna give you up ', width: 200, height: 113}});
-    const {fake, loaded, drawn, canvases} = tools({maxresdefault: {width: 1280, height: 720}});
+    const {fake, loaded, drawn, canvases, fills} = tools({maxresdefault: {width: 1280, height: 720}});
 
     const poster = await composeVideoPoster(VIDEO, fake);
+
+    // A white disc with YouTube's red triangle on it
+    expect(fills).toEqual(['rgba(255, 255, 255, 0.95)', '#ff0000']);
 
     expect(loaded).toEqual(['maxresdefault']);
     expect(canvases).toEqual([{width: 1280, height: 720}]);
