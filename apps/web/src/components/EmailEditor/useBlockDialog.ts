@@ -7,6 +7,8 @@ declare module '@tiptap/core' {
   interface EditorEvents {
     /** A block in the editor was double-clicked, to open its dialog (see useBlockDialog). */
     editBlock: {pos: number};
+    /** A new block of `type` was asked for outside the toolbar, such as from the slash menu. */
+    newBlock: {type: string};
   }
 }
 
@@ -33,17 +35,19 @@ function continueAfterBlock({tr, state, dispatch}: CommandProps): boolean {
 }
 
 /**
- * Inserts a block of `type` after the selection, rather than in its place, and leaves the cursor
- * in the text after the new block (inserting at the end of the selection leaves the new block
- * selected, never a block that was already there).
+ * A command that inserts a block of `type` after the selection, rather than in its place, and
+ * leaves the cursor in the text after the new block (inserting at the end of the selection leaves
+ * the new block selected, never a block that was already there). It reads the selection from the
+ * transaction, so it can follow other commands in a chain, such as deleting the slash menu's query.
  */
+export function insertBlockAfterSelection(type: string, attrs?: Record<string, unknown>) {
+  return (props: CommandProps): boolean =>
+    props.commands.insertContentAt(props.tr.selection.to, {type, attrs}) && continueAfterBlock(props);
+}
+
+/** Inserts a block of `type` after the selection (see insertBlockAfterSelection). */
 export function insertBlock(editor: CoreEditor, type: string, attrs?: Record<string, unknown>): boolean {
-  return editor
-    .chain()
-    .focus()
-    .insertContentAt(editor.state.selection.to, {type, attrs})
-    .command(continueAfterBlock)
-    .run();
+  return editor.chain().focus().command(insertBlockAfterSelection(type, attrs)).run();
 }
 
 /** What a block's dialog receives from useBlockDialog. */
@@ -58,8 +62,9 @@ export interface BlockDialogProps<Attrs> {
 /**
  * Wires a block's dialog to an editor. The toolbar edits the selected block of `type`; with none
  * selected, it inserts one with its defaults (`insertDirectly`, for blocks that need nothing
- * filled in) or opens the dialog to fill in a new one. Double-clicking a block of `type` opens
- * the dialog for it. New blocks go after the selection (see insertBlock).
+ * filled in) or opens the dialog to fill in a new one, as it does when the slash menu asks for
+ * one (`newBlock`). Double-clicking a block of `type` opens the dialog for it. New blocks go
+ * after the selection (see insertBlockAfterSelection).
  */
 export function useBlockDialog<Attrs extends object>(editor: Editor | null, type: string, insertDirectly = false) {
   // The dialog edits the block at `pos`, or fills in a new one when it is null
@@ -70,9 +75,15 @@ export function useBlockDialog<Attrs extends object>(editor: Editor | null, type
     const edit = ({pos}: {pos: number}) => {
       if (editor.state.doc.nodeAt(pos)?.type.name === type) setState({open: true, pos});
     };
+    // A new block asked for outside the toolbar (the slash menu only asks for blocks that need a dialog)
+    const add = ({type: asked}: {type: string}) => {
+      if (asked === type) setState({open: true, pos: null});
+    };
     editor.on('editBlock', edit);
+    editor.on('newBlock', add);
     return () => {
       editor.off('editBlock', edit);
+      editor.off('newBlock', add);
     };
   }, [editor, type]);
 

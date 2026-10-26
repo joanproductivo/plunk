@@ -16,6 +16,7 @@ import {ButtonDialog} from './ButtonDialog';
 import {type DividerAttrs, EmailDivider} from './EmailDivider';
 import {DividerDialog} from './DividerDialog';
 import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
+import {SlashCommand} from './SlashCommand';
 import {SpacerDialog} from './SpacerDialog';
 import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
@@ -132,6 +133,9 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const {data: config} = useConfig();
   const canUploadImages = Boolean(config?.features.storage.s3Enabled);
+  // Read by the slash menu as it updates, so it follows the config once loaded
+  const canUploadImagesRef = useRef(canUploadImages);
+  canUploadImagesRef.current = canUploadImages;
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -157,8 +161,15 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       Variable,
       VariableMention,
       LogicMention,
+      SlashCommand.configure({canInsertImages: () => canUploadImagesRef.current}),
       Placeholder.configure({
-        placeholder: placeholder || 'Your next email starts here',
+        // On the empty line the cursor is in, where the slash menu would open
+        placeholder: ({editor, node}) =>
+          node.type.name !== 'paragraph'
+            ? ''
+            : editor.isEmpty
+              ? `${placeholder || 'Your next email starts here'}. Type / for blocks`
+              : 'Type / for blocks',
       }),
     ],
     // Only initialize with content if starting in visual mode
@@ -179,8 +190,21 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   });
 
   const button = useBlockDialog<ButtonAttrs>(editor, 'button');
+
   const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
   const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
+
+  // The slash menu's image row opens the same dialog as the toolbar
+  useEffect(() => {
+    if (!editor) return;
+    const add = ({type}: {type: string}) => {
+      if (type === 'image') setShowImageDialog(true);
+    };
+    editor.on('newBlock', add);
+    return () => {
+      editor.off('newBlock', add);
+    };
+  }, [editor]);
 
   // Update editor content when value prop changes from outside
   useEffect(() => {
@@ -988,15 +1012,18 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           outline: none;
         }
 
-        .ProseMirror p.is-editor-empty:first-child::before {
+        .ProseMirror p.is-empty::before {
           color: #9ca3af;
           content: attr(data-placeholder);
           float: left;
           height: 0;
           pointer-events: none;
         }
+        .ProseMirror p.is-empty:not(.is-editor-empty)::before {
+          color: #d1d5db;
+        }
 
-        /* Variable autocomplete styles */
+        /* Suggestion menus ({{, {% and /) */
         .tippy-box[data-theme~='variable-suggestion'] {
           background-color: white;
           border: 1px solid #e5e7eb;

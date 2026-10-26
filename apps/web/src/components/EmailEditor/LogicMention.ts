@@ -15,6 +15,7 @@ import {getSuggestionFields} from './VariableMention';
  * reason a template fails to save — is not reachable through the menu.
  */
 interface LogicBlock extends SuggestionRow {
+  syntax: string;
   lines: string[];
   /** Index of the gap the caret lands in. */
   caretLine: number;

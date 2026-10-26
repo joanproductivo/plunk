@@ -6,7 +6,7 @@ import {afterEach, describe, expect, it} from 'vitest';
 
 import {EmailDivider} from '../EmailDivider';
 import {EmailSpacer} from '../EmailSpacer';
-import {insertBlock} from '../useBlockDialog';
+import {insertBlock, insertBlockAfterSelection} from '../useBlockDialog';
 
 /**
  * Parsing and serialising run through the extensions the editor loads, so these pin the HTML a
@@ -76,6 +76,17 @@ describe('EmailSpacer', () => {
     editor.commands.insertContent('X');
 
     expect(editor.getHTML()).toBe(`<p>hello</p>${spacer(16)}<hr><p>Xtail</p>`);
+  });
+
+  it('can follow other commands in one chain, reading the selection they leave', () => {
+    createEditor('<p>a</p><p>/spa</p><p>b</p>');
+    editor.commands.setTextSelection(8);
+
+    // As the slash menu does, with the cursor after its query: delete the query, then insert, in a single transaction
+    editor.chain().focus().deleteRange({from: 4, to: 8}).command(insertBlockAfterSelection('spacer')).run();
+    editor.commands.insertContent('X');
+
+    expect(editor.getHTML()).toBe(`<p>a</p>${spacer(32)}<p>Xb</p>`);
   });
 
   it('writes a height within bounds, whatever code sets', () => {

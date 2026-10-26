@@ -7,6 +7,7 @@ import {createSuggestionRenderer, SuggestionMenu, type SuggestionRow} from './su
 interface VariableRow extends SuggestionRow {
   /** Named `id` to satisfy Mention's node-attribute shape for the command callback. */
   id: string;
+  syntax: string;
 }
 
 /**
