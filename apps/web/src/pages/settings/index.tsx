@@ -826,7 +826,12 @@ export default function Settings() {
 
             {/* Brand Tab */}
             <TabsContent value="brand">
-              <BrandSettings projectId={activeProject.id} canEdit={currentUserRole !== 'MEMBER'} />
+              <BrandSettings
+                projectId={activeProject.id}
+                projectName={activeProject.name}
+                language={activeProject.language}
+                canEdit={currentUserRole !== 'MEMBER'}
+              />
             </TabsContent>
 
             {/* Domains Tab */}

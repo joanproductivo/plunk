@@ -4,7 +4,10 @@ import {
   emailDocument,
   type EmailBrand,
   emailProseCss,
+  insertFooter,
+  isFramedBrand,
   splitEmailMarkers,
+  unsubscribeFooterHtml,
 } from '@plunk/shared';
 
 /**
@@ -20,3 +23,10 @@ export const wrapStoredEmail = (stored: string): string => {
   const {brand, body} = splitEmailMarkers(stored);
   return wrapEmailWithStyles(body, brand ?? BRAND_DEFAULTS);
 };
+
+/**
+ * Visual editor content in its brand with an unsubscribe footer, `footerParagraph` being the HTML
+ * inside it, placed where sending places it: at the end of a framed email's column, or at the end.
+ */
+export const wrapEmailWithFooter = (htmlBody: string, brand: EmailBrand, footerParagraph: string): string =>
+  insertFooter(wrapEmailWithStyles(htmlBody, brand), unsubscribeFooterHtml(footerParagraph), isFramedBrand(brand));

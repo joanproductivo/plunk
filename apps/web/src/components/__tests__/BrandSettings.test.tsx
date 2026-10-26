@@ -24,7 +24,7 @@ async function render(canEdit: boolean) {
   await act(async () => {
     root.render(
       <SWRConfig value={{fetcher, provider: () => new Map(), dedupingInterval: 0}}>
-        <BrandSettings projectId="project-1" canEdit={canEdit} />
+        <BrandSettings projectId="project-1" projectName="Acme" language="es" canEdit={canEdit} />
       </SWRConfig>,
     );
   });
@@ -72,17 +72,19 @@ describe('BrandSettings', () => {
     expect(toast.success).toHaveBeenCalledWith('Brand saved');
   });
 
-  it('shows the unsubscribe footer in the preview of a framed brand', async () => {
-    vi.mocked(network.fetch).mockResolvedValueOnce(STORED);
+  it("shows the unsubscribe footer as sent, in the project's language, framed or not", async () => {
     await render(true);
+    const preview = () => document.querySelector('iframe')!.getAttribute('srcdoc')!;
+
+    expect(preview()).toContain('aceptaste recibir correos electrónicos de Acme');
+    expect(preview()).toContain('actualiza tus preferencias</a>.');
 
     await act(async () => {
       document.querySelector<HTMLButtonElement>('#brand-has-background')!.click();
     });
 
-    const preview = document.querySelector('iframe')!.getAttribute('srcdoc')!;
-    expect(preview).toContain('Update your preferences');
-    expect(preview).not.toContain('plunk:footer');
+    expect(preview()).toContain('actualiza tus preferencias</a>.');
+    expect(preview()).not.toContain('plunk:footer');
   });
 
   it('does not offer saving to members who are not admins', async () => {
