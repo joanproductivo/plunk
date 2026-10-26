@@ -6,3 +6,4 @@ export * from './i18n/index.js';
 export * from './mailbox-simulator.js';
 export * from './unsubscribe.js';
 export * from './workflow-events.js';
+export * from './slug.js';
