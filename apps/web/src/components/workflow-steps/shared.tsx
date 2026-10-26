@@ -1,6 +1,7 @@
 import {Button, Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label} from '@plunk/ui';
 import type {WorkflowStep} from '@plunk/db';
 import {WorkflowSchemas} from '@plunk/shared';
+import type {UpdateContactSegmentChanges} from '@plunk/types';
 import {useState} from 'react';
 import {toast} from 'sonner';
 
@@ -22,10 +23,10 @@ export const STEP_TYPE_DESCRIPTIONS: Record<WorkflowStep['type'], string> = {
   SEND_EMAIL:     'Sends an email to the contact using a template you choose.',
   DELAY:          'Pauses the workflow for a set amount of time before continuing.',
   WAIT_FOR_EVENT: 'Waits until the contact triggers a specific event, then continues.',
-  CONDITION:      'Splits the flow based on contact data — each path leads to different steps.',
+  CONDITION:      'Splits the flow based on contact data or segment membership — each path leads to different steps.',
   EXIT:           'Ends the workflow for the contact.',
   WEBHOOK:        "Makes an HTTP request to an external URL with the contact's data.",
-  UPDATE_CONTACT: "Sets or updates fields on the contact's profile.",
+  UPDATE_CONTACT: "Sets fields on the contact's profile, its subscription, or the static segments it is in.",
 };
 
 export type StepWithTemplate = WorkflowStep & {
@@ -68,6 +69,18 @@ export function useStepUpdate(workflowId: string, stepId: string) {
   };
 
   return {update, isSubmitting};
+}
+
+/** Whether an Update contact step's config changes anything: data, subscription or segments */
+export function hasUpdateContactAction(config: {updates?: unknown; subscriptionAction?: unknown; segments?: unknown}) {
+  const hasUpdates = !!config.updates && typeof config.updates === 'object' && Object.keys(config.updates).length > 0;
+  const hasSubscriptionAction =
+    typeof config.subscriptionAction === 'string' &&
+    config.subscriptionAction !== 'none' &&
+    config.subscriptionAction !== '';
+  const segments = (config.segments ?? {}) as Partial<UpdateContactSegmentChanges>;
+  const hasSegmentChanges = [segments.add, segments.remove].some(ids => Array.isArray(ids) && ids.length > 0);
+  return hasUpdates || hasSubscriptionAction || hasSegmentChanges;
 }
 
 export function getStepConfig(step: {config: unknown}): Record<string, unknown> {

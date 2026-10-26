@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type {AvailableField} from '@plunk/types';
 import {Button, IconSpinner, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@plunk/ui';
 import {AlertTriangle, Info, Plus, Trash2} from 'lucide-react';
 import {useMemo, useState} from 'react';
@@ -9,12 +10,6 @@ import {type EditStepDialogProps, getStepConfig, type StepWithTemplate, StepDial
 
 type FieldType = 'string' | 'number' | 'boolean' | 'date';
 type ConditionMode = 'binary' | 'multi';
-
-interface AvailableField {
-  field: string;
-  type: string;
-  category: string;
-}
 
 interface BranchInput {
   id: string;
@@ -400,7 +395,7 @@ function ConditionFieldPicker({value, onChange, availableFields, loading}: Condi
                 {fields.map(field => (
                   <SelectItem key={field.field} value={field.field}>
                     <div className="flex items-center gap-2">
-                      <span>{field.field.replace('contact.', '').replace('data.', '')}</span>
+                      <span>{field.label ?? field.field.replace('contact.', '').replace('data.', '')}</span>
                       <span className="text-xs px-1.5 py-0.5 rounded bg-neutral-200 text-neutral-600 font-mono">
                         {field.type}
                       </span>

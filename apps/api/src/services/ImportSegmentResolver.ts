@@ -19,25 +19,45 @@ export function segmentKey(name: string): string {
   return name.normalize('NFC').trim().toLowerCase();
 }
 
+/** The separators a `segments` cell may use: `;` as the contacts export writes it, `,` as Flodesk's does. */
+const SEGMENT_SEPARATORS = [';', ','] as const;
+type SegmentSeparator = (typeof SEGMENT_SEPARATORS)[number];
 /**
- * Split a `segments` cell into names. Names are separated by `;`, but a segment's own name may
- * contain `;` too, so runs of pieces that spell an existing name are kept together (longest
- * first) before the rest is split. `maxPieces` is the most pieces any existing name spans, which
- * bounds the search: without it a cell of thousands of `;` would take minutes to split.
+ * Most pieces an existing name may span and still be kept whole. It bounds the work of splitting
+ * a cell, which grows with its square, now that names with commas are common.
  */
-export function splitSegmentCell(cell: string, isExistingName: (key: string) => boolean, maxPieces = 1): string[] {
-  const pieces = cell.split(';');
+const MAX_PIECES_PER_NAME = 10;
+
+/**
+ * Split a `segments` cell into names. A cell with any `;` is split on `;` only, as the export
+ * writes it; a cell without one is split on `,`, as Flodesk's export writes it, unless
+ * `commaSeparated` is off (a file from the export, whose single names may hold commas). A
+ * segment's own name may contain the separator too, so runs of pieces that spell an existing name
+ * are kept together (longest first) before the rest is split; a new name with a comma, alone in a
+ * comma-separated cell, is split. `maxPieces` is, per separator, the most pieces any existing name
+ * spans (up to `MAX_PIECES_PER_NAME`), which bounds the search: without it a cell of thousands of
+ * separators would take minutes to split.
+ */
+export function splitSegmentCell(
+  cell: string,
+  isExistingName: (key: string) => boolean,
+  maxPieces: Partial<Record<SegmentSeparator, number>> = {},
+  commaSeparated = true,
+): string[] {
+  const separator: SegmentSeparator = cell.includes(';') || !commaSeparated ? ';' : ',';
+  const pieces = cell.split(separator);
+  const longest = Math.min(maxPieces[separator] ?? 1, MAX_PIECES_PER_NAME);
   const names: string[] = [];
 
   for (let start = 0; start < pieces.length; ) {
     let end = start + 1;
-    for (let candidate = Math.min(pieces.length, start + maxPieces); candidate > start + 1; candidate--) {
-      if (isExistingName(segmentKey(pieces.slice(start, candidate).join(';')))) {
+    for (let candidate = Math.min(pieces.length, start + longest); candidate > start + 1; candidate--) {
+      if (isExistingName(segmentKey(pieces.slice(start, candidate).join(separator)))) {
         end = candidate;
         break;
       }
     }
-    names.push(pieces.slice(start, end).join(';').trim());
+    names.push(pieces.slice(start, end).join(separator).trim());
     start = end;
   }
 
@@ -68,8 +88,8 @@ export interface ImportedRow {
  */
 export class ImportSegmentResolver {
   private readonly segmentsByKey = new Map<string, KnownSegment[]>();
-  /** Most `;`-separated pieces any known name spans (see `splitSegmentCell`). */
-  private maxPieces = 1;
+  /** Per separator, the most pieces any known name spans (see `splitSegmentCell`). */
+  private readonly maxPieces: Record<SegmentSeparator, number> = {';': 1, ',': 1};
   /** Names that can never be assigned in this import (dynamic, ambiguous, invalid, over the cap). */
   private readonly unusable = new Set<string>();
   private readonly errorsByKey = new Map<string, string>();
@@ -77,10 +97,14 @@ export class ImportSegmentResolver {
   private readonly created: string[] = [];
   private assigned = 0;
 
-  private constructor(private readonly projectId: string) {}
+  private constructor(
+    private readonly projectId: string,
+    private readonly commaSeparated: boolean,
+  ) {}
 
-  public static async load(projectId: string): Promise<ImportSegmentResolver> {
-    const resolver = new ImportSegmentResolver(projectId);
+  /** `commaSeparated` off reads every cell as the contacts export writes it (see `splitSegmentCell`). */
+  public static async load(projectId: string, {commaSeparated = true} = {}): Promise<ImportSegmentResolver> {
+    const resolver = new ImportSegmentResolver(projectId, commaSeparated);
     const segments = await prisma.segment.findMany({
       where: {projectId},
       select: {id: true, name: true, type: true},
@@ -116,7 +140,12 @@ export class ImportSegmentResolver {
       if (!row.segments) {
         continue;
       }
-      const names = splitSegmentCell(row.segments, key => this.segmentsByKey.has(key), this.maxPieces);
+      const names = splitSegmentCell(
+        row.segments,
+        key => this.segmentsByKey.has(key),
+        this.maxPieces,
+        this.commaSeparated,
+      );
       if (names.length > MAX_SEGMENTS_PER_CELL) {
         this.cellCapExceeded = true;
       }
@@ -253,7 +282,9 @@ export class ImportSegmentResolver {
     const known = this.segmentsByKey.get(key) ?? [];
     if (!known.some(existing => existing.id === segment.id)) {
       this.segmentsByKey.set(key, [...known, segment]);
-      this.maxPieces = Math.max(this.maxPieces, key.split(';').length);
+      for (const separator of SEGMENT_SEPARATORS) {
+        this.maxPieces[separator] = Math.max(this.maxPieces[separator], key.split(separator).length);
+      }
     }
   }
 

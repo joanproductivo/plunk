@@ -3,7 +3,7 @@ import type {FilterCondition, FilterGroup} from '@plunk/types';
 import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
-import {SEGMENT_MEMBERS_MAX} from '../segments.js';
+import {SEGMENT_MEMBERS_MAX, WORKFLOW_SEGMENT_CHANGES_MAX} from '../segments.js';
 import type {ProjectBrand} from '../template/brand.js';
 import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
@@ -415,12 +415,23 @@ export const WorkflowStepConfigSchemas = {
     .object({
       updates: z.record(z.any()).optional(),
       subscriptionAction: z.enum(['none', 'subscribe', 'unsubscribe']).optional(),
+      /** Static segments to add the contact to and remove it from, by id */
+      segments: z
+        .object({
+          add: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+          remove: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+        })
+        .refine(value => !value.add.some(id => value.remove.includes(id)), {
+          message: 'A segment cannot be both added and removed',
+        })
+        .optional(),
     })
     .refine(
       value =>
         (value.updates && Object.keys(value.updates).length > 0) ||
-        (value.subscriptionAction && value.subscriptionAction !== 'none'),
-      {message: 'Provide at least one field to update or a subscription action'},
+        (value.subscriptionAction && value.subscriptionAction !== 'none') ||
+        (value.segments && value.segments.add.length + value.segments.remove.length > 0),
+      {message: 'Provide at least one field to update, a subscription action or a segment change'},
     ),
 };
 

@@ -146,7 +146,11 @@ export function BulkActionsDialog({
       const data = await network.fetch<
         {jobId: string; message: string},
         typeof ContactSchemas.bulkAction | typeof ContactSchemas.bulkSegmentAction
-      >('POST', BULK_ENDPOINTS[operation], isBulkSegmentOperation(operation) ? {...selector, targetSegmentId} : selector);
+      >(
+        'POST',
+        BULK_ENDPOINTS[operation],
+        isBulkSegmentOperation(operation) ? {...selector, targetSegmentId} : selector,
+      );
 
       setQueuedJobId(data.jobId);
 

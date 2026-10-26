@@ -15,7 +15,7 @@ import {
   Label,
   Switch,
 } from '@plunk/ui';
-import type {Contact, Segment} from '@plunk/db';
+import type {Contact} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
 import type {
   BulkContactActionSelector,
@@ -37,6 +37,7 @@ import {
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {ExportContactsButton} from '../../components/ExportContactsButton';
 import {BulkActionsDialog} from '../../components/contacts/BulkActionsDialog';
+import {useSegments} from '../../components/segments/SegmentPicker';
 import {
   BulkActionBar,
   DataTable,
@@ -58,6 +59,7 @@ import {formatRelativeTime} from '../../lib/dateUtils';
 import {useColumnVisibility} from '../../lib/hooks/useColumnVisibility';
 import {usePersistentState} from '../../lib/hooks/usePersistentState';
 import {
+  AlertTriangle,
   CheckCircle,
   ChevronLeft,
   ChevronRight,
@@ -132,7 +134,7 @@ export default function ContactsPage() {
   const pageSize = 50;
 
   // Only static segments have members you can filter by and change by hand
-  const {data: segments} = useSWR<Segment[]>('/segments', {revalidateOnFocus: false});
+  const {data: segments} = useSegments();
   const staticSegments = useMemo(() => (segments ?? []).filter(s => s.type === 'STATIC'), [segments]);
 
   // The active list filters, as the API's selector takes them. The list below is fetched from
@@ -1020,7 +1022,7 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
 
         // Show success message
         if (response.result) {
-          const {createdCount, updatedCount, failureCount, segmentsCreated, errors} = response.result;
+          const {createdCount, updatedCount, failureCount, segmentsCreated, errors, warnings} = response.result;
           const segmentIssues = errors.filter(error => error.row === SEGMENT_IMPORT_ERROR_ROW).length;
           const parts = [];
           if (createdCount > 0) parts.push(`${createdCount} created`);
@@ -1028,6 +1030,7 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
           if (failureCount > 0) parts.push(`${failureCount} failed`);
           if (segmentsCreated?.length) parts.push(`${segmentsCreated.length} segments created`);
           if (segmentIssues > 0) parts.push(`${segmentIssues} segment issues`);
+          if (warnings?.length) parts.push(`${warnings.length} warning${warnings.length === 1 ? '' : 's'}`);
 
           toast.success(`Import completed: ${parts.join(', ')}`);
         }
@@ -1115,9 +1118,14 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
               <p>Required column: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">email</code>. Optional: <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">subscribed</code> (true/false) and any custom fields. Max 5MB.</p>
               <p>
                 A <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">segments</code> column
-                adds contacts to the static segments it names (separated by ;), creating missing ones; nobody is removed
-                from a segment, and those segments fire no entry events. Exported files import back as they are: status,
-                dates and dynamic segments are skipped.
+                adds contacts to the static segments it names (separated by ; or ,), creating missing ones; nobody is
+                removed from a segment, and those segments fire no entry events. An ISO 8601{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">createdAt</code> dates new
+                contacts; without{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">subscribed</code>, a{' '}
+                <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">status</code> such as
+                confirmed or unsubscribed decides it, and an unknown one leaves new contacts unsubscribed. Exported
+                files import back as they are.
               </p>
             </div>
 
@@ -1184,6 +1192,20 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
                     <span className="text-neutral-900">{result.segmentAssignments ?? 0}</span> added to segments
                     {!!result.segmentsCreated?.length && <> · created {result.segmentsCreated.join(', ')}</>}
                   </p>
+                )}
+
+                {/* Warnings: rows imported, but not quite as the file said */}
+                {!!result.warnings?.length && (
+                  <div className="max-h-32 overflow-y-auto border border-amber-200 bg-amber-50 rounded-md">
+                    <div className="space-y-0 text-xs text-amber-800">
+                      {result.warnings.map((warning, idx) => (
+                        <div key={idx} className="flex gap-3 px-3 py-2 border-b border-amber-100 last:border-0">
+                          <AlertTriangle className="h-3.5 w-3.5 text-amber-600 flex-shrink-0 mt-px" />
+                          <span>{warning}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
 
                 {/* Error Details */}

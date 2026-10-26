@@ -71,7 +71,7 @@ Segments can opt into **Track membership changes**. When enabled, Plunk fires ev
 
 The `<slug>` is derived from the segment name: lowercased, every character other than `a-z`, `0-9`, `_`, spaces and hyphens removed, whitespace replaced with hyphens, repeated hyphens collapsed. `"VIP Customers"` becomes `segment.vip-customers.entry`. Pick segment names that produce stable slugs — renaming a segment changes the event name. Accented letters are removed rather than replaced (`"Código"` becomes `cdigo`), so two names can end up with the same slug; the dashboard shows each tracked segment's event names and warns about clashes. The event data carries `segmentId` and `segmentName`, so a workflow condition can tell such segments apart.
 
-Workflows that add contacts to each other's segments can loop when they have **Allow re-entry** turned on and a delay in between. Keep **Allow re-entry** off unless a workflow is meant to run more than once per contact.
+Workflows that add contacts to each other's segments can loop: when both have **Allow re-entry** turned on and each waits (a delay, or a wait for an event) before adding to the other's segment, they keep starting each other for as long as the contact exists — with a very short delay, continuously. Keep **Allow re-entry** off unless a workflow is meant to run more than once per contact.
 
 Use these events to drive workflows (welcome a contact when they enter a "Trial users" segment, send a re-engagement email when they exit "Active users", etc.). See [Webhooks](/guides/webhooks) for the payload format.
 
@@ -100,6 +100,8 @@ Segments can be used to:
 ## Deleting a segment
 
 Deleting a segment that's referenced by an active campaign (in `DRAFT`, `SCHEDULED`, or `SENDING` state) returns `409 Conflict`. Cancel the campaign or pick a different audience first.
+
+Deleting a segment that a workflow's `UPDATE_CONTACT` step adds to or removes from, or that a `CONDITION` step checks, also returns `409`, naming the workflows. Workflows triggered by, or waiting for, the segment's `segment.<slug>.entry` / `.exit` events are not checked: the slug follows the segment's name and is not unique, so review those yourself.
 
 ## API reference
 

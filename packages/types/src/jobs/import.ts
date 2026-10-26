@@ -29,6 +29,12 @@ export interface ContactImportResult {
    */
   errors: {row: number; email: string; error: string}[];
   /**
+   * Rows that were imported, but not quite as the file said: a `createdAt` that is not a usable
+   * date, or a `status` the import does not know. They do not count as failures. Optional only
+   * because jobs that finished before warnings existed have no such field.
+   */
+  warnings?: string[];
+  /**
    * Static segments the import created because the `segments` column named them. Optional only
    * because jobs that finished before segment assignment existed have no such field.
    */

@@ -348,6 +348,8 @@ export class ContactService {
    * Upsert a contact (create or update) with metadata merging
    * Supports persistent and non-persistent data fields
    * Reserved fields: plunk_id, plunk_email
+   * `options.createdAt` dates a new contact (an import keeps the original sign-up date); an
+   * existing contact keeps its own.
    */
   public static async upsert(
     projectId: string,
@@ -355,6 +357,7 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
+    options: {createdAt?: Date} = {},
   ): Promise<Contact> {
     const normalizedEmail = ContactService.normalizeEmail(email);
 
@@ -409,6 +412,7 @@ export class ContactService {
             email: normalizedEmail,
             data: Object.keys(mergedData).length > 0 ? toPrismaJson(mergedData) : Prisma.JsonNull,
             subscribed: subscribed ?? defaultSubscribed,
+            ...(options.createdAt ? {createdAt: options.createdAt} : {}),
           },
         });
       } catch (error) {

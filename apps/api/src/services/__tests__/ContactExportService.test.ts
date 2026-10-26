@@ -1,7 +1,7 @@
 import type {BulkContactActionSelector} from '@plunk/types';
 import {beforeEach, describe, expect, it} from 'vitest';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
-import {parseImportCsv, splitImportRecord} from '../../jobs/import-processor.js';
+import {parseImportCsv, splitImportRecord} from '../../jobs/import-csv.js';
 import {ContactExportService} from '../ContactExportService.js';
 import {ContactService} from '../ContactService.js';
 import {SegmentService} from '../SegmentService.js';
