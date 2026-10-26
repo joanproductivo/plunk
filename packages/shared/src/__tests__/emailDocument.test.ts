@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {detectCustomHtmlPatterns} from '../template/index.js';
+import {detectCustomHtmlPatterns, visualAttributeText} from '../template/index.js';
 
 describe('detectCustomHtmlPatterns', () => {
   describe('empty / whitespace input', () => {
@@ -199,10 +199,49 @@ describe('detectCustomHtmlPatterns with editor videos', () => {
     expect(detectCustomHtmlPatterns(video(inner))).toBe(true);
   });
 
+  it.each([
+    ['a second href after a safe one', `href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" href="javascript:alert(1)"`],
+    [
+      'an unsafe href before a safe one',
+      `href='javascript:alert(1)' href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"`,
+    ],
+    ['a safe href hidden in another attribute', `title=' href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"' href="x"`],
+    ['an href in single quotes', `href='https://www.youtube.com/watch?v=dQw4w9WgXcQ'`],
+  ])('treats a video with %s as custom, since a browser would follow another link', (_, attributes) => {
+    expect(detectCustomHtmlPatterns(`<p><a class="email-video" ${attributes}>${image}</a></p>`)).toBe(true);
+  });
+
+  it('goes on checking videos after an unclosed link', () => {
+    expect(detectCustomHtmlPatterns(`<p>x <a ${video(`${image} Watch now`)}</p>`)).toBe(true);
+  });
+
   it('reads a long run of videos quickly', () => {
     const html = video().repeat(5_000);
     const started = performance.now();
     expect(detectCustomHtmlPatterns(html)).toBe(false);
     expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+describe('visualAttributeText', () => {
+  const imageWithAlt = (alt: string) =>
+    `<p><img class="email-image" src="https://files.example.com/a.jpg" alt="${alt.replace(/"/g, '&quot;')}"></p>`;
+
+  it.each([
+    'How to become data-driven in 2026',
+    'Big DATA- explained',
+    'Uso de aria-label',
+    'Using role=button correctly',
+    'Set id = 3 and class="big" or class=\'big\'',
+    'Social @Media tips',
+  ])('keeps an image with the alt text %s as visual editor content', alt => {
+    expect(detectCustomHtmlPatterns(imageWithAlt(alt))).toBe(true);
+    expect(detectCustomHtmlPatterns(imageWithAlt(visualAttributeText(alt)))).toBe(false);
+  });
+
+  it('reads the same, only without < and > and with runs of spaces folded', () => {
+    expect(visualAttributeText('  Me at   the zoo  ')).toBe('Me at the zoo');
+    expect(visualAttributeText('I <3 yoga > all')).toBe('I 3 yoga all');
+    expect(visualAttributeText('data-driven')).toBe('data\u2011driven');
   });
 });

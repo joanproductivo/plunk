@@ -23,6 +23,7 @@ import {
   Undo,
   UnfoldVertical,
   Variable,
+  Video,
 } from 'lucide-react';
 import {Button, Input} from '@plunk/ui';
 import {useCallback, useEffect, useState} from 'react';
@@ -37,6 +38,8 @@ interface ToolbarProps {
   onDivider: () => void;
   /** Inserts a spacer, or edits the selected one. */
   onSpacer: () => void;
+  /** Inserts a YouTube video, or edits the selected one. */
+  onVideo: () => void;
   canUploadImages: boolean;
 }
 
@@ -47,6 +50,7 @@ export function Toolbar({
   onButton,
   onDivider,
   onSpacer,
+  onVideo,
   canUploadImages,
 }: ToolbarProps) {
   const [showLinkInput, setShowLinkInput] = useState(false);
@@ -582,6 +586,25 @@ export function Toolbar({
         >
           {/* eslint-disable-next-line jsx-a11y/alt-text */}
           <Image className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onMouseDown={e => e.preventDefault()}
+          onClick={onVideo}
+          disabled={!canUploadImages}
+          data-active={editor.isActive('video')}
+          className="h-8 w-8 data-[active=true]:bg-neutral-200"
+          title={
+            !canUploadImages
+              ? 'Storage not configured'
+              : editor.isActive('video')
+                ? 'Edit video'
+                : 'Insert YouTube video'
+          }
+        >
+          <Video className="h-4 w-4" />
         </Button>
         <Button
           type="button"

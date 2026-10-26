@@ -1,8 +1,10 @@
 import {
   buttonStyle,
   BUTTON_DEFAULTS,
+  detectCustomHtmlPatterns,
   type EmailBrand,
   EMAIL_FONTS,
+  isSafeVideoHrefAttribute,
   joinEmailMarkers,
   readButtonStyle,
   readSpacerHeight,
@@ -20,6 +22,8 @@ vi.mock('@plunk/shared', async importOriginal => {
   const actual = await importOriginal<typeof import('@plunk/shared')>();
   return {
     ...actual,
+    detectCustomHtmlPatterns: vi.fn(actual.detectCustomHtmlPatterns),
+    isSafeVideoHrefAttribute: vi.fn(actual.isSafeVideoHrefAttribute),
     readButtonStyle: vi.fn(actual.readButtonStyle),
     readSpacerHeight: vi.fn(actual.readSpacerHeight),
   };
@@ -268,6 +272,74 @@ describe('renderBody', () => {
       expect(htmlToPlainText(renderBody(`<p>a</p>${DIVIDER}<p>b</p>`))).toBe(`a\n\n${'-'.repeat(40)}\n\nb`);
       expect(htmlToPlainText(renderBody(`<p>a</p>${spacer()}<p>b</p>`))).toBe('a\n\nb');
       expect(htmlToPlainText(`<p>a</p>${spacer()}<p>b</p>`)).toBe('a\n\nb');
+    });
+  });
+
+  describe('editor videos', () => {
+    const image = (width = 1280, height = 720) =>
+      `<img class="email-image" src="https://files.example.com/youtube-abc.jpg" alt="The video" width="${width}" height="${height}" style="display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: 12px;">`;
+    const video = (inner = image(), href = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s') =>
+      `<p style="text-align: center;"><a class="email-video" href="${href}" style="text-decoration: none;">${inner}</a></p>`;
+    const imageTag = (html: string) => html.match(/<img\b[^>]*>/)?.[0] ?? '';
+
+    it('sends the poster 600 px wide in Outlook, keeping its own style over the prose one', () => {
+      const html = renderBody(`<p>Hi</p>${video()}`);
+      const img = imageTag(html);
+
+      expect(html).toContain('<a class="email-video" href="https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s"');
+      expect(img).toContain('width="600" height="338"');
+      expect(img).toMatch(/margin-top: [^;]+;.*margin: 0px; border: 0px; border-radius: 12px;/);
+      expect(img).toContain('width: 100%;');
+      expect(html).toMatch(/<a class="email-video" [^>]*style="[^"]*text-decoration: none;"/);
+    });
+
+    it("sends it as wide as a framed brand's column, keeping the poster's shape", () => {
+      const body = video(image(480, 360));
+      const html = renderBody(
+        joinEmailMarkers({preheader: '', brand: toEmailBrand({backgroundColor: '#f3f4f6', contentWidth: 700}), body}),
+      );
+
+      expect(imageTag(html)).toContain('width="652" height="489"');
+    });
+
+    it.each([
+      ['no size of its own', ''],
+      ['only a width', ' width="1280"'],
+      ['a size that is not whole pixels', ' width="1e3" height="720"'],
+      ['a shape no video has', ' width="1" height="900"'],
+    ])('sends a poster with %s at the column width, its height left to the client', (_, size) => {
+      const img = imageTag(renderBody(video(image().replace(/ width="1280" height="720"/, size))));
+
+      expect(img).toContain('width="600"');
+      expect(img).not.toContain('height=');
+    });
+
+    it('drops a link that is not one a video may have, still sizing the poster', () => {
+      vi.mocked(detectCustomHtmlPatterns).mockReturnValueOnce(false);
+
+      const html = renderBody(video(image(), 'javascript:alert(1)'));
+
+      expect(html).toContain('<a class="email-video" style=');
+      expect(html).not.toContain('javascript:');
+      expect(imageTag(html)).toContain('width="600" height="338"');
+    });
+
+    it('still sends the inlined email when sizing videos fails', () => {
+      vi.mocked(isSafeVideoHrefAttribute).mockImplementationOnce(() => {
+        throw new Error('broken link');
+      });
+      const warn = vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
+
+      const html = renderBody(`<h1>Hi</h1>${video()}`);
+
+      expect(styleOf(html, 'h1')).toContain('font-weight: 800');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('size videos'), expect.any(Error));
+    });
+
+    it('reads as the link to the video in the plain-text part', () => {
+      expect(htmlToPlainText(renderBody(`<p>a</p>${video()}<p>b</p>`))).toBe(
+        'a\n\nhttps://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s\n\nb',
+      );
     });
   });
 

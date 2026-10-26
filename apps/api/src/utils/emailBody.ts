@@ -2,6 +2,7 @@ import {
   BRAND_DEFAULTS,
   BUTTON_PADDING,
   detectCustomHtmlPatterns,
+  EMAIL_COLUMN_PADDING,
   emailDocument,
   emailFontFamily,
   emailProseCss,
@@ -9,6 +10,7 @@ import {
   type EmailBrand,
   isFramedBrand,
   isSafeButtonHref,
+  isSafeVideoHrefAttribute,
   readButtonStyle,
   readSpacerHeight,
   splitEmailMarkers,
@@ -96,6 +98,43 @@ function addOutlookButtonPadding($: CheerioAPI, emailFont: string): void {
   });
 }
 
+/** Videos outside a column of a chosen width go out this wide in Outlook, the usual email width. */
+const VIDEO_DEFAULT_WIDTH = 600;
+
+/** Posters taller or wider than this are not a video's, so their height is left to the client. */
+const VIDEO_MAX_RATIO = 4;
+
+// A size attribute as written by the editor: a whole number of pixels
+const pixels = (value: string | undefined) => (value && /^\d{1,5}$/.test(value) ? Number(value) : 0);
+
+/**
+ * Editor videos as Outlook for Windows can render them. Its Word engine sizes images by their
+ * width and height attributes, ignoring CSS, so the poster's own size (1280 px) would burst the
+ * column: the width becomes the column's (the brand's width less the column's padding, or the
+ * usual 600 px), whatever the brand was when the video was inserted, and the height follows the
+ * poster's shape. A video whose link is not one a video may have loses it.
+ */
+function sizeVideos($: CheerioAPI, brand: EmailBrand): void {
+  const width = brand.contentWidth ? brand.contentWidth - 2 * EMAIL_COLUMN_PADDING : VIDEO_DEFAULT_WIDTH;
+  $('a.email-video').each((_, element) => {
+    const link = $(element);
+    const image = link.children('img').first();
+    const [posterWidth, posterHeight] = [pixels(image.attr('width')), pixels(image.attr('height'))];
+    const ratio = posterWidth / posterHeight;
+    image.attr('width', String(width));
+    if (ratio >= 1 / VIDEO_MAX_RATIO && ratio <= VIDEO_MAX_RATIO) {
+      image.attr('height', String(Math.round(width / ratio)));
+    } else {
+      image.removeAttr('height');
+    }
+
+    // Attributes are read undecoded (see wrapWithEmailStyles), so the start's & is still &amp;
+    if (!isSafeVideoHrefAttribute(link.attr('href'))) {
+      link.removeAttr('href');
+    }
+  });
+}
+
 /**
  * Editor spacers as every client keeps them, MJML's spacer (MIT): a div holding a hair space, as
  * Outlook for Windows ignores a div's height and goes by its exact line height. The height is
@@ -160,6 +199,12 @@ function wrapWithEmailStyles(htmlBody: string, brand: EmailBrand, emailId?: stri
         `[EMAIL] Failed to add Outlook padding to buttons${emailId ? ` of email ${emailId}` : ''}:`,
         error,
       );
+    }
+    try {
+      sizeVideos($, brand);
+    } catch (error) {
+      // A video at its poster's size still shows everywhere but Outlook for Windows
+      warnAtMostEveryMinute('video', `[EMAIL] Failed to size videos${emailId ? ` of email ${emailId}` : ''}:`, error);
     }
     return $.html();
   } catch (error) {

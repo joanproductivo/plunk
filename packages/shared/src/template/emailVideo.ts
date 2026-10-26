@@ -79,3 +79,8 @@ export function youTubeWatchUrl(video: YouTubeVideo): string {
 export function isSafeVideoHref(href: string | null | undefined): boolean {
   return /^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}(?:&t=[1-9]\d{0,5}s)?$/.test(href ?? '');
 }
+
+/** isSafeVideoHref for an href read raw from HTML, where the start's & is still &amp;. */
+export function isSafeVideoHrefAttribute(raw: string | null | undefined): boolean {
+  return isSafeVideoHref(raw?.replace(/&amp;/g, '&'));
+}

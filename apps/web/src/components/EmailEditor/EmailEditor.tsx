@@ -17,8 +17,10 @@ import {ImageDialog} from './ImageDialog';
 import {type DividerAttrs, EmailDivider} from './EmailDivider';
 import {DividerDialog} from './DividerDialog';
 import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
+import {EmailVideo, type VideoAttrs} from './EmailVideo';
 import {SlashCommand} from './SlashCommand';
 import {SpacerDialog} from './SpacerDialog';
+import {VideoDialog} from './VideoDialog';
 import {useBlockDialog} from './useBlockDialog';
 import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
@@ -169,6 +171,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       EmailButton,
       EmailDivider,
       EmailSpacer,
+      EmailVideo,
       Variable,
       VariableMention,
       LogicMention,
@@ -203,6 +206,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
   const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
+  const video = useBlockDialog<VideoAttrs>(editor, 'video');
 
   // The slash menu's image row opens the same dialog as the toolbar
   useEffect(() => {
@@ -499,6 +503,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onButton={button.onToolbar}
             onDivider={divider.onToolbar}
             onSpacer={spacer.onToolbar}
+            onVideo={video.onToolbar}
             canUploadImages={canUploadImages}
           />
           <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
@@ -826,6 +831,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} />
       <DividerDialog {...divider.dialogProps} />
       <SpacerDialog {...spacer.dialogProps} />
+      <VideoDialog {...video.dialogProps} />
 
       <ImageDialog
         open={showImageDialog}
@@ -916,6 +922,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         .resizable-image-container.selected,
         .ProseMirror .node-button.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror .node-spacer.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-video.ProseMirror-selectednode > [data-node-view-wrapper],
         .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
