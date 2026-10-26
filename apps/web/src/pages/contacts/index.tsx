@@ -1065,7 +1065,8 @@ function ImportContactsDialog({open, onOpenChange, onSuccess}: ImportContactsDia
               <p>
                 A <code className="text-neutral-700 bg-neutral-100 px-1 py-0.5 rounded text-xs">segments</code> column
                 adds contacts to the static segments it names (separated by ;), creating missing ones; nobody is removed
-                from a segment. Exported files import back as they are: status, dates and dynamic segments are skipped.
+                from a segment, and those segments fire no entry events. Exported files import back as they are: status,
+                dates and dynamic segments are skipped.
               </p>
             </div>
 

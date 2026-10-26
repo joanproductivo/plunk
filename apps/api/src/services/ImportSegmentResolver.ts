@@ -5,7 +5,7 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {NtfyService} from './NtfyService.js';
-import {SegmentService} from './SegmentService.js';
+import {SegmentMembershipService} from './SegmentMembershipService.js';
 
 /** Most static segments one import may create, so a mislabelled column cannot spawn hundreds. */
 export const MAX_SEGMENTS_CREATED_PER_IMPORT = 25;
@@ -54,7 +54,6 @@ export function splitSegmentCell(cell: string, isExistingName: (key: string) => 
 
 export interface ImportedRow {
   contactId: string;
-  email: string;
   /** Raw `segments` cell, if the CSV has that column. */
   segments?: string;
 }
@@ -234,19 +233,18 @@ export class ImportSegmentResolver {
     return this.block(key, name, 'is a dynamic segment; contacts join it through its filter');
   }
 
-  /** Add the rows' contacts that are not already active members. */
+  /**
+   * Add the rows' contacts that are not already members. An import is not an entry: members
+   * already in the segment keep their `enteredAt`, contacts who had left rejoin, and no entry
+   * event fires for the segment.
+   */
   private async addMissing(segmentId: string, rows: ImportedRow[]): Promise<void> {
-    const active = await prisma.segmentMembership.findMany({
-      where: {segmentId, contactId: {in: rows.map(row => row.contactId)}, exitedAt: null},
-      select: {contactId: true},
-    });
-    const activeIds = new Set(active.map(membership => membership.contactId));
-    const emails = rows.filter(row => !activeIds.has(row.contactId)).map(row => row.email);
-    if (emails.length === 0) {
-      return;
-    }
-
-    const {added} = await SegmentService.addContacts(this.projectId, segmentId, emails);
+    const {added} = await SegmentMembershipService.addMembers(
+      this.projectId,
+      segmentId,
+      rows.map(row => row.contactId),
+      {mode: 'silent'},
+    );
     this.assigned += added;
   }
 

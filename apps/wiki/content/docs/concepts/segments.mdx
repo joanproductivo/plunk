@@ -56,6 +56,8 @@ Membership changes via these API calls are immediate. When the segment has **Tra
 
 Adding a contact who is already a member counts as a new entry: the `entry` event fires again. That is what lets someone who signs up twice go through the same workflow twice — as long as that workflow has **Allow re-entry** turned on. If their first run is still waiting (on a delay or for an event), the second one runs alongside it.
 
+Adding contacts through the `segments` column of a [CSV import](/guides/importing-contacts) is not an entry: the static segment fires no events and its existing members are left as they are. A tracked dynamic segment whose filter matches those contacts — for example by membership of that static segment — still fires its own entry on its next recomputation.
+
 ## Tracking membership changes
 
 Segments can opt into **Track membership changes**. When enabled, Plunk fires events whenever a contact enters or leaves the segment — for dynamic segments when the background recomputation notices, for static segments when members are added or removed:

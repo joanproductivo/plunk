@@ -125,7 +125,7 @@ export function createImportWorker() {
                 data,
                 keepSnooze && isUpdate ? undefined : subscribed,
               );
-              imported.push({contactId: contact.id, email: contact.email, segments: segmentCell});
+              imported.push({contactId: contact.id, segments: segmentCell});
 
               result.successCount++;
               if (isUpdate) {
