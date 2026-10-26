@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {detectCustomHtmlPatterns} from '../emailStyles';
+import {detectCustomHtmlPatterns} from '../template/index.js';
 
 describe('detectCustomHtmlPatterns', () => {
   describe('empty / whitespace input', () => {
@@ -46,9 +46,7 @@ describe('detectCustomHtmlPatterns', () => {
     });
 
     it('returns false when an href URL contains "id=" or "contactId=" (must not match custom-attr regex)', () => {
-      expect(
-        detectCustomHtmlPatterns('<a href="https://example.com/u?contactId=abc&id=123">unsub</a>'),
-      ).toBe(false);
+      expect(detectCustomHtmlPatterns('<a href="https://example.com/u?contactId=abc&id=123">unsub</a>')).toBe(false);
     });
 
     it('returns false for allowed class prefixes', () => {
@@ -58,9 +56,7 @@ describe('detectCustomHtmlPatterns', () => {
     });
 
     it('returns false for a TipTap-style colored span wrapped in a paragraph', () => {
-      expect(
-        detectCustomHtmlPatterns('<p>Hello <span style="color: rgb(220, 38, 38);">world</span>!</p>'),
-      ).toBe(false);
+      expect(detectCustomHtmlPatterns('<p>Hello <span style="color: rgb(220, 38, 38);">world</span>!</p>')).toBe(false);
     });
   });
 

@@ -27,7 +27,7 @@ import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
+import {detectCustomHtmlPatterns, joinEmailMarkers, renderTemplate, splitEmailMarkers} from '@plunk/shared';
 import {
   Button,
   ConfirmDialog,
@@ -44,7 +44,7 @@ import {
   SelectValue,
 } from '@plunk/ui';
 import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet} from 'lucide-react';
-import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
+import {wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
 interface EmailEditorProps {

@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
+import {detectCustomHtmlPatterns} from '@plunk/shared';
 import {Editor} from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import {afterEach, describe, expect, it} from 'vitest';
 
-import {detectCustomHtmlPatterns} from '../../../lib/emailStyles';
 import {DIVIDER_DEFAULTS, type DividerAttrs, dividerStyle, EmailDivider} from '../EmailDivider';
 import {insertBlock} from '../useBlockDialog';
 

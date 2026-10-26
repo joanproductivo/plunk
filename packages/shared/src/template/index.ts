@@ -6,7 +6,9 @@ import {preprocessTemplate} from './preprocess.js';
 
 export * from './emailBlocks.js';
 export * from './emailButton.js';
+export * from './emailDocument.js';
 export * from './emailFonts.js';
+export * from './emailProseCss.js';
 export {escapeHtml} from './html.js';
 export * from './brand.js';
 export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
