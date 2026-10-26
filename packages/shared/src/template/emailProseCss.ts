@@ -1,4 +1,6 @@
 import {BRAND_DEFAULTS, type EmailBrand, isFramedBrand} from './brand.js';
+import {BOX_PADDING, BOX_RADIUS} from './emailBox.js';
+import {EMAIL_COLUMN_PADDING} from './emailDocument.js';
 import {emailFontFamily} from './emailFonts.js';
 
 /**
@@ -62,20 +64,20 @@ export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = fal
 .prose ul > li {
   padding-left: 0.375em;
 }
-.prose > ul > li p {
+.prose > ul > li p, .prose .email-box > ul > li p {
   margin-top: 0.75em;
   margin-bottom: 0.75em;
 }
-.prose > ul > li > *:first-child {
+.prose > ul > li > *:first-child, .prose .email-box > ul > li > *:first-child {
   margin-top: 1.25em;
 }
-.prose > ul > li > *:last-child {
+.prose > ul > li > *:last-child, .prose .email-box > ul > li > *:last-child {
   margin-bottom: 1.25em;
 }
-.prose > ol > li > *:first-child {
+.prose > ol > li > *:first-child, .prose .email-box > ol > li > *:first-child {
   margin-top: 1.25em;
 }
-.prose > ol > li > *:last-child {
+.prose > ol > li > *:last-child, .prose .email-box > ol > li > *:last-child {
   margin-bottom: 1.25em;
 }
 .prose ul ul, .prose ul ol, .prose ol ul, .prose ol ol {
@@ -327,5 +329,40 @@ export function emailProseCss(brand: EmailBrand = BRAND_DEFAULTS, {preview = fal
 
 .prose .resizable-image-container img {
   margin: 0;
+}
+
+.prose .email-box {
+  padding: ${BOX_PADDING.inset}px;
+  border-radius: ${BOX_RADIUS}px;
+  margin-top: 16px;
+  margin-bottom: 16px;
+}
+
+.prose .email-box-full {
+  padding: ${BOX_PADDING.fullWidth}px;
+  border-radius: 0;${
+    // Across the framed column, which the preview's browser allows; sending rearranges the column
+    // instead, as most clients drop negative margins
+    preview && isFramedBrand(brand)
+      ? `\n  margin-left: -${EMAIL_COLUMN_PADDING}px;\n  margin-right: -${EMAIL_COLUMN_PADDING}px;`
+      : ''
+  }
+}
+
+.prose .email-box > :first-child {
+  margin-top: 0;
+}
+
+.prose .email-box > :last-child {
+  margin-bottom: 0;
+}
+
+.prose .email-box h1, .prose .email-box h2, .prose .email-box h3, .prose .email-box h4,
+.prose .email-box strong, .prose .email-box code, .prose .email-box blockquote {
+  color: inherit;
+}
+
+.prose .email-box blockquote {
+  border-left-color: currentColor;
 }`;
 }
