@@ -1,16 +1,22 @@
 import type {Segment} from '@plunk/db';
-import {type SegmentEventKind, segmentEventName} from '@plunk/shared';
+import {segmentEventName} from '@plunk/shared';
+import type {SegmentEventKind} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
 
 import {EventService} from './EventService.js';
+import {QueueService} from './QueueService.js';
+
+/** How long a background change waits for the events queue before carrying on without it */
+const QUEUE_WAIT_MS = 3000;
 
 /**
  * How a static segment membership change behaves:
  * - `await`: entry/exit events are tracked before returning (bulk jobs, workflow steps)
- * - `background`: events are tracked without waiting, so HTTP callers are not held up by workflows
+ * - `background`: events go to the segment-membership-events queue, so HTTP callers are not held
+ *   up by workflows and the events survive a restart
  * - `silent`: imports. No events, and contacts already in the segment are left as they are
  *
  * Outside `silent`, adding a contact who is already a member counts as a new entry: `enteredAt`
@@ -172,18 +178,42 @@ export class SegmentMembershipService {
       return;
     }
 
-    const events = EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, kind), contactIds, {
-      segmentId: segment.id,
-      segmentName: segment.name,
-    });
-
     if (mode === 'await') {
-      await events;
+      await EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, kind), contactIds, {
+        segmentId: segment.id,
+        segmentName: segment.name,
+      });
       return;
     }
 
-    events.catch(error => {
-      signale.error(`[SEGMENT] Failed to track ${kind} events for segment ${segment.id}:`, error);
-    });
+    // The membership is already written, so a queue that cannot take the job must not fail the
+    // caller: a retried request would write the change again and, re-entering, queue it again.
+    // With Redis down `add` waits instead of failing; it still completes once Redis is back.
+    const settled = QueueService.queueSegmentMembershipEvents({
+      projectId,
+      segmentId: segment.id,
+      segmentName: segment.name,
+      kind,
+      contactIds,
+    }).then(
+      () => true,
+      error => {
+        signale.error(`[SEGMENT] Failed to queue ${kind} events for segment ${segment.id}:`, error);
+        return true;
+      },
+    );
+
+    let timer: NodeJS.Timeout | undefined;
+    const done = await Promise.race([
+      settled,
+      new Promise<false>(resolve => {
+        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    if (!done) {
+      signale.warn(`[SEGMENT] Queueing ${kind} events for segment ${segment.id} is taking long; not waiting for it`);
+    }
   }
 }

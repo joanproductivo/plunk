@@ -52,7 +52,7 @@ Programmatically, use:
 
 Both endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`.
 
-Membership changes via these API calls are immediate. When the segment has **Track membership changes** enabled, they also fire the `entry` / `exit` events described below, a moment after the response.
+Membership changes via these API calls are immediate. When the segment has **Track membership changes** enabled, they also fire the `entry` / `exit` events described below, a moment after the response: the events go through a background queue, one request at a time, and a restart resumes where it stopped. A request whose segment is deleted, or stops tracking, before its turn fires nothing. A request with many contacts and slow workflows (webhooks, for example) delays the requests queued after it.
 
 Adding a contact who is already a member counts as a new entry: the `entry` event fires again. That is what lets someone who signs up twice go through the same workflow twice — as long as that workflow has **Allow re-entry** turned on. If their first run is still waiting (on a delay or for an event), the second one runs alongside it.
 

@@ -1,6 +1,9 @@
 import {WorkflowTriggerType} from '@plunk/db';
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import type {SegmentMembershipEventsJobData} from '@plunk/types';
+import type {Job} from 'bullmq';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {EventService} from '../EventService';
+import {QueueService} from '../QueueService';
 import {SegmentMembershipService} from '../SegmentMembershipService';
 import {SegmentService} from '../SegmentService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -12,6 +15,10 @@ describe('SegmentMembershipService', () => {
   beforeEach(async () => {
     const {project} = await factories.createUserWithProject();
     projectId = project.id;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   async function createStaticSegment(trackMembership = true, name = 'Workshop') {
@@ -84,18 +91,56 @@ describe('SegmentMembershipService', () => {
       expect(await memberCountOf(segment.id)).toBe(4);
     });
 
-    it('fires entry events without waiting in background mode', async () => {
+    it('queues entry events in background mode instead of firing them', async () => {
       const segment = await createStaticSegment();
       const contact = await factories.createContact({projectId});
+      const queue = vi
+        .spyOn(QueueService, 'queueSegmentMembershipEvents')
+        .mockResolvedValue({} as Job<SegmentMembershipEventsJobData>);
 
       const result = await SegmentMembershipService.addMembers(projectId, segment.id, [contact.id], {
         mode: 'background',
       });
 
       expect(result).toEqual({added: 1});
-      await vi.waitFor(async () => {
-        expect(await eventContactIds('segment.workshop.entry')).toEqual([contact.id]);
+      expect(queue).toHaveBeenCalledWith({
+        projectId,
+        segmentId: segment.id,
+        segmentName: 'Workshop',
+        kind: 'entry',
+        contactIds: [contact.id],
       });
+      expect(await eventContactIds('segment.workshop.entry')).toEqual([]);
+    });
+
+    it('keeps the membership when the events cannot be queued', async () => {
+      const segment = await createStaticSegment();
+      const contact = await factories.createContact({projectId});
+      vi.spyOn(QueueService, 'queueSegmentMembershipEvents').mockRejectedValue(new Error('redis down'));
+
+      const result = await SegmentMembershipService.addMembers(projectId, segment.id, [contact.id], {
+        mode: 'background',
+      });
+
+      expect(result).toEqual({added: 1});
+      expect(await memberCountOf(segment.id)).toBe(1);
+    });
+
+    it('stops waiting for a queue that does not answer', async () => {
+      const segment = await createStaticSegment();
+      const contact = await factories.createContact({projectId});
+      // Redis down: BullMQ's add waits rather than failing
+      vi.spyOn(QueueService, 'queueSegmentMembershipEvents').mockReturnValue(
+        new Promise<Job<SegmentMembershipEventsJobData>>(() => {}),
+      );
+
+      const started = Date.now();
+      const result = await SegmentMembershipService.addMembers(projectId, segment.id, [contact.id], {
+        mode: 'background',
+      });
+
+      expect(result).toEqual({added: 1});
+      expect(Date.now() - started).toBeLessThan(4500);
     });
 
     it('counts repeated ids once and handles an empty list', async () => {
@@ -169,6 +214,19 @@ describe('SegmentMembershipService', () => {
       expect(result).toEqual({removed: 1, matched: 2});
       expect(await eventContactIds('segment.workshop.exit')).toEqual([member!.id]);
       expect(await memberCountOf(segment.id)).toBe(0);
+    });
+
+    it('queues exit events in background mode', async () => {
+      const segment = await createStaticSegment();
+      const member = await factories.createContact({projectId});
+      await addMembership(segment.id, member.id);
+      const queue = vi
+        .spyOn(QueueService, 'queueSegmentMembershipEvents')
+        .mockResolvedValue({} as Job<SegmentMembershipEventsJobData>);
+
+      await SegmentMembershipService.removeMembers(projectId, segment.id, [member.id], {mode: 'background'});
+
+      expect(queue).toHaveBeenCalledWith(expect.objectContaining({kind: 'exit', contactIds: [member.id]}));
     });
 
     it('does not count or fire twice for a contact removed twice', async () => {
