@@ -21,7 +21,9 @@ export default function NewSegmentPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [segmentType, setSegmentType] = useState<SegmentType>('DYNAMIC');
-  const [trackMembership, setTrackMembership] = useState(false);
+  // null until the user ticks or unticks it: static segments track membership by default.
+  const [trackMembershipChoice, setTrackMembershipChoice] = useState<boolean | null>(null);
+  const trackMembership = trackMembershipChoice ?? segmentType === 'STATIC';
   const [condition, setCondition] = useState<FilterCondition>({
     logic: 'AND',
     groups: [
@@ -156,7 +158,7 @@ export default function NewSegmentPage() {
                     id="trackMembership"
                     type="checkbox"
                     checked={trackMembership}
-                    onChange={e => setTrackMembership(e.target.checked)}
+                    onChange={e => setTrackMembershipChoice(e.target.checked)}
                     className="mt-1 h-4 w-4 text-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border-neutral-300 rounded"
                   />
                   <div className="flex-1">

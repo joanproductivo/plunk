@@ -3,7 +3,7 @@ import type {FilterCondition, FilterGroup} from '@plunk/types';
 import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
-import {SEGMENT_MEMBERS_MAX, WORKFLOW_SEGMENT_CHANGES_MAX} from '../segments.js';
+import {SEGMENT_MEMBERS_MAX, SEGMENTS_BULK_MAX, WORKFLOW_SEGMENT_CHANGES_MAX} from '../segments.js';
 import type {ProjectBrand} from '../template/brand.js';
 import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
@@ -201,6 +201,11 @@ export const SegmentSchemas = {
     type: z.enum(['DYNAMIC', 'STATIC']).optional(),
     condition: filterConditionSchema.optional(),
     trackMembership: z.boolean().optional(),
+  }),
+  // Same shape as `TemplateSchemas.bulkUpdate`; SegmentService.bulkUpdate deletes all or none.
+  bulkUpdate: z.object({
+    ids: z.array(uuid).min(1).max(SEGMENTS_BULK_MAX),
+    delete: z.boolean().optional(),
   }),
   members: z.object({
     // No format check: contacts are matched by their stored email, and imports accept addresses

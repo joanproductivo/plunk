@@ -156,6 +156,25 @@ export class Segments {
   }
 
   /**
+   * POST /segments/bulk-update
+   * Apply a bulk operation to several segments. Only `{ids, delete: true}` exists: it deletes
+   * every segment or, if any is missing or still in use, none (see SegmentService.bulkUpdate).
+   */
+  @Post('bulk-update')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkUpdate(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    // Zod errors go to the global handler, which answers in the standard error envelope.
+    const data = SegmentSchemas.bulkUpdate.parse(req.body);
+
+    const result = await SegmentService.bulkUpdate(auth.projectId!, data);
+
+    return res.status(200).json(result);
+  }
+
+  /**
    * POST /segments/:id/members
    * Add contacts to a static segment by email
    */
