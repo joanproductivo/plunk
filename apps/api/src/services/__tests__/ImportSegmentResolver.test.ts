@@ -209,8 +209,13 @@ describe('ImportSegmentResolver', () => {
 
   it('stops creating segments after the per-import cap', async () => {
     const names = Array.from({length: MAX_SEGMENTS_CREATED_PER_IMPORT + 1}, (_, n) => `S${n}`);
+    // Split over two rows so no cell reaches the per-cell cap.
+    const half = Math.ceil(names.length / 2);
 
-    const resolver = await assign([await rowFor('ana@example.com', names.join(';'))]);
+    const resolver = await assign([
+      await rowFor('ana@example.com', names.slice(0, half).join(';')),
+      await rowFor('bea@example.com', names.slice(half).join(';')),
+    ]);
 
     expect(resolver.segmentsCreated).toHaveLength(MAX_SEGMENTS_CREATED_PER_IMPORT);
     expect(resolver.errors).toHaveLength(1);

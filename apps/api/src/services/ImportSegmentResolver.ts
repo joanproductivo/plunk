@@ -8,7 +8,7 @@ import {NtfyService} from './NtfyService.js';
 import {SegmentMembershipService} from './SegmentMembershipService.js';
 
 /** Most static segments one import may create, so a mislabelled column cannot spawn hundreds. */
-export const MAX_SEGMENTS_CREATED_PER_IMPORT = 25;
+export const MAX_SEGMENTS_CREATED_PER_IMPORT = 100;
 /** Most segment names one cell may list; the rest of that cell is ignored and reported. */
 export const MAX_SEGMENTS_PER_CELL = 100;
 
