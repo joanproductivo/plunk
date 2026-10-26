@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import {detectCustomHtmlPatterns} from '@plunk/shared';
+import {detectCustomHtmlPatterns, videoImageStyle, type VideoSize} from '@plunk/shared';
 import {Editor} from '@tiptap/core';
 import {Link} from '@tiptap/extension-link';
 import StarterKit from '@tiptap/starter-kit';
@@ -17,8 +17,10 @@ import {ResizableImage} from '../ResizableImage';
  */
 const HREF = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&amp;t=90s';
 const SRC = 'https://files.example.com/p/3-0123456789abcdef-youtube-dqw4w9wgxcq.jpg';
-const image = (alt = 'Never gonna give you up') =>
-  `<img class="email-image" src="${SRC}" alt="${alt}" width="1280" height="720" style="display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: 12px;">`;
+const image = (alt = 'Never gonna give you up', size: VideoSize = 'large') =>
+  `<img class="email-image" src="${SRC}" alt="${alt}" width="1280" height="720" style="${videoImageStyle(size)}">`;
+// A video's poster as the editor saved it before sizes
+const SAVED_BEFORE_SIZES = `<img class="email-image" src="${SRC}" alt="Never gonna give you up" width="1280" height="720" style="display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: 12px;">`;
 const video = (inner = image(), href = HREF) =>
   `<p style="text-align: center;"><a class="email-video" href="${href}" style="text-decoration: none;">${inner}</a></p>`;
 
@@ -70,8 +72,24 @@ describe('EmailVideo', () => {
         alt: 'Never gonna give you up',
         width: 1280,
         height: 720,
+        size: 'large',
       },
     ]);
+  });
+
+  it.each(['small', 'medium'] as const)('keeps a %s video exactly as saved', size => {
+    const html = `<p>a</p>${video(image('Never gonna give you up', size))}<p>b</p>`;
+    createEditor(html);
+
+    expect(editor.getHTML()).toBe(html);
+    expect(videoNodes()[0]).toMatchObject({size});
+  });
+
+  it('reads a video saved before sizes as large, and saves it centred', () => {
+    createEditor(`<p>a</p>${video(SAVED_BEFORE_SIZES)}<p>b</p>`);
+
+    expect(videoNodes()[0]).toMatchObject({size: 'large'});
+    expect(editor.getHTML()).toBe(`<p>a</p>${video()}<p>b</p>`);
   });
 
   it('reads a video link outside its paragraph, as pasted, and saves it in one', () => {
@@ -94,6 +112,7 @@ describe('EmailVideo', () => {
         alt: 'Never gonna give you up',
         width: 1280,
         height: 720,
+        size: 'large',
       },
     });
 

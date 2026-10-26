@@ -1,4 +1,14 @@
-import {EMAIL_COLUMN_RADIUS, isSafeVideoHref, visualAttributeText} from '@plunk/shared';
+import {
+  EMAIL_COLUMN_RADIUS,
+  isSafeVideoHref,
+  readVideoSize,
+  VIDEO_DEFAULT_SIZE,
+  VIDEO_SIZES,
+  videoImageStyle,
+  videoMaxWidth,
+  type VideoSize,
+  visualAttributeText,
+} from '@plunk/shared';
 import {Node} from '@tiptap/core';
 import {NodeViewWrapper, type ReactNodeViewProps, ReactNodeViewRenderer} from '@tiptap/react';
 
@@ -11,16 +21,14 @@ export interface VideoAttrs {
   /** The video's watch page (see @plunk/shared emailVideo). */
   href: string;
   alt: string;
-  /** The poster's own size, which sending scales to the column (see the API's emailBody). */
+  /** The poster's own size, which sending scales to the video's (see the API's emailBody). */
   width: number | null;
   height: number | null;
+  /** How wide the video is shown (see @plunk/shared emailVideoSize). */
+  size: VideoSize;
 }
 
 const VIDEO = 'a.email-video';
-
-// Rounded like a framed email's column, which Outlook for Windows squares. Written as browsers
-// serialise it, so a video reads back exactly as it was saved.
-const IMAGE_STYLE = `display: block; width: 100%; height: auto; margin: 0px; border: 0px; border-radius: ${EMAIL_COLUMN_RADIUS}px;`;
 
 // A video is a watch link holding one image with a source and nothing else, so reading it as a
 // block never drops anything; any other a.email-video stays custom HTML (see emailDocument).
@@ -52,7 +60,14 @@ function VideoView({node, editor, getPos}: ReactNodeViewProps) {
   const attrs = node.attrs as VideoAttrs;
 
   return (
-    <NodeViewWrapper style={{margin: '1em 0'}}>
+    // At its size, centred, so its selection outline is the video's too
+    <NodeViewWrapper
+      style={{
+        margin: '1em auto',
+        width: `${VIDEO_SIZES[attrs.size]}%`,
+        maxWidth: attrs.size === 'large' ? undefined : videoMaxWidth(attrs.size),
+      }}
+    >
       {/* An image, not a link: the editor is no place to follow it. */}
       {/* eslint-disable-next-line @next/next/no-img-element -- a poster in the project's storage */}
       <img
@@ -77,8 +92,9 @@ function VideoView({node, editor, getPos}: ReactNodeViewProps) {
 /**
  * A YouTube video: its poster, with a play button drawn on it, linking to the video. Saved as
  * <p style="text-align: center;"><a class="email-video" href="…"><img class="email-image" …></a></p>,
- * always centred at the column's width: the link only when it is a safe watch page, the image
- * with the poster's own width and height and its alt text kept visual (see visualAttributeText).
+ * centred at its size (see @plunk/shared emailVideoSize): the link only when it is a safe watch
+ * page, the image with the poster's own width and height and its alt text kept visual (see
+ * visualAttributeText). A video saved before sizes reads as large.
  */
 export const EmailVideo = Node.create({
   name: 'video',
@@ -109,6 +125,11 @@ export const EmailVideo = Node.create({
         parseHTML: element => readSize(imageOf(element).getAttribute('height')),
         renderHTML: () => ({}),
       },
+      size: {
+        default: VIDEO_DEFAULT_SIZE,
+        parseHTML: element => readVideoSize(imageOf(element).getAttribute('style')),
+        renderHTML: () => ({}),
+      },
     };
   },
 
@@ -131,7 +152,13 @@ export const EmailVideo = Node.create({
     const size = attrs.width && attrs.height ? {width: String(attrs.width), height: String(attrs.height)} : {};
     const image = [
       'img',
-      {class: 'email-image', src: attrs.src, alt: visualAttributeText(attrs.alt), ...size, style: IMAGE_STYLE},
+      {
+        class: 'email-image',
+        src: attrs.src,
+        alt: visualAttributeText(attrs.alt),
+        ...size,
+        style: videoImageStyle(attrs.size),
+      },
     ];
     const link = [
       'a',

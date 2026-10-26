@@ -61,6 +61,9 @@ const PLACEHOLDER = {width: 120, height: 90};
 const NARROWEST = 4 / 3;
 const WIDEST = 16 / 9;
 
+/** YouTube's red, for the play button's triangle. */
+const PLAY_TRIANGLE = '#ff0000';
+
 /** The play button's diameter, as a share of the poster's width. */
 const PLAY_SIZE = 0.17;
 
@@ -121,7 +124,7 @@ export function cropTo(width: number, height: number, ratio: number): [number, n
   return [0, Math.round((height - cropped) / 2), width, cropped];
 }
 
-// A white disc with a dark triangle, its shadow lifting it off the poster
+// A white disc with a red triangle, which reads as a video, its shadow lifting it off the poster
 function drawPlayButton(context: CanvasRenderingContext2D, width: number, height: number): void {
   const radius = Math.max(28, (width * PLAY_SIZE) / 2);
   const [x, y] = [width / 2, height / 2];
@@ -139,7 +142,7 @@ function drawPlayButton(context: CanvasRenderingContext2D, width: number, height
   // Nudged right, so the triangle looks centred in the disc
   const side = radius * 0.8;
   const left = x - side * 0.36;
-  context.fillStyle = '#111827';
+  context.fillStyle = PLAY_TRIANGLE;
   context.beginPath();
   context.moveTo(left, y - side / 2);
   context.lineTo(left + side * 0.87, y);
