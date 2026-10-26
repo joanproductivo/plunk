@@ -1,4 +1,4 @@
-import {buttonStyle, BUTTON_DEFAULTS, readButtonStyle} from '@plunk/shared';
+import {buttonStyle, BUTTON_DEFAULTS, readButtonStyle, readSpacerHeight, spacerStyle} from '@plunk/shared';
 import {load} from 'cheerio/slim';
 import signale from 'signale';
 import {afterEach, describe, expect, it, vi} from 'vitest';
@@ -8,7 +8,11 @@ import {htmlToPlainText} from '../mime.js';
 
 vi.mock('@plunk/shared', async importOriginal => {
   const actual = await importOriginal<typeof import('@plunk/shared')>();
-  return {...actual, readButtonStyle: vi.fn(actual.readButtonStyle)};
+  return {
+    ...actual,
+    readButtonStyle: vi.fn(actual.readButtonStyle),
+    readSpacerHeight: vi.fn(actual.readSpacerHeight),
+  };
 });
 
 vi.mock('cheerio/slim', async importOriginal => {
@@ -202,6 +206,61 @@ describe('renderBody', () => {
     });
   });
 
+  describe('editor dividers and spacers', () => {
+    // A divider and a spacer as Chromium saves them from the editor
+    const DIVIDER =
+      '<hr style="border-width: 4px 0px 0px; border-style: solid; border-color: rgb(225, 29, 72); margin: 16px 0px;">';
+    const spacer = (height = 48) => `<hr class="email-spacer" style="${spacerStyle(height)}">`;
+
+    it("keeps a divider's own style after the prose styles it overrides", () => {
+      const style = styleOf(renderBody(`<p>a</p>${DIVIDER}<p>b</p>`), 'hr');
+
+      expect(style).toMatch(/border-top: 1px solid #e5e7eb.*border-width: 4px 0px 0px/);
+      expect(style).toMatch(/margin-top: 3em.*margin: 16px 0px/);
+      expect(style).toContain('border-color: rgb(225, 29, 72)');
+    });
+
+    it('sends a spacer as a div every client keeps at its height', () => {
+      const html = renderBody(`<p>a</p>${spacer()}<p>b</p>`);
+
+      expect(html).not.toContain('<hr');
+      expect(html).toContain(
+        '<div data-plunk-spacer style="height:48px;line-height:48px;font-size:1px;mso-line-height-rule:exactly">&#8202;</div>',
+      );
+    });
+
+    it('writes a hand-written height as a number within bounds, or the default', () => {
+      const heightOf = (style: string) =>
+        renderBody(`<hr class="email-spacer" style="${style}">`).match(
+          /<div data-plunk-spacer style="height:(\d+)px/,
+        )?.[1];
+
+      expect(heightOf('height: 999px')).toBe('200');
+      expect(heightOf('height: 3em')).toBe('32');
+      expect(heightOf('height: calc(100px + 1em)')).toBe('32');
+      expect(heightOf('margin: 0px')).toBe('32');
+    });
+
+    it('still sends the inlined email when converting spacers fails', () => {
+      vi.mocked(readSpacerHeight).mockImplementationOnce(() => {
+        throw new Error('broken style');
+      });
+      const warn = vi.spyOn(signale, 'warn').mockImplementation(() => undefined);
+
+      const html = renderBody(`<h1>Hi</h1>${spacer()}`);
+
+      expect(styleOf(html, 'h1')).toContain('font-weight: 800');
+      expect(styleOf(html, 'hr')).toContain('height: 48px');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('convert spacers'), expect.any(Error));
+    });
+
+    it('reads as a rule for a divider and as nothing for a spacer in the plain-text part', () => {
+      expect(htmlToPlainText(renderBody(`<p>a</p>${DIVIDER}<p>b</p>`))).toBe(`a\n\n${'-'.repeat(40)}\n\nb`);
+      expect(htmlToPlainText(renderBody(`<p>a</p>${spacer()}<p>b</p>`))).toBe('a\n\nb');
+      expect(htmlToPlainText(`<p>a</p>${spacer()}<p>b</p>`)).toBe('a\n\nb');
+    });
+  });
+
   describe('custom HTML', () => {
     it('sends look-alike buttons and buttons with markup inside as they are', () => {
       const lookAlike = '<p><a class="email-button-primary" href="https://a.com">Go</a></p>';
@@ -209,6 +268,12 @@ describe('renderBody', () => {
 
       expect(renderBody(lookAlike)).toBe(lookAlike);
       expect(renderBody(rich)).toBe(rich);
+    });
+
+    it('sends a look-alike spacer as it is', () => {
+      const lookAlike = '<p>a</p><hr class="email-spacer-big" style="height: 48px;">';
+
+      expect(renderBody(lookAlike)).toBe(lookAlike);
     });
 
     it('checks for buttons in linear time, as the body may hold contact data', () => {

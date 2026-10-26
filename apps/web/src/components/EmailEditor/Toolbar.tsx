@@ -18,8 +18,10 @@ import {
   Quote,
   RectangleHorizontal,
   Redo,
+  SeparatorHorizontal,
   Strikethrough,
   Undo,
+  UnfoldVertical,
   Variable,
 } from 'lucide-react';
 import {Button, Input} from '@plunk/ui';
@@ -31,10 +33,22 @@ interface ToolbarProps {
   onInsertImage: () => void;
   /** Inserts a button, or edits the selected one. */
   onButton: () => void;
+  /** Inserts a divider, or edits the selected one. */
+  onDivider: () => void;
+  /** Inserts a spacer, or edits the selected one. */
+  onSpacer: () => void;
   canUploadImages: boolean;
 }
 
-export function Toolbar({editor, onInsertVariable, onInsertImage, onButton, canUploadImages}: ToolbarProps) {
+export function Toolbar({
+  editor,
+  onInsertVariable,
+  onInsertImage,
+  onButton,
+  onDivider,
+  onSpacer,
+  canUploadImages,
+}: ToolbarProps) {
   const [showLinkInput, setShowLinkInput] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [showColorPicker, setShowColorPicker] = useState(false);
@@ -554,7 +568,7 @@ export function Toolbar({editor, onInsertVariable, onInsertImage, onButton, canU
         )}
       </div>
 
-      {/* Image and button */}
+      {/* Image and blocks */}
       <div className="flex gap-0.5 pr-2 border-r border-neutral-200">
         <Button
           type="button"
@@ -580,6 +594,30 @@ export function Toolbar({editor, onInsertVariable, onInsertImage, onButton, canU
           title={editor.isActive('button') ? 'Edit button' : 'Insert button'}
         >
           <RectangleHorizontal className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onMouseDown={e => e.preventDefault()}
+          onClick={onDivider}
+          data-active={editor.isActive('horizontalRule')}
+          className="h-8 w-8 data-[active=true]:bg-neutral-200"
+          title={editor.isActive('horizontalRule') ? 'Edit divider' : 'Insert divider'}
+        >
+          <SeparatorHorizontal className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onMouseDown={e => e.preventDefault()}
+          onClick={onSpacer}
+          data-active={editor.isActive('spacer')}
+          className="h-8 w-8 data-[active=true]:bg-neutral-200"
+          title={editor.isActive('spacer') ? 'Edit spacer' : 'Insert spacer'}
+        >
+          <UnfoldVertical className="h-4 w-4" />
         </Button>
       </div>
 

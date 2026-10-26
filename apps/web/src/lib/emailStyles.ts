@@ -1,3 +1,5 @@
+import {EDITOR_BLOCK_CLASSES} from '@plunk/shared';
+
 // Whether an `a.email-button` holds markup (another tag before its closing </a>). A linear scan:
 // the body may carry contact data, so no regex that can backtrack over attacker-sized input.
 function hasRichButton(html: string): boolean {
@@ -20,10 +22,10 @@ function hasRichButton(html: string): boolean {
 //
 // The TipTap editor in EmailEditor.tsx loads: StarterKit (paragraphs, headings, lists,
 // blockquote, code, hr, bold, italic, strike, etc.), TextAlign, Color, TextStyle, Link,
-// ResizableImage, EmailButton, and VariableMention. Of these, TextStyle + Color + Link natively
-// round-trip <span style="color: ..."> / <a style="color: ..."> markup that TipTap itself
-// generates when you change text color or style a link. We must therefore PERMIT what
-// TipTap can represent and REJECT only what it can't.
+// ResizableImage, EmailButton, EmailDivider (styled <hr>), EmailSpacer, and VariableMention. Of
+// these, TextStyle + Color + Link natively round-trip <span style="color: ..."> /
+// <a style="color: ..."> markup that TipTap itself generates when you change text color or
+// style a link. We must therefore PERMIT what TipTap can represent and REJECT only what it can't.
 export const detectCustomHtmlPatterns = (html: string): boolean => {
   if (!html || html.trim() === '') return false;
 
@@ -43,9 +45,9 @@ export const detectCustomHtmlPatterns = (html: string): boolean => {
       'selected',
       'resize-handle',
     ];
-    // The editor's button, matched exactly so that look-alikes such as `email-button-primary` stay custom
+    // The editor's own blocks, matched exactly (see EDITOR_BLOCK_CLASSES)
     const hasDisallowedClass = classes.some(
-      cls => cls !== 'email-button' && !allowedPrefixes.some(prefix => cls.startsWith(prefix)),
+      cls => !EDITOR_BLOCK_CLASSES.includes(cls) && !allowedPrefixes.some(prefix => cls.startsWith(prefix)),
     );
     if (hasDisallowedClass) {
       hasCustomClasses = true;

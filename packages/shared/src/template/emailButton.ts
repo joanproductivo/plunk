@@ -4,6 +4,8 @@
  * agree on what a button is without a column of its own.
  */
 
+import {declarations} from './inlineStyle.js';
+
 export type ButtonShape = 'rectangle' | 'rounded' | 'pill';
 export type ButtonSize = 'small' | 'medium' | 'large';
 export type ButtonFont =
@@ -86,19 +88,6 @@ export function normalizeHexColor(value: string | null | undefined): string | nu
 export function isSafeButtonHref(href: string | null | undefined): boolean {
   const value = (href ?? '').trim();
   return /^(https?:\/\/|mailto:|tel:|#|\{\{|\{%)/i.test(value);
-}
-
-// `property: value` pairs of an inline style. Values never contain `;` (font names are quoted
-// without one), so splitting on it is enough.
-function declarations(style: string | null | undefined): Map<string, string> {
-  const result = new Map<string, string>();
-  for (const declaration of (style ?? '').split(';')) {
-    const colon = declaration.indexOf(':');
-    if (colon > 0) {
-      result.set(declaration.slice(0, colon).trim().toLowerCase(), declaration.slice(colon + 1).trim());
-    }
-  }
-  return result;
 }
 
 // Font stacks compared without quotes or spaces: juice rewrites double quotes as single ones.
