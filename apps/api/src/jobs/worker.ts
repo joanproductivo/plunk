@@ -135,17 +135,42 @@ async function startWorkers() {
   }
 }
 
+/**
+ * How long the workers get to finish their active jobs on shutdown. Below pm2's
+ * `kill_timeout` (30s, docker-entrypoint-nginx.sh), so a close that hangs ends in our
+ * own exit with a log line rather than a silent SIGKILL.
+ */
+const SHUTDOWN_TIMEOUT_MS = 25_000;
+
+let stopping = false;
+
 async function stopWorkers() {
+  // A second signal, or an error raised while closing, must not start a second close
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+
   signale.info('[WORKER] Stopping workers...');
 
-  for (const {name, worker} of workers) {
-    try {
-      await worker.close();
-      signale.info(`[WORKER] ${name} worker stopped`);
-    } catch (error) {
-      signale.error(`[WORKER] Error stopping ${name} worker:`, error);
-    }
-  }
+  const deadline = setTimeout(() => {
+    signale.error(`[WORKER] Workers did not stop within ${SHUTDOWN_TIMEOUT_MS / 1000}s, exiting`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+
+  // Closed together: each close waits for that queue's active jobs, so closing them one
+  // after another would add up every queue's wait and run past the kill timeout
+  await Promise.allSettled(
+    workers.map(async ({name, worker}) => {
+      try {
+        await worker.close();
+        signale.info(`[WORKER] ${name} worker stopped`);
+      } catch (error) {
+        signale.error(`[WORKER] Error stopping ${name} worker:`, error);
+      }
+    }),
+  );
 
   signale.success('[WORKER] All workers stopped');
   process.exit(0);
