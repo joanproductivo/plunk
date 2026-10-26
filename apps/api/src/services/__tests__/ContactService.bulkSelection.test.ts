@@ -1,4 +1,4 @@
-import type {ContactSubscriptionStatus} from '@plunk/types';
+import type {ContactListFilter} from '@plunk/types';
 import {beforeEach, describe, expect, it} from 'vitest';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {ContactService} from '../ContactService.js';
@@ -35,10 +35,7 @@ describe('Bulk contact actions - select all matching', () => {
     await factories.createContact({projectId: otherProjectId, email: 'left@example.com', subscribed: false});
   });
 
-  const emailsFor = async (
-    filter: {search?: string; status?: ContactSubscriptionStatus; subscribed?: boolean},
-    excludeIds?: string[],
-  ) => {
+  const emailsFor = async (filter: ContactListFilter, excludeIds?: string[]) => {
     const contacts = await prisma.contact.findMany({
       where: ContactService.buildQueryWhere(projectId, {mode: 'query', filter, excludeIds}),
       select: {email: true},
@@ -72,5 +69,64 @@ describe('Bulk contact actions - select all matching', () => {
     expect(await emailsFor({search: 'LEFT', status: 'unsubscribed'})).toEqual(['left@example.com']);
     expect(await emailsFor({status: 'snoozed'}, [sleeping.id])).toEqual([]);
     expect(await emailsFor({})).toEqual(['active@example.com', 'left@example.com', 'sleeping@example.com']);
+  });
+});
+
+describe('Contacts list filters - segment', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+  let segmentId: string;
+  let otherSegmentId: string;
+
+  beforeEach(async () => {
+    ({
+      project: {id: projectId},
+    } = await factories.createUserWithProject());
+    const {project: other} = await factories.createUserWithProject();
+
+    const segment = await prisma.segment.create({data: {projectId, name: 'Workshop', type: 'STATIC'}});
+    segmentId = segment.id;
+    const otherSegment = await prisma.segment.create({data: {projectId: other.id, name: 'Other', type: 'STATIC'}});
+    otherSegmentId = otherSegment.id;
+
+    const member = await factories.createContact({projectId, email: 'member@example.com'});
+    const left = await factories.createContact({projectId, email: 'left@example.com'});
+    await factories.createContact({projectId, email: 'outsider@example.com'});
+    const elsewhere = await factories.createContact({projectId: other.id, email: 'member@example.com'});
+
+    await prisma.segmentMembership.createMany({
+      data: [
+        {segmentId, contactId: member.id},
+        {segmentId, contactId: left.id, exitedAt: new Date()},
+        {segmentId: otherSegmentId, contactId: elsewhere.id},
+      ],
+    });
+  });
+
+  const emailsFor = async (filter: ContactListFilter) => {
+    const contacts = await prisma.contact.findMany({
+      where: ContactService.buildQueryWhere(projectId, {mode: 'query', filter}),
+      select: {email: true},
+    });
+    return contacts.map(c => c.email).sort();
+  };
+
+  it('keeps only the current members of the segment', async () => {
+    expect(await emailsFor({segmentId})).toEqual(['member@example.com']);
+  });
+
+  it("matches nothing for another project's segment", async () => {
+    expect(await emailsFor({segmentId: otherSegmentId})).toEqual([]);
+  });
+
+  it('combines the segment with the other filters', async () => {
+    expect(await emailsFor({segmentId, search: 'outsider'})).toEqual([]);
+  });
+
+  it('applies the segment to the contacts list and its total', async () => {
+    const page = await ContactService.list(projectId, 50, undefined, undefined, {segmentId});
+
+    expect(page.data.map(c => c.email)).toEqual(['member@example.com']);
+    expect(page.total).toBe(1);
   });
 });

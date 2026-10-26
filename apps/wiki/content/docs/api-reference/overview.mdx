@@ -212,7 +212,7 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 
 | Method | Path                                  | Description                                                                                  |
 | ------ | ------------------------------------- | -------------------------------------------------------------------------------------------- |
-| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `limit`, `cursor`.                    |
+| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`. |
 | POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`.             |
 | GET    | `/contacts/:id`                       | Get a single contact.                                                                        |
 | PATCH  | `/contacts/:id`                       | Update a contact's email, subscription state, or `data` fields.                              |
@@ -226,11 +226,13 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | **CSV import** |                               |                                                                                              |
 | POST   | `/contacts/import`                    | Upload a CSV file (multipart, ≤ 5 MB). Queued — returns a `jobId`.                           |
 | GET    | `/contacts/import/:jobId`             | Poll the status of a CSV import job.                                                         |
-| POST   | `/contacts/export`                    | Download contacts as CSV. Takes the bulk operations' selector (`ids`, or `query` with `filter.search` / `filter.status` and `excludeIds`). |
+| POST   | `/contacts/export`                    | Download contacts as CSV. Takes the bulk operations' selector (`ids`, or `query` with `filter.search` / `filter.status` / `filter.segmentId` and `excludeIds`). |
 | **Bulk operations** |                          |                                                                                              |
 | POST   | `/contacts/bulk-subscribe`            | Subscribe up to 1,000 contacts by ID. Queued — returns a `jobId`.                            |
 | POST   | `/contacts/bulk-unsubscribe`          | Unsubscribe up to 1,000 contacts by ID. Queued.                                              |
 | POST   | `/contacts/bulk-delete`               | Delete up to 1,000 contacts by ID. Queued.                                                   |
+| POST   | `/contacts/bulk-add-to-segment`       | Add contacts to a static segment: the selector plus `targetSegmentId`. Members already in it re-enter it. Queued. |
+| POST   | `/contacts/bulk-remove-from-segment`  | Remove contacts from a static segment: the selector plus `targetSegmentId`. Queued.          |
 | GET    | `/contacts/bulk/:jobId`               | Poll the status of a bulk job.                                                               |
 
 ### Templates

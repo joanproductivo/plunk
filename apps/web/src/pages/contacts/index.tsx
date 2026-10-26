@@ -15,11 +15,13 @@ import {
   Label,
   Switch,
 } from '@plunk/ui';
-import type {Contact} from '@plunk/db';
+import type {Contact, Segment} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
 import type {
   BulkContactActionSelector,
+  BulkContactOperation,
   ContactImportResult,
+  ContactListFilter,
   ContactSubscriptionStatus,
   CursorPaginatedResponse,
 } from '@plunk/types';
@@ -62,6 +64,8 @@ import {
   Edit,
   EyeOff,
   FileUp,
+  ListMinus,
+  ListPlus,
   Mail,
   MailCheck,
   MailX,
@@ -110,6 +114,8 @@ export default function ContactsPage() {
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  // Static segment id, or '' for no segment filter
+  const [segmentFilter, setSegmentFilter] = useState('');
   const [view, setView] = usePersistentState<DataTableView>(VIEW_STORAGE_KEY, 'table', isDataTableView);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useColumnVisibility(COLUMNS_STORAGE_KEY, DEFAULT_COLUMN_VISIBILITY);
@@ -122,21 +128,43 @@ export default function ContactsPage() {
   const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [excludedContacts, setExcludedContacts] = useState<Set<string>>(new Set());
   const [showBulkActionsDialog, setShowBulkActionsDialog] = useState(false);
-  const [bulkOperation, setBulkOperation] = useState<'subscribe' | 'unsubscribe' | 'delete' | null>(null);
+  const [bulkOperation, setBulkOperation] = useState<BulkContactOperation | null>(null);
   const pageSize = 50;
 
-  // Backend is authoritative for sorting + status filtering
-  // (?sort=&dir=, ?status=); the client only mirrors the active state.
+  // Only static segments have members you can filter by and change by hand
+  const {data: segments} = useSWR<Segment[]>('/segments', {revalidateOnFocus: false});
+  const staticSegments = useMemo(() => (segments ?? []).filter(s => s.type === 'STATIC'), [segments]);
+
+  // The active list filters, as the API's selector takes them. The list below is fetched from
+  // these too, so the list, its count, "select all matching", the bulk actions and the export
+  // always see the same contacts.
+  const listFilter = useMemo<ContactListFilter>(
+    () => ({
+      ...(search ? {search} : {}),
+      ...(statusFilter !== 'ALL' ? {status: statusFilter} : {}),
+      ...(segmentFilter ? {segmentId: segmentFilter} : {}),
+    }),
+    [search, statusFilter, segmentFilter],
+  );
+
+  // Backend is authoritative for sorting + filtering (?sort=&dir=, ?status=, ?segmentId=); the
+  // client only mirrors the active state.
   const sortParam = sorting[0]?.id ?? '';
   const dirParam = sorting[0] ? (sorting[0].desc ? 'desc' : 'asc') : '';
-  const statusParam = statusFilter === 'ALL' ? '' : statusFilter;
+  const listQuery = [
+    `limit=${pageSize}`,
+    cursor ? `cursor=${cursor}` : '',
+    listFilter.search ? `search=${encodeURIComponent(listFilter.search)}` : '',
+    listFilter.status ? `status=${listFilter.status}` : '',
+    listFilter.segmentId ? `segmentId=${listFilter.segmentId}` : '',
+    sortParam ? `sort=${sortParam}&dir=${dirParam}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
 
-  const {data, mutate, isLoading} = useSWR<CursorPaginatedResponse<Contact>>(
-    `/contacts?limit=${pageSize}${cursor ? `&cursor=${cursor}` : ''}${
-      search ? `&search=${encodeURIComponent(search)}` : ''
-    }${statusParam ? `&status=${statusParam}` : ''}${sortParam ? `&sort=${sortParam}&dir=${dirParam}` : ''}`,
-    {revalidateOnFocus: false},
-  );
+  const {data, mutate, isLoading} = useSWR<CursorPaginatedResponse<Contact>>(`/contacts?${listQuery}`, {
+    revalidateOnFocus: false,
+  });
 
   useEffect(() => {
     if (data) {
@@ -147,7 +175,7 @@ export default function ContactsPage() {
     }
   }, [data, cursor]);
 
-  // Reset the cursor stack — used whenever the query (search/status) or the
+  // Reset the cursor stack — used whenever the query (search/status/segment) or the
   // ordering changes, since cursors are tied to a specific filter + sort.
   const resetPagination = () => {
     setCursor(undefined);
@@ -164,6 +192,12 @@ export default function ContactsPage() {
 
   const handleStatusChange = (next: StatusFilter) => {
     setStatusFilter(next);
+    resetPagination();
+    clearSelection();
+  };
+
+  const handleSegmentChange = (next: string) => {
+    setSegmentFilter(next);
     resetPagination();
     clearSelection();
   };
@@ -276,12 +310,6 @@ export default function ContactsPage() {
     ? Math.max(0, totalCount - excludedContacts.size)
     : selectedContacts.size;
 
-  // The active list filters, as the API's selector takes them.
-  const listFilter = useMemo(
-    () => ({...(search ? {search} : {}), ...(statusFilter !== 'ALL' ? {status: statusFilter} : {})}),
-    [search, statusFilter],
-  );
-
   // What a bulk action targets. "Select all matching" mirrors the active list filters so it
   // reaches exactly the rows the user is looking at, minus the ones they unticked.
   const bulkSelector = useMemo<BulkContactActionSelector>(
@@ -296,7 +324,7 @@ export default function ContactsPage() {
   const exportSelector: BulkContactActionSelector =
     effectiveSelectionCount > 0 ? bulkSelector : {mode: 'query', filter: listFilter};
 
-  const handleBulkAction = (operation: 'subscribe' | 'unsubscribe' | 'delete') => {
+  const handleBulkAction = (operation: BulkContactOperation) => {
     setBulkOperation(operation);
     setShowBulkActionsDialog(true);
   };
@@ -328,16 +356,17 @@ export default function ContactsPage() {
 
   const hasData = contacts.length > 0;
 
-  // Whether any search/status filter is narrowing the list — drives the
+  // Whether any search/status/segment filter is narrowing the list — drives the
   // "no results vs first-run empty" distinction below.
-  const hasActiveFilters = search !== '' || statusFilter !== 'ALL';
+  const hasActiveFilters = search !== '' || statusFilter !== 'ALL' || segmentFilter !== '';
 
-  // Reset everything that can hide rows (search + status + pagination) so the
+  // Reset everything that can hide rows (search + status + segment + pagination) so the
   // user can recover from a filter combination that matched nothing.
   const clearFilters = () => {
     setSearchInput('');
     setSearch('');
     setStatusFilter('ALL');
+    setSegmentFilter('');
     resetPagination();
     clearSelection();
   };
@@ -503,6 +532,7 @@ export default function ContactsPage() {
           {/* Control row. One aligned cluster of 32px-tall controls:
               - Search input: always present (both views).
               - Status filter: a FilterPill, the same in both views.
+              - Segment filter: a FilterPill of the static segments, when there are any.
               - Columns selector: TABLE VIEW ONLY.
               - A hairline divider separates the data controls from the view switcher. */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -525,6 +555,15 @@ export default function ContactsPage() {
                 selected={statusFilter === 'ALL' ? [] : [statusFilter]}
                 onChange={next => handleStatusChange((next[0] as StatusFilter) ?? 'ALL')}
               />
+              {staticSegments.length > 0 && (
+                <FilterPill
+                  title="Segment"
+                  multiple={false}
+                  options={staticSegments.map(segment => ({value: segment.id, label: segment.name}))}
+                  selected={segmentFilter ? [segmentFilter] : []}
+                  onChange={next => handleSegmentChange(next[0] ?? '')}
+                />
+              )}
               {view === 'table' && (
                 <DataTableViewOptions table={table} lockedColumnIds={['select', 'email', 'actions']} />
               )}
@@ -564,6 +603,18 @@ export default function ContactsPage() {
                 <MailX className="h-4 w-4" />
                 Unsubscribe
               </Button>
+              {staticSegments.length > 0 && (
+                <>
+                  <Button variant="outline" size="sm" onClick={() => handleBulkAction('addToSegment')}>
+                    <ListPlus className="h-4 w-4" />
+                    Add to segment
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => handleBulkAction('removeFromSegment')}>
+                    <ListMinus className="h-4 w-4" />
+                    Remove from segment
+                  </Button>
+                </>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -590,7 +641,7 @@ export default function ContactsPage() {
               <Card>
                 <CardContent>
                   {hasActiveFilters ? (
-                    // Items exist, but the active search/status filters matched
+                    // Items exist, but the active search/status/segment filters matched
                     // none — offer a one-click recovery.
                     <NoResultsState icon={Mail} itemNoun="contacts" onClear={clearFilters} />
                   ) : (
@@ -760,6 +811,8 @@ export default function ContactsPage() {
           operation={bulkOperation}
           selector={bulkSelector}
           targetCount={effectiveSelectionCount}
+          segments={staticSegments}
+          filteredSegmentId={segmentFilter}
           onSuccess={() => {
             mutate();
             clearSelection();

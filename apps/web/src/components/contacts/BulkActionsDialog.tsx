@@ -1,6 +1,22 @@
+import type {Segment} from '@plunk/db';
 import {ContactSchemas} from '@plunk/shared';
-import type {BulkContactActionSelector} from '@plunk/types';
-import {Button, ConfirmDialog, Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle} from '@plunk/ui';
+import type {BulkContactActionResult, BulkContactActionSelector, BulkContactOperation} from '@plunk/types';
+import {isBulkSegmentOperation} from '@plunk/types';
+import {
+  Button,
+  ConfirmDialog,
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@plunk/ui';
 import {AlertTriangle, Check, EyeOff, Loader2, Minus} from 'lucide-react';
 import {useEffect, useRef, useState} from 'react';
 import {toast} from 'sonner';
@@ -10,33 +26,50 @@ import {network} from '../../lib/network';
 interface BulkActionsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  operation: 'subscribe' | 'unsubscribe' | 'delete' | null;
+  operation: BulkContactOperation | null;
   selector: BulkContactActionSelector;
   targetCount: number;
+  /** Static segments the segment operations can target. */
+  segments: Segment[];
+  /** Segment the list is filtered by ('' for none): the default target when removing. */
+  filteredSegmentId: string;
   onSuccess: () => void;
 }
 
-interface BulkActionResult {
-  operation: 'subscribe' | 'unsubscribe' | 'delete';
-  totalRequested: number;
-  /** Contacts whose state was actually changed by this run. */
-  successCount: number;
-  /** Subscribe/unsubscribe only: contacts that were already in the target state. */
-  unchangedCount: number;
-  /** Contacts that errored or weren't found. */
-  failureCount: number;
-  errors: Array<{contactId: string; email: string; error: string}>;
-}
+const BULK_ENDPOINTS: Record<BulkContactOperation, string> = {
+  subscribe: '/contacts/bulk-subscribe',
+  unsubscribe: '/contacts/bulk-unsubscribe',
+  delete: '/contacts/bulk-delete',
+  addToSegment: '/contacts/bulk-add-to-segment',
+  removeFromSegment: '/contacts/bulk-remove-from-segment',
+};
 
-export function BulkActionsDialog({open, onOpenChange, operation, selector, targetCount, onSuccess}: BulkActionsDialogProps) {
-  const [, setJobId] = useState<string | null>(null);
+export function BulkActionsDialog({
+  open,
+  onOpenChange,
+  operation,
+  selector,
+  targetCount,
+  segments,
+  filteredSegmentId,
+  onSuccess,
+}: BulkActionsDialogProps) {
+  const [queuedJobId, setQueuedJobId] = useState<string | null>(null);
+  const [targetSegmentId, setTargetSegmentId] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<'idle' | 'processing' | 'completed' | 'failed'>('idle');
-  const [result, setResult] = useState<BulkActionResult | null>(null);
+  const [result, setResult] = useState<BulkContactActionResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [showCloseConfirmDialog, setShowCloseConfirmDialog] = useState(false);
+
+  // Removing usually starts from the list filtered by that segment, so it is the default target
+  useEffect(() => {
+    if (open) {
+      setTargetSegmentId(operation === 'removeFromSegment' ? filteredSegmentId : '');
+    }
+  }, [open, operation, filteredSegmentId]);
 
   // Clean up polling on unmount or dialog close
   useEffect(() => {
@@ -46,7 +79,7 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
         pollIntervalRef.current = null;
       }
       setTimeout(() => {
-        setJobId(null);
+        setQueuedJobId(null);
         setProgress(0);
         setStatus('idle');
         setResult(null);
@@ -61,7 +94,7 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
         id: string;
         state: string;
         progress: number;
-        result: BulkActionResult | null;
+        result: BulkContactActionResult | null;
         failedReason?: string;
       }>('GET', `/contacts/bulk/${jobId}`);
 
@@ -110,14 +143,12 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
     setStatus('processing');
 
     try {
-      const endpoint = `/contacts/bulk-${operation}`;
-      const data = await network.fetch<{jobId: string; message: string}, typeof ContactSchemas.bulkAction>(
-        'POST',
-        endpoint,
-        selector,
-      );
+      const data = await network.fetch<
+        {jobId: string; message: string},
+        typeof ContactSchemas.bulkAction | typeof ContactSchemas.bulkSegmentAction
+      >('POST', BULK_ENDPOINTS[operation], isBulkSegmentOperation(operation) ? {...selector, targetSegmentId} : selector);
 
-      setJobId(data.jobId);
+      setQueuedJobId(data.jobId);
 
       // Start polling for job status
       pollIntervalRef.current = setInterval(() => {
@@ -157,6 +188,10 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
       ? copy.failedTitle
       : copy.title;
 
+  // Adding again is a new entry, so once an add has been queued, retrying it (whether it failed
+  // part-way or we only lost track of it) would re-add the contacts it already reached
+  const canRetry = !(operation === 'addToSegment' && queuedJobId);
+
   const handleRetry = () => {
     setErrorMessage(null);
     setStatus('idle');
@@ -182,6 +217,29 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
                   ?
                   {copy.skipNote && <span className="text-neutral-500"> {copy.skipNote}</span>}
                 </p>
+                {isBulkSegmentOperation(operation) && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="bulkTargetSegment">Segment</Label>
+                    <Select value={targetSegmentId} onValueChange={setTargetSegmentId}>
+                      <SelectTrigger id="bulkTargetSegment">
+                        <SelectValue placeholder="Choose a static segment" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {segments.map(segment => (
+                          <SelectItem key={segment.id} value={segment.id}>
+                            {segment.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {operation === 'addToSegment' && (
+                  <p className="text-xs text-neutral-500 leading-relaxed">
+                    Contacts already in the segment re-enter it, so a segment that tracks membership fires its entry
+                    event for them again.
+                  </p>
+                )}
                 {operation === 'delete' && (
                   <div className="flex items-start gap-2.5 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
                     <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
@@ -249,7 +307,7 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
                 <Button
                   type="button"
                   onClick={handleConfirm}
-                  disabled={isProcessing}
+                  disabled={isProcessing || (isBulkSegmentOperation(operation) && !targetSegmentId)}
                   variant={operation === 'delete' ? 'destructive' : 'default'}
                 >
                   {isProcessing ? 'Starting…' : copy.confirmButton}
@@ -260,9 +318,15 @@ export function BulkActionsDialog({open, onOpenChange, operation, selector, targ
                 <Button type="button" variant="outline" onClick={handleClose}>
                   Close
                 </Button>
-                <Button type="button" onClick={handleRetry} variant={operation === 'delete' ? 'destructive' : 'default'}>
-                  Try again
-                </Button>
+                {canRetry && (
+                  <Button
+                    type="button"
+                    onClick={handleRetry}
+                    variant={operation === 'delete' ? 'destructive' : 'default'}
+                  >
+                    Try again
+                  </Button>
+                )}
               </>
             ) : (
               <Button
@@ -309,7 +373,7 @@ interface OperationCopy {
   skipNote: string | null;
 }
 
-function getOperationCopy(operation: 'subscribe' | 'unsubscribe' | 'delete' | null): OperationCopy {
+function getOperationCopy(operation: BulkContactOperation | null): OperationCopy {
   switch (operation) {
     case 'subscribe':
       return {
@@ -353,6 +417,34 @@ function getOperationCopy(operation: 'subscribe' | 'unsubscribe' | 'delete' | nu
         alreadyState: null,
         skipNote: null,
       };
+    case 'addToSegment':
+      return {
+        title: 'Add to segment',
+        progressTitle: 'Adding…',
+        completedTitle: 'Added',
+        failedTitle: "Couldn't add contacts to the segment",
+        confirmVerb: 'Add',
+        confirmButton: 'Add to segment',
+        processingLabel: 'Adding',
+        changedVerb: 'added',
+        summaryNoun: 'added',
+        alreadyState: null,
+        skipNote: null,
+      };
+    case 'removeFromSegment':
+      return {
+        title: 'Remove from segment',
+        progressTitle: 'Removing…',
+        completedTitle: 'Removed',
+        failedTitle: "Couldn't remove contacts from the segment",
+        confirmVerb: 'Remove',
+        confirmButton: 'Remove from segment',
+        processingLabel: 'Removing',
+        changedVerb: 'removed',
+        summaryNoun: 'removed',
+        alreadyState: 'not in the segment',
+        skipNote: 'Contacts not in the segment will be skipped.',
+      };
     default:
       return {
         title: 'Process contacts',
@@ -370,7 +462,7 @@ function getOperationCopy(operation: 'subscribe' | 'unsubscribe' | 'delete' | nu
   }
 }
 
-function buildToastSummary(result: BulkActionResult): string {
+function buildToastSummary(result: BulkContactActionResult): string {
   const copy = getOperationCopy(result.operation);
   const parts: string[] = [];
   if (result.successCount > 0) parts.push(`${result.successCount.toLocaleString()} ${copy.changedVerb}`);
@@ -382,7 +474,7 @@ function buildToastSummary(result: BulkActionResult): string {
   return parts.join(' · ');
 }
 
-function BulkResultSummary({result}: {result: BulkActionResult}) {
+function BulkResultSummary({result}: {result: BulkContactActionResult}) {
   const copy = getOperationCopy(result.operation);
   const {successCount, unchangedCount, failureCount} = result;
   const noChanges = successCount === 0 && failureCount === 0 && unchangedCount > 0;
