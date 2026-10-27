@@ -265,6 +265,56 @@ describe('Actions API Integration Tests', () => {
 
       expect(result.success).toBe(false);
     });
+
+    describe('size and depth of data (Plunk Lite)', () => {
+      const track = (data: unknown, event = 'signup') =>
+        ActionSchemas.track.safeParse({event, email: 'user@example.com', data});
+      const send = (data: unknown) =>
+        ActionSchemas.send.safeParse({to: 'user@example.com', subject: 'Hi', body: 'Hi', data});
+      /** An object nested `levels` deep */
+      const nested = (levels: number) => {
+        let value: unknown = 'leaf';
+        for (let i = 0; i < levels; i++) value = {child: value};
+        return value;
+      };
+
+      it('accepts a typical form submission', () => {
+        const form = Object.fromEntries(Array.from({length: 10}, (_, i) => [`field${i}`, `value ${i}`]));
+        expect(track(form).success).toBe(true);
+        expect(send(form).success).toBe(true);
+      });
+
+      it('refuses data over 32 KB', () => {
+        expect(track({notes: 'x'.repeat(33 * 1024)}).success).toBe(false);
+        expect(send({notes: 'x'.repeat(33 * 1024)}).success).toBe(false);
+      });
+
+      it('accepts 6 levels of nesting and refuses 7', () => {
+        expect(track(nested(6)).success).toBe(true);
+        expect(track(nested(7)).success).toBe(false);
+        expect(send(nested(6)).success).toBe(true);
+        expect(send(nested(7)).success).toBe(false);
+      });
+
+      it('refuses 10,000 levels with a validation issue instead of overflowing the stack', () => {
+        const result = track(nested(10_000));
+        expect(result.success).toBe(false);
+        expect(result.error?.issues[0]?.message).toContain('nested deeper');
+      });
+
+      it('refuses an event name over 100 characters or with a line break', () => {
+        expect(track({}, 'x'.repeat(100)).success).toBe(true);
+        expect(track({}, 'x'.repeat(101)).success).toBe(false);
+        expect(track({}, 'sign\nup').success).toBe(false);
+      });
+
+      it('takes at most 50 recipients in one send', () => {
+        const to = (count: number) => Array.from({length: count}, (_, i) => `user${i}@example.com`);
+        expect(ActionSchemas.send.safeParse({to: to(50), subject: 'Hi', body: 'Hi'}).success).toBe(true);
+        expect(ActionSchemas.send.safeParse({to: to(51), subject: 'Hi', body: 'Hi'}).success).toBe(false);
+        expect(ActionSchemas.send.safeParse({to: [], subject: 'Hi', body: 'Hi'}).success).toBe(false);
+      });
+    });
   });
 
   // ========================================

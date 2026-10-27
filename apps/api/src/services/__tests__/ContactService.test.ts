@@ -1,5 +1,5 @@
 import {beforeEach, describe, expect, it} from 'vitest';
-import {ContactService} from '../ContactService';
+import {CONTACT_FIELDS_MAX, ContactService} from '../ContactService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 describe('ContactService - Duplicate Prevention & Data Merging', () => {
@@ -303,6 +303,42 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
 
       expect(merged.plunk_id).toBe(contact.id);
       expect(merged.plunk_email).toBe('real@example.com');
+    });
+  });
+
+  describe('Custom field cap (Plunk Lite)', () => {
+    const fields = (count: number, prefix = 'field') =>
+      Object.fromEntries(Array.from({length: count}, (_, i) => [`${prefix}${i}`, i]));
+
+    it('refuses the field that would take a contact past 200', async () => {
+      await ContactService.upsert(projectId, 'full@example.com', fields(CONTACT_FIELDS_MAX));
+
+      await expect(ContactService.upsert(projectId, 'full@example.com', {extra: 'x'})).rejects.toMatchObject({
+        code: 400,
+      });
+    });
+
+    it('lets a contact at the cap change the fields it has, or swap one for another', async () => {
+      const contact = await ContactService.upsert(projectId, 'full@example.com', fields(CONTACT_FIELDS_MAX));
+
+      const changed = await ContactService.upsert(projectId, 'full@example.com', {field0: 'changed'});
+      const swapped = await ContactService.update(projectId, contact.id, {data: {field1: null, extra: 'x'}});
+
+      expect((changed.data as Record<string, unknown>).field0).toBe('changed');
+      expect(Object.keys(swapped.data as Record<string, unknown>)).toHaveLength(CONTACT_FIELDS_MAX);
+    });
+
+    it('lets a contact already over the cap be updated without growing', async () => {
+      const contact = await prisma.contact.create({
+        data: {projectId, email: 'legacy@example.com', data: fields(CONTACT_FIELDS_MAX + 10)},
+      });
+
+      const updated = await ContactService.update(projectId, contact.id, {data: {field0: 'changed'}});
+      await expect(ContactService.update(projectId, contact.id, {data: {extra: 'x'}})).rejects.toMatchObject({
+        code: 400,
+      });
+
+      expect((updated.data as Record<string, unknown>).field0).toBe('changed');
     });
   });
 

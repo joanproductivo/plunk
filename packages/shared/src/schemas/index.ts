@@ -12,6 +12,42 @@ type Literal = z.infer<typeof literalSchema>;
 type Json = Literal | {[key: string]: Json} | Json[];
 const jsonSchema: z.ZodType<Json> = z.lazy(() => z.union([literalSchema, z.array(jsonSchema), z.record(jsonSchema)]));
 
+/** Plunk Lite: largest `data` that /v1/track and /v1/send take, serialized as JSON */
+export const TRACK_DATA_MAX_BYTES = 32 * 1024;
+/** Plunk Lite: deepest nesting of that `data`; `{value, persistent: false}` already takes one level */
+export const TRACK_DATA_MAX_DEPTH = 6;
+/** Plunk Lite: longest event name */
+export const EVENT_NAME_MAX = 100;
+/** Plunk Lite: most recipients in one /v1/send */
+export const SEND_MAX_RECIPIENTS = 50;
+
+/**
+ * Plunk Lite: a JSON value whose depth and size are checked before `jsonSchema` walks it. That
+ * walk is recursive, so a payload nested thousands of levels deep would overflow the stack and
+ * answer 500; this checks it iteratively and turns it away as a validation error instead.
+ */
+export function boundedJson(maxBytes: number, maxDepth: number) {
+  return z
+    .unknown()
+    .superRefine((value, ctx) => {
+      const stack: [unknown, number][] = [[value, 0]];
+      for (let item = stack.pop(); item; item = stack.pop()) {
+        const [node, depth] = item;
+        if (node === null || typeof node !== 'object') continue;
+        if (depth >= maxDepth) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: `data is nested deeper than ${maxDepth} levels`});
+          return;
+        }
+        for (const child of Object.values(node)) stack.push([child, depth + 1]);
+      }
+      // TextEncoder rather than Buffer: the dashboard loads this package too
+      if (new TextEncoder().encode(JSON.stringify(value)).length > maxBytes) {
+        ctx.addIssue({code: z.ZodIssueCode.custom, message: `data must be at most ${maxBytes / 1024} KB`});
+      }
+    })
+    .pipe(jsonSchema);
+}
+
 const uuid = z.string().uuid();
 const email = z.string().email();
 
@@ -518,10 +554,14 @@ export const CampaignSchemas = {
 
 export const ActionSchemas = {
   track: z.object({
-    event: z.string().min(1),
+    event: z
+      .string()
+      .min(1)
+      .max(EVENT_NAME_MAX)
+      .regex(/^[^\r\n\t]+$/, 'Event name contains invalid characters'),
     email,
     subscribed: z.boolean().optional(),
-    data: jsonSchema.optional(),
+    data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
   }),
   send: z
     .object({
@@ -532,16 +572,19 @@ export const ActionSchemas = {
           name: z.string().optional(),
           email: email,
         }),
-        z.array(
-          z.union([
-            email, // Array of email strings
-            z.object({
-              // Array of objects with name and email
-              name: z.string().optional(),
-              email: email,
-            }),
-          ]),
-        ),
+        z
+          .array(
+            z.union([
+              email, // Array of email strings
+              z.object({
+                // Array of objects with name and email
+                name: z.string().optional(),
+                email: email,
+              }),
+            ]),
+          )
+          .min(1)
+          .max(SEND_MAX_RECIPIENTS),
       ]),
       subject: z.string().min(1).max(998).regex(/^[^\r\n]*$/, 'Subject contains invalid characters').optional(),
       body: z.string().min(1).optional(),
@@ -578,7 +621,7 @@ export const ActionSchemas = {
           z.string().max(998).regex(/^[^\r\n]*$/, 'Header value contains invalid characters'),
         )
         .optional(),
-      data: jsonSchema.optional(),
+      data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
       attachments: z
         .array(
           z.object({

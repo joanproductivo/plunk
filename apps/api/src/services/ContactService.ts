@@ -28,6 +28,9 @@ const RECEIVED_STATUSES = new Set<EmailStatus>([
   EmailStatus.COMPLAINED,
 ]);
 
+/** Plunk Lite: most custom fields a contact can hold (see mergeContactData) */
+export const CONTACT_FIELDS_MAX = 200;
+
 export class ContactService {
   /**
    * Normalize an email address for storage and lookup.
@@ -247,8 +250,9 @@ export class ContactService {
     existing: Prisma.JsonValue | null,
     incoming: Record<string, unknown>,
   ): Record<string, unknown> {
-    const merged: Record<string, unknown> =
-      existing && typeof existing === 'object' && !Array.isArray(existing) ? {...(existing as Record<string, unknown>)} : {};
+    const base: Record<string, unknown> =
+      existing && typeof existing === 'object' && !Array.isArray(existing) ? (existing as Record<string, unknown>) : {};
+    const merged: Record<string, unknown> = {...base};
 
     const reservedFields = ['plunk_id', 'plunk_email', 'id', 'email', 'unsubscribeUrl', 'subscribeUrl', 'manageUrl'];
 
@@ -272,6 +276,18 @@ export class ContactService {
         continue;
       }
       merged[key] = value;
+    }
+
+    // Plunk Lite: a cap on custom fields, which only refuses a change that grows a contact past
+    // it, so one already over the cap can still be updated
+    const before = Object.keys(base).length;
+    const after = Object.keys(merged).length;
+    if (after > CONTACT_FIELDS_MAX && after > before) {
+      throw new HttpException(
+        400,
+        `A contact can hold at most ${CONTACT_FIELDS_MAX} custom fields`,
+        ErrorCode.VALIDATION_ERROR,
+      );
     }
 
     return merged;
