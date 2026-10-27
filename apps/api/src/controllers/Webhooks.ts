@@ -51,6 +51,7 @@ import {SnsMessages} from '../services/SnsMessages.js';
 import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+import {SES_EVENT_TRANSACTION} from '../utils/database.js';
 
 /**
  * How much a status is allowed to outrank the one already on the row.
@@ -467,7 +468,7 @@ export class Webhooks {
       // exactly like any other below -- status transition, activity feed, tracked event,
       // contact suppression -- but it raises no operator alert and runs no enforcement, so a
       // sender testing their integration cannot warn or disable their own project. The rates
-      // themselves exclude these emails at the source; see SecurityService.calculateRates.
+      // themselves exclude these emails at the source; see ReputationPolicy.rates and RATED_EMAIL.
       const isSimulated = email.simulated || isMailboxSimulatorAddress(sentTo);
 
       const now = new Date();
@@ -742,9 +743,7 @@ export class Webhooks {
 
             await tx.email.update({where: {id: email.id}, data: {...updateData, status}});
           },
-          // A burst of events can queue for a connection; the default two-second wait would
-          // answer 500 and lean on SNS's retries
-          {maxWait: 10_000, timeout: 10_000},
+          SES_EVENT_TRANSACTION,
         );
       } else {
         await prisma.email.update({where: {id: email.id}, data: {...updateData, status}});

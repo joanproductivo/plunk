@@ -21,7 +21,7 @@ const DONE_SECONDS = 86400;
 const DEDUPLICATED_EVENTS = new Set(['Open', 'Click', 'Delivery', 'Received']);
 
 /** `new`: handle it; `seen`: already handled; `busy`: another copy is being handled right now */
-export type SnsMessageClaim = 'new' | 'seen' | 'busy';
+type SnsMessageClaim = 'new' | 'seen' | 'busy';
 
 export class SnsMessages {
   public static deduplicates(eventType: string): boolean {

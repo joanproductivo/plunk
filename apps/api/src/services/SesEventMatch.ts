@@ -6,6 +6,7 @@ import {z} from 'zod';
 
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {SES_EVENT_TRANSACTION, utcTimestamp} from '../utils/database.js';
 
 import {CampaignService} from './CampaignService.js';
 import {recipientAddress} from './EmailHeaderService.js';
@@ -124,7 +125,7 @@ const SES_KINDS: SesMessageTags['kind'][] = ['email', 'test', 'alert'];
  * The tags Plunk sent the email with (see SES_TAG), each only when it has the expected shape: the
  * ids any UUID (a campaign's emails have version 5 ones), the kind one of the known ones.
  */
-export function sesTags(mail: SesMail): Partial<SesMessageTags> {
+function sesTags(mail: SesMail): Partial<SesMessageTags> {
   const tag = (name: string) => {
     const values = mail.tags?.[name];
     const value: unknown = Array.isArray(values) ? values[0] : undefined;
@@ -336,16 +337,13 @@ export async function suppressUnmatched(
   }
 
   const reason = eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE';
-  await prisma.$transaction(
-    async tx => {
-      await SuppressionService.record(tx, projectId, addresses, reason, null);
-      await tx.contact.updateMany({
-        where: {projectId, email: {in: addresses}},
-        data: {subscribed: false, snoozedUntil: null},
-      });
-    },
-    {maxWait: 10_000, timeout: 10_000},
-  );
+  await prisma.$transaction(async tx => {
+    await SuppressionService.record(tx, projectId, addresses, reason, null);
+    await tx.contact.updateMany({
+      where: {projectId, email: {in: addresses}},
+      data: {subscribed: false, snoozedUntil: null},
+    });
+  }, SES_EVENT_TRANSACTION);
   signale.warn(
     `[WEBHOOK] ${eventType} for ${addresses.join(', ')} matched no email, suppressed in project ${projectId}`,
   );
@@ -385,7 +383,7 @@ export async function recordReject(email: MatchedEmail, reason: unknown): Promis
 }
 
 /** Why the webhook turned an SNS delivery away */
-export type SnsRejection = 'signature' | 'topic';
+type SnsRejection = 'signature' | 'topic';
 
 /**
  * Deliveries the webhook rejected, kept for the check of the event pipeline: when each reason was
@@ -394,7 +392,7 @@ export type SnsRejection = 'signature' | 'topic';
  * a rejected delivery.
  */
 export const SNS_REJECTS_KEY = 'plunk-lite:sns:rejects';
-export const snsRejectsHourKey = (hour: string) => `plunk-lite:sns:rejects:${hour}`;
+const snsRejectsHourKey = (hour: string) => `plunk-lite:sns:rejects:${hour}`;
 const REJECTS_SECONDS = 7 * 86400;
 const REJECTS_HOUR_SECONDS = 48 * 3600;
 
@@ -454,15 +452,15 @@ const PIPELINE_GRACE_HOURS = 1;
  */
 export async function checkEventPipeline(): Promise<void> {
   const now = Date.now();
-  const from = new Date(now - PIPELINE_WINDOW_HOURS * 3_600_000).toISOString();
-  const to = new Date(now - PIPELINE_GRACE_HOURS * 3_600_000).toISOString();
+  const from = utcTimestamp(new Date(now - PIPELINE_WINDOW_HOURS * 3_600_000));
+  const to = utcTimestamp(new Date(now - PIPELINE_GRACE_HOURS * 3_600_000));
   const rows = await prisma.$queryRaw<{projectId: string; total: number; stuck: number}[]>`
     SELECT "projectId", count(*)::int AS "total",
            (count(*) FILTER (WHERE "status" = ${EmailStatus.SENT}::"EmailStatus"))::int AS "stuck"
     FROM "emails"
-    WHERE "createdAt" >= (${from}::timestamptz AT TIME ZONE 'UTC')
-      AND "createdAt" < (${to}::timestamptz AT TIME ZONE 'UTC')
-      AND "sentAt" < (${to}::timestamptz AT TIME ZONE 'UTC')
+    WHERE "createdAt" >= ${from}
+      AND "createdAt" < ${to}
+      AND "sentAt" < ${to}
       AND "messageId" IS NOT NULL
       AND "simulated" = false
     GROUP BY "projectId"`;

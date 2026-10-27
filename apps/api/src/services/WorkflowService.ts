@@ -6,12 +6,13 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION} from '../utils/database.js';
 import type {ListSort} from '../utils/listSort.js';
 
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
-import {WORKFLOW_DELETE_TRANSACTION, WorkflowEmailLinks} from './WorkflowEmailLinks.js';
+import {WorkflowEmailLinks} from './WorkflowEmailLinks.js';
 import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
 import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
@@ -337,7 +338,7 @@ export class WorkflowService {
     await prisma.$transaction(async tx => {
       await WorkflowEmailLinks.detachWorkflows(tx, projectId, [workflowId]);
       await tx.workflow.delete({where: {id: workflowId}});
-    }, WORKFLOW_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
 
     // Invalidate workflow cache if workflow was enabled
     if (workflow.enabled) {
@@ -423,7 +424,7 @@ export class WorkflowService {
         });
 
         return {deleted: result.count, hadEnabled: owned.some(w => w.enabled)};
-      }, WORKFLOW_DELETE_TRANSACTION);
+      }, LONG_TRANSACTION);
 
       // Invalidate workflow cache if any deleted workflow was enabled.
       if (hadEnabled) {
@@ -774,7 +775,7 @@ export class WorkflowService {
           workflowId, // Safety check to ensure we only delete steps from this workflow
         },
       });
-    }, WORKFLOW_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -837,7 +838,7 @@ export class WorkflowService {
     await prisma.$transaction(async tx => {
       await WorkflowEmailLinks.detachSteps(tx, [stepId]);
       await tx.workflowStep.delete({where: {id: stepId}});
-    }, WORKFLOW_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
   }
 
   /**

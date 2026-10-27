@@ -5,10 +5,11 @@ import {PLUNK_LITE_DISABLE_BOUNCE_PERCENT, PLUNK_LITE_DISABLE_COMPLAINT_PERCENT}
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
+import {utcTimestamp} from '../utils/database.js';
 
 import {CampaignService} from './CampaignService.js';
 import type {DeletedCounts} from './DeletedEmailCounts.js';
-import {DeletedEmailCounts, RATE_COUNTS, RATED_EMAIL, utcTimestamp} from './DeletedEmailCounts.js';
+import {DeletedEmailCounts, RATE_COUNTS, RATED_EMAIL} from './DeletedEmailCounts.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {ProjectService} from './ProjectService.js';
 import type {SecurityMetric} from './SecurityService.js';

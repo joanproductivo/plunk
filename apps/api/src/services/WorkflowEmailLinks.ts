@@ -11,9 +11,6 @@ import type {Prisma} from '@plunk/db';
  * (`sourceType`), only without the execution, so the activity shows them with no link to it.
  */
 
-/** Unlinking every email of a big workflow can outlast Prisma's 5 s default */
-export const WORKFLOW_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
-
 export const WorkflowEmailLinks = {
   /** Before deleting workflows: their emails keep neither execution nor step execution */
   detachWorkflows(tx: Prisma.TransactionClient, projectId: string, workflowIds: string[]) {

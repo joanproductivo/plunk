@@ -1,6 +1,7 @@
 import {Prisma} from '@plunk/db';
 
 import {prisma} from '../database/prisma.js';
+import {utcTimestamp} from '../utils/database.js';
 
 /**
  * Plunk Lite: what a project's reputation rates count, including the emails that are gone.
@@ -25,18 +26,12 @@ export const RATE_COUNTS = Prisma.sql`count(*)::int,
   (count(*) FILTER (WHERE e."bouncedAt" IS NOT NULL))::int,
   (count(*) FILTER (WHERE e."complainedAt" IS NOT NULL))::int`;
 
-/** A date as the UTC timestamps without time zone the tables hold */
-export const utcTimestamp = (date: Date) => Prisma.sql`(${date.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;
-
 /** The deleted emails of a project counted in an hour, as `plunk_lite_deleted_email_counts` holds them */
 export interface DeletedCounts {
   sent: number;
   bounced: number;
   complained: number;
 }
-
-/** Deleting every email of many contacts can outlast Prisma's 5 s default */
-export const EMAIL_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
 
 export const DeletedEmailCounts = {
   /**

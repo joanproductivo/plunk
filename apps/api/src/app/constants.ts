@@ -138,7 +138,8 @@ export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') 
 
 /**
  * A percentage from the environment, strictly between 0 and 100. Anything else stops the process at
- * startup, rather than leaving a threshold that never or always trips (Plunk Lite).
+ * startup, rather than leaving a threshold that never or always trips (Plunk Lite). Exported for
+ * lot E1 (E1.6), whose variables reuse it.
  */
 export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string): number {
   const raw = validateEnv(key, defaultValue);

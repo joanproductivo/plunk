@@ -10,16 +10,17 @@ import {HttpException} from '../exceptions/index.js';
 
 import {DomainService} from './DomainService.js';
 import {sendRawEmail} from './SESService.js';
-import {failureSourceFor} from './failureSources.js';
+import {sourceKeyOf} from './failureSources.js';
 
 /** One failure, as the place it happened knows it */
 export interface FailureReport {
   /**
-   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures; `project` (disabled) and
-   * `project:reactivated`,
-   * `brake:campaign:<id>` and `brake:workflow:<id>` (stopped for their bounces), `security:warning`,
-   * `security:critical`, `security:check`, `domain:<id>`, `sns:<what>` (the SES event pipeline) or
-   * `aws:alarm:<name>` for conditions the project should hear about. Each kind is in SOURCE_KINDS.
+   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures. For conditions the project
+   * should hear about: `project` (disabled), `project:reactivated`, `brake:campaign:<id>` and
+   * `brake:workflow:<id>` (stopped for their bounces), `security:warning`, `security:critical`,
+   * `security:check` (the reputation not being checked), `domain:<id>`, `sns:<what>` (the SES event
+   * pipeline), `ses:<what>` (the SES account: its quota, a pause) and `aws:alarm:<name>`. Each kind
+   * is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -313,16 +314,8 @@ export class FailureAlertService {
     error: string,
   ): Promise<void> {
     try {
-      const workflow = email.workflowExecutionId
-        ? (
-            await prisma.workflowExecution.findUnique({
-              where: {id: email.workflowExecutionId},
-              select: {workflow: {select: {id: true, name: true}}},
-            })
-          )?.workflow
-        : null;
       await this.record(email.projectId, {
-        ...failureSourceFor({...email, workflow}),
+        ...(await sourceKeyOf(email)),
         error,
         contactEmail: email.contact.email,
       });

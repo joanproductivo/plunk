@@ -13,8 +13,9 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION} from '../utils/database.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
-import {DeletedEmailCounts, EMAIL_DELETE_TRANSACTION} from './DeletedEmailCounts.js';
+import {DeletedEmailCounts} from './DeletedEmailCounts.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -355,7 +356,7 @@ export class ContactService {
     await prisma.$transaction(async tx => {
       await DeletedEmailCounts.deleteEmails(tx, projectId, [contactId]);
       await tx.contact.delete({where: {id: contactId}});
-    }, EMAIL_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -1270,7 +1271,7 @@ export class ContactService {
     const result = await prisma.$transaction(async tx => {
       await DeletedEmailCounts.deleteEmails(tx, projectId, contactIds);
       return tx.contact.deleteMany({where: {id: {in: contactIds}, projectId}});
-    }, EMAIL_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
 
     return {deleted: result.count};
   }

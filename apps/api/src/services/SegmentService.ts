@@ -6,6 +6,8 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+// The cascade over a big static segment's memberships can outlast Prisma's 5 s default
+import {LONG_TRANSACTION} from '../utils/database.js';
 
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
@@ -23,8 +25,6 @@ const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = ['DRAFT', 'SCHEDULED', 'SENDI
  */
 const MAX_BLOCKED_SEGMENTS_LISTED = 5;
 const MAX_BLOCKING_NAMES_LISTED = 3;
-/** The cascade over a big static segment's memberships can outlast Prisma's 5 s default. */
-const BULK_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
 
 /** `"A", "B", "C"`, or `"A", "B" and 3 more` past `max` names. */
 function listNames(names: string[], max: number): string {
@@ -385,7 +385,7 @@ export class SegmentService {
         );
       }
       return {deleted: segments, projectName: segments[0]!.project.name};
-    }, BULK_DELETE_TRANSACTION);
+    }, LONG_TRANSACTION);
 
     await Promise.allSettled(
       deleted.map(segment => NtfyService.notifySegmentDeleted(segment.name, projectName, projectId)),

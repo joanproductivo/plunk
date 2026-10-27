@@ -6,6 +6,7 @@ import {HttpException} from '../exceptions/index.js';
 
 import {CampaignService} from './CampaignService.js';
 import {FailureAlertService} from './FailureAlertService.js';
+import {sourceKeyOf} from './failureSources.js';
 import type {RateData} from './ReputationPolicy.js';
 import {ReputationPolicy} from './ReputationPolicy.js';
 import {SECURITY_THRESHOLDS} from './SecurityService.js';
@@ -57,17 +58,8 @@ export class SourceBrakeService {
     campaignId: string | null;
     workflowExecutionId: string | null;
   }): Promise<string | undefined> {
-    if (email.campaignId) {
-      return `campaign:${email.campaignId}`;
-    }
-    if (email.workflowExecutionId) {
-      const execution = await prisma.workflowExecution.findUnique({
-        where: {id: email.workflowExecutionId},
-        select: {workflowId: true},
-      });
-      return execution ? `workflow:${execution.workflowId}` : undefined;
-    }
-    return undefined;
+    const {sourceKey} = await sourceKeyOf(email);
+    return sourceKey === 'transactional' ? undefined : sourceKey;
   }
 
   /** The campaigns of the project still sending, for when the sources of the last events are lost */
