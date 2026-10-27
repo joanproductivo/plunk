@@ -19,6 +19,7 @@ import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
 import {DASHBOARD_URI} from '../app/constants.js';
+import {readCapped} from '../utils/readCapped.js';
 
 import {RECIPIENT_OVERRIDE_HEADER} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
@@ -30,6 +31,9 @@ import {SuppressionService} from './SuppressionService.js';
 // A step's error is rethrown through the catch of every step before it in the same run, which
 // had completed; the step it came from has handled it, so those pass it up untouched.
 const handledFailures = new WeakSet<object>();
+
+/** Plunk Lite: most of a webhook step's response that is read and stored */
+const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 
 // Plunk Lite: runs that never move again -- cancelled (by hand or by a workflow's brake), or failed
 // (by a step, or by the recovery sweep after a restart). An EXITED run is not one of them: Plunk
@@ -1147,6 +1151,8 @@ export class WorkflowExecutionService {
       });
 
       if (response.status >= 300 && response.status < 400) {
+        // Plunk Lite: the redirect's own body is never read; release it
+        await response.body?.cancel();
         const location = response.headers.get('location');
         if (!location) {
           throw new Error('Redirect with no Location header');
@@ -1241,10 +1247,12 @@ export class WorkflowExecutionService {
       body: method !== 'GET' ? JSON.stringify(payload) : undefined,
     });
 
-    const responseData = await response.text();
+    // Plunk Lite: at most 64 KB of the answer, which is stored with the step: a huge response
+    // filled the database and the worker's memory
+    const {text: responseData, truncated} = await readCapped(response, MAX_WEBHOOK_RESPONSE_BYTES);
     let parsedResponse;
     try {
-      parsedResponse = JSON.parse(responseData);
+      parsedResponse = truncated ? responseData : JSON.parse(responseData);
     } catch {
       parsedResponse = responseData;
     }
@@ -1255,6 +1263,7 @@ export class WorkflowExecutionService {
       statusCode: response.status,
       success: response.ok,
       response: parsedResponse,
+      ...(truncated ? {truncated: true} : {}),
     };
   }
 

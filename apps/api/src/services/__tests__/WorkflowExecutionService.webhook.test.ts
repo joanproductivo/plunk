@@ -107,6 +107,25 @@ describe('WorkflowExecutionService.executeWebhook templating', () => {
     return (WorkflowExecutionService as any).executeWebhook(step, execution, stepExecution, config);
   }
 
+  it('stores at most 64 KB of the response, marked as truncated (Plunk Lite)', async () => {
+    safeFetchSpy.mockImplementation(async () => new Response('x'.repeat(1024 * 1024), {status: 200}));
+    const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'GET'});
+
+    const result = await invokeWebhook(step, execution, stepExecution, step.config);
+
+    expect(result.truncated).toBe(true);
+    expect((result.response as string).length).toBe(64 * 1024);
+  });
+
+  it('parses a small JSON response as before, without a truncated mark (Plunk Lite)', async () => {
+    const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'GET'});
+
+    const result = await invokeWebhook(step, execution, stepExecution, step.config);
+
+    expect(result.response).toEqual({ok: true});
+    expect(result).not.toHaveProperty('truncated');
+  });
+
   it('renders {{vars}} in the URL from contact.data', async () => {
     const {step, execution, stepExecution} = await setup(
       {
