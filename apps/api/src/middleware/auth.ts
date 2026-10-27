@@ -5,7 +5,8 @@ import jsonwebtoken from 'jsonwebtoken';
 import type {AuthResponse} from '@plunk/types';
 
 import {JWT_SECRET, PLUNK_ENABLED} from '../app/constants.js';
-import {ErrorCode, HttpException, NotAuthenticated} from '../exceptions/index.js';
+import {isAllowedOrigin} from '../app/origins.js';
+import {ErrorCode, HttpException, NotAllowed, NotAuthenticated} from '../exceptions/index.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {ProjectService} from '../services/ProjectService.js';
 import {UserService} from '../services/UserService.js';
@@ -59,10 +60,25 @@ export const jwt = {
 };
 
 /**
+ * Methods that change nothing. The cookie check below lists these rather than the methods that
+ * write, so a method in neither list is still checked.
+ */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
  * Parse a user's ID from the request JWT token
  * @param request The express request object
  */
 export function parseJwt(request: Request): string {
+  // The session cookie rides along on requests from any site (SameSite=None, so the dashboard can
+  // reach the API on another site), and CORS only stops other sites from reading the answer. A
+  // browser always names the page's origin on these methods, so one from elsewhere is turned away
+  // before the cookie is trusted; a client outside the browser sends no Origin and is unaffected.
+  const origin = request.headers.origin;
+  if (!SAFE_METHODS.has(request.method) && origin !== undefined && !isAllowedOrigin(origin)) {
+    throw new NotAllowed('Requests from other sites cannot use the dashboard session');
+  }
+
   const token: string | undefined = request.cookies.next_token;
 
   if (!token) {
