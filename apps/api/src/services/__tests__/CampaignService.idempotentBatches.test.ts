@@ -3,7 +3,7 @@ import {CampaignAudienceType, CampaignStatus, EmailStatus} from '@plunk/db';
 
 import {CampaignService} from '../CampaignService';
 import {EmailService} from '../EmailService';
-import {QueueService} from '../QueueService';
+import {campaignQueue, QueueService} from '../QueueService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 /**
@@ -124,5 +124,29 @@ describe('CampaignService - idempotent batches', () => {
 
     const [first, second] = queueBatch.mock.calls.map(([data]) => data.generation);
     expect(first).not.toBe(second);
+    // The job of the later send is a job of its own, not the earlier one BullMQ still holds
+    expect(await campaignQueue.getJob(`campaign-${campaign.id}-${second}-batch-1`)).toBeDefined();
+  });
+
+  it('does not let the last batch of an earlier send rewrite or finalize the current one', async () => {
+    const campaign = await sendingCampaign();
+    const earlier = campaign.sentAt!.getTime();
+    const getRecipients = CampaignService['getRecipientsCursor'].bind(CampaignService);
+
+    // The campaign is cancelled and sent again while this batch is between its checks and its end
+    vi.spyOn(CampaignService as never, 'getRecipientsCursor').mockImplementationOnce(async (...args: unknown[]) => {
+      await prisma.campaign.update({
+        where: {id: campaign.id},
+        data: {sentAt: new Date(earlier + 60_000), totalRecipients: 3},
+      });
+      const page = await (getRecipients as (...a: unknown[]) => Promise<{contacts: unknown[]}>)(...args);
+      return {...page, contacts: [], nextCursor: undefined, hasMore: false};
+    });
+
+    await CampaignService.processBatch(batch(campaign.id, earlier));
+
+    const after = await prisma.campaign.findUnique({where: {id: campaign.id}});
+    expect(after?.status).toBe(CampaignStatus.SENDING);
+    expect(after?.totalRecipients).toBe(3);
   });
 });

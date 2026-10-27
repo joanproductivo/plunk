@@ -49,12 +49,17 @@ describe('processEmailJob', () => {
     const job = {
       data: {emailId, ...data} as SendEmailJobData,
       attemptsMade,
-      opts: {attempts: 3},
+      opts: {attempts: 8},
       updateData: vi.fn(async (next: SendEmailJobData) => {
         job.data = next;
       }),
     };
     return job as typeof job & EmailJob;
+  }
+
+  /** An error SES answered with, shaped as the AWS SDK throws it */
+  function sesError(message: string, httpStatusCode = 400) {
+    return Object.assign(new Error(message), {$metadata: {httpStatusCode}});
   }
 
   async function pendingEmail(
@@ -107,7 +112,7 @@ describe('processEmailJob', () => {
   describe('before SES accepts the email', () => {
     it('puts it back to pending and rethrows while attempts remain', async () => {
       const email = await pendingEmail();
-      vi.mocked(sendRawEmail).mockRejectedValue(new Error('Throttling: Maximum sending rate exceeded'));
+      vi.mocked(sendRawEmail).mockRejectedValue(sesError('Throttling: Maximum sending rate exceeded'));
 
       await expect(processEmailJob(makeJob(email.id, 0))).rejects.toThrow('Throttling');
 
@@ -117,7 +122,7 @@ describe('processEmailJob', () => {
 
     it('sends it on the retry', async () => {
       const email = await pendingEmail();
-      vi.mocked(sendRawEmail).mockRejectedValueOnce(new Error('Throttling'));
+      vi.mocked(sendRawEmail).mockRejectedValueOnce(sesError('Throttling'));
 
       await expect(processEmailJob(makeJob(email.id, 0))).rejects.toThrow();
       await processEmailJob(makeJob(email.id, 1));
@@ -130,14 +135,27 @@ describe('processEmailJob', () => {
     it('marks it failed on the last attempt and finalizes its campaign', async () => {
       const campaign = await sendingCampaign();
       const email = await pendingEmail({campaign});
-      vi.mocked(sendRawEmail).mockRejectedValue(new Error('MessageRejected'));
+      vi.mocked(sendRawEmail).mockRejectedValue(sesError('MessageRejected'));
 
-      await expect(processEmailJob(makeJob(email.id, 2))).rejects.toThrow('MessageRejected');
+      await expect(processEmailJob(makeJob(email.id, 7))).rejects.toThrow('MessageRejected');
 
       const row = await prisma.email.findUnique({where: {id: email.id}});
       expect(row?.status).toBe(EmailStatus.FAILED);
       const updated = await prisma.campaign.findUnique({where: {id: campaign.id}});
       expect(updated?.status).toBe(CampaignStatus.SENT);
+    });
+
+    it('does not resend an email whose connection to SES was lost, since SES may have it', async () => {
+      const email = await pendingEmail();
+      // A reset carries no HTTP status: SES may have accepted the email before the answer was lost
+      vi.mocked(sendRawEmail).mockRejectedValue(Object.assign(new Error('socket hang up'), {code: 'ECONNRESET'}));
+
+      await expect(processEmailJob(makeJob(email.id, 0))).rejects.toBeInstanceOf(UnrecoverableError);
+
+      const row = await prisma.email.findUnique({where: {id: email.id}});
+      expect(row?.status).toBe(EmailStatus.FAILED);
+      expect(row?.error).toMatch(/may have been sent/);
+      expect(sendRawEmail).toHaveBeenCalledTimes(1);
     });
 
     it('does not retry an email blocked for a policy violation', async () => {

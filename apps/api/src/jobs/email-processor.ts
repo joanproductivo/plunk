@@ -102,6 +102,16 @@ type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
 export type EmailJob = Pick<Job<SendEmailJobData>, 'data' | 'attemptsMade' | 'opts' | 'updateData'>;
 
 /**
+ * Whether an error came back from SES itself -- a throttle, a rejection, a server error -- as
+ * opposed to the connection failing. An AWS SDK service error carries the HTTP status SES
+ * answered with; a reset or timeout carries none, and then SES may have accepted the email.
+ */
+function answeredBySes(error: unknown): boolean {
+  const metadata = (error as {$metadata?: {httpStatusCode?: unknown}} | null)?.$metadata;
+  return typeof metadata?.httpStatusCode === 'number';
+}
+
+/**
  * Finalize a campaign whose email has just reached a terminal state, without letting a failure
  * here fail the job that got it there
  */
@@ -203,8 +213,15 @@ export async function failAbandonedEmail(emailId: string): Promise<void> {
     });
 
     if (failed.count > 0) {
-      const email = await prisma.email.findUnique({where: {id: emailId}, select: {campaignId: true}});
-      await finalizeCampaignSafely(email?.campaignId ?? null);
+      const email = await prisma.email.findUnique({
+        where: {id: emailId},
+        include: {contact: {select: {email: true}}, campaign: {select: {name: true}}},
+      });
+
+      if (email) {
+        await FailureAlertService.recordEmail(email, 'Could not be sent after every retry');
+        await finalizeCampaignSafely(email.campaignId);
+      }
     }
   } catch (error) {
     signale.error(`[EMAIL-PROCESSOR] Failed to mark abandoned email ${emailId} as failed:`, error);
@@ -294,7 +311,8 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
         error: 'Stale campaign generation',
       },
     });
-    await finalizeCampaignSafely(email.campaignId);
+    // No finalization: this email is not part of the current send, and finalizing on its
+    // account could close a send that has not created its own emails yet
     return;
   }
 
@@ -358,6 +376,9 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
   let accepted: AcceptedEmail | undefined;
   // The phishing check disables the project, which reports the failure itself
   let disabledForPolicy = false;
+  // Set just before the email is handed to SES: from then on, a failure that is not an answer
+  // from SES leaves it unknown whether SES took the email
+  let handedToSes = false;
 
   try {
     // Claim the email: only the run that moves it from PENDING sends it. A job BullMQ
@@ -460,6 +481,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
     }
 
     // Send via AWS SES
+    handedToSes = true;
     const result = await sendRawEmail({
       from: {
         name: fromName,
@@ -501,8 +523,25 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       throw new UnrecoverableError(message);
     }
 
+    if (handedToSes && !answeredBySes(error)) {
+      // The connection failed after the request went out (a reset, a timeout): SES may have
+      // accepted the email without the answer reaching us. Sending it again could deliver it
+      // twice -- once per retry -- so it is marked failed, as possibly sent, and not retried.
+      await prisma.email.update({
+        where: {id: emailId},
+        data: {
+          status: EmailStatus.FAILED,
+          error: `Connection to SES lost; the email may have been sent: ${message}`,
+        },
+      });
+      await FailureAlertService.recordEmail(email, message);
+      await finalizeCampaignSafely(email.campaignId);
+      throw new UnrecoverableError(message);
+    }
+
     if (job.attemptsMade + 1 < (job.opts.attempts ?? 1)) {
-      // SES never had it: back to PENDING so BullMQ's retry, after its backoff, sends it
+      // Nothing was sent, or SES answered and refused it: back to PENDING so BullMQ's retry,
+      // after its backoff, sends it
       await prisma.email.updateMany({
         where: {id: emailId, status: EmailStatus.SENDING},
         data: {status: EmailStatus.PENDING},

@@ -431,7 +431,8 @@ let stopping = false;
 
 /**
  * Stop taking requests and let the running ones finish: a request cut off between creating an
- * email row and queueing its job would leave the row PENDING with nothing to send it.
+ * email row and queueing its job would leave the row PENDING with nothing to send it. Work a
+ * request starts without awaiting it (a manual workflow start) is not waited for.
  */
 function shutdown(signal: string) {
   // A second signal must not fall through to Node's default handler, which exits at once

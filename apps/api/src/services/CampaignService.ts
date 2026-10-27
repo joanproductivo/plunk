@@ -765,12 +765,17 @@ export class CampaignService {
       // campaign remains stuck in SENDING forever.
       const actualEmailCount = await prisma.email.count({where: {campaignId}});
 
-      await prisma.campaign.update({
-        where: {id: campaignId},
+      // Only while this is still the campaign's send: the last batch of a send that was
+      // cancelled and sent again would otherwise rewrite the new send's total, and finalize it
+      // before it has created a single email.
+      const reconciled = await prisma.campaign.updateMany({
+        where: {id: campaignId, sentAt: new Date(generation)},
         data: {totalRecipients: actualEmailCount},
       });
 
-      await this.finalizeIfDone(campaignId);
+      if (reconciled.count > 0) {
+        await this.finalizeIfDone(campaignId);
+      }
     }
   }
 

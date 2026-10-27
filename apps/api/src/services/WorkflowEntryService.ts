@@ -35,39 +35,44 @@ export class WorkflowEntryService {
   ): Promise<WorkflowEntryResult> {
     // Only the decision is under the lock: the caller runs the execution after this commits,
     // so the row is visible to the jobs it queues and no connection is held while it runs
-    return prisma.$transaction(async tx => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`workflow-entry:${workflow.id}:${contactId}`}))`;
+    return prisma.$transaction(
+      async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`workflow-entry:${workflow.id}:${contactId}`}))`;
 
-      const existing = await tx.workflowExecution.findFirst({
-        where: {
-          workflowId: workflow.id,
-          contactId,
-          // Without re-entry any earlier run counts, whatever its status
-          ...(workflow.allowReentry ? {status: WorkflowExecutionStatus.RUNNING} : {}),
-        },
-        select: {status: true},
-      });
+        const existing = await tx.workflowExecution.findFirst({
+          where: {
+            workflowId: workflow.id,
+            contactId,
+            // Without re-entry any earlier run counts, whatever its status
+            ...(workflow.allowReentry ? {status: WorkflowExecutionStatus.RUNNING} : {}),
+          },
+          select: {status: true},
+        });
 
-      if (existing) {
-        return {
-          entered: false,
-          refusal: workflow.allowReentry
-            ? {reason: 'in-progress'}
-            : {reason: 'already-entered', status: existing.status},
-        };
-      }
+        if (existing) {
+          return {
+            entered: false,
+            refusal: workflow.allowReentry
+              ? {reason: 'in-progress'}
+              : {reason: 'already-entered', status: existing.status},
+          };
+        }
 
-      const execution = await tx.workflowExecution.create({
-        data: {
-          workflowId: workflow.id,
-          contactId,
-          status: WorkflowExecutionStatus.RUNNING,
-          currentStepId: triggerStepId,
-          context,
-        },
-      });
+        const execution = await tx.workflowExecution.create({
+          data: {
+            workflowId: workflow.id,
+            contactId,
+            status: WorkflowExecutionStatus.RUNNING,
+            currentStepId: triggerStepId,
+            context,
+          },
+        });
 
-      return {entered: true, execution};
-    });
+        return {entered: true, execution};
+      },
+      // A burst of events for contacts with workflows can queue for a connection; the default
+      // two-second wait would drop the trigger
+      {maxWait: 10_000, timeout: 10_000},
+    );
   }
 }
