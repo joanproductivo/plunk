@@ -12,6 +12,7 @@ interface FailedRecipient {
   email: string;
   code: string;
   message: string;
+  suggestedEmail?: string;
 }
 
 const recipient = z.union([
@@ -53,8 +54,9 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         'on a verified domain unless the template already sets one.',
         '',
         '**This cannot be undone once sent.** Sending to multiple recipients asks for confirmation first.',
-        'Up to 50 recipients. With several, one that fails does not stop the others: the result says which were',
-        'not sent and why. Do not resend to the ones that went out.',
+        'Up to 50 recipients. With several, one that is refused does not stop the others, though an unexpected',
+        'error stops the ones after it: the result says which were not sent and why. Do not resend to the ones',
+        'that went out.',
         '',
         '**New recipients:** an address whose domain does not exist, takes no email or is disposable is',
         'refused with INVALID_EMAIL (with any suggested correction) and no contact is created for it.',
@@ -140,7 +142,11 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         const failed = result?.data?.failed ?? [];
         if (failed.length > 0) {
           const sent = result?.data?.emails?.length ?? 0;
-          const notSent = failed.map(f => `${f.email} (${f.code}: ${f.message})`).join('; ');
+          const notSent = failed
+            .map(
+              f => `${f.email} (${f.code}: ${f.message}${f.suggestedEmail ? ` Suggested: ${f.suggestedEmail}` : ''})`,
+            )
+            .join('; ');
           return jsonResult(`Sent to ${sent} of ${recipients.length} recipient(s). Not sent: ${notSent}`, result);
         }
 

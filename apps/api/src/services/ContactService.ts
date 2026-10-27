@@ -509,7 +509,8 @@ export class ContactService {
     if (verdict.valid) {
       return;
     }
-    const suggestion = verdict.suggestedEmail ? ` Did you mean ${verdict.suggestedEmail}?` : '';
+    // The suggestion goes in the details only: the message reaches the logs and api_requests
+    const suggestion = verdict.suggestedEmail ? ' Did you mean the suggested address (details.suggestedEmail)?' : '';
     throw new HttpException(
       422,
       `This address cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,

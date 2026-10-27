@@ -10,7 +10,7 @@ import {DomainService} from '../services/DomainService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EmailVerificationService} from '../services/EmailVerificationService.js';
 import {EventService} from '../services/EventService.js';
-import {describeError, NotFound, ValidationError} from '../exceptions/index.js';
+import {describeError, HttpException, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {logger} from '../utils/logger.js';
 import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
@@ -285,7 +285,7 @@ export class Actions {
     const timestamp = new Date();
     const emailResults = [];
     // Plunk Lite: one recipient's failure no longer drops the ones after it
-    const failed: {email: string; code: string; message: string}[] = [];
+    const failed: {email: string; code: string; message: string; suggestedEmail?: string}[] = [];
     let firstClientError: unknown;
     let firstServerError: unknown;
 
@@ -366,13 +366,16 @@ export class Actions {
         });
       } catch (error) {
         const {status, code, message} = describeError(error);
-        failed.push({email: recipient.email, code, message});
+        // An address refused at sign-up comes with its likely correction, kept out of the message
+        const suggestedEmail =
+          error instanceof HttpException && typeof error.details?.suggestedEmail === 'string'
+            ? error.details.suggestedEmail
+            : undefined;
+        failed.push({email: recipient.email, code, message, ...(suggestedEmail ? {suggestedEmail} : {})});
         if (status < 500) {
           firstClientError ??= error;
           continue;
         }
-        // A 207 does not carry it to the error handler, so it is logged here
-        logger.error('Unexpected error sending to one recipient of /v1/send', error, {code}, res);
         // Without a known client error the rest would hit the same fault (a database outage) one by one
         firstServerError = error;
         for (const skipped of recipients.slice(index + 1)) {
@@ -390,6 +393,10 @@ export class Actions {
     // client error, so the idempotency key stays claimed when an email may already be queued.
     if (emailResults.length === 0 && (firstServerError || firstClientError)) {
       throw firstServerError ?? firstClientError;
+    }
+    // A 207 does not carry an unexpected error to the error handler, so it is logged here
+    if (firstServerError) {
+      logger.error('Unexpected error sending to one recipient of /v1/send', firstServerError, {}, res);
     }
 
     // Plunk Lite: a partial send is 207, with the recipients that failed; still 2xx, so its

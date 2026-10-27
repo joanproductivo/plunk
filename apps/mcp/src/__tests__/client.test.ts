@@ -67,6 +67,20 @@ describe('PlunkClient', () => {
     expect(error.message).toContain('email: must be a valid email');
   });
 
+  it('passes on the suggested address of an email refused at sign-up', async () => {
+    mockFetch(422, {
+      error: {
+        code: 'INVALID_EMAIL',
+        message: 'This address cannot receive email: Looks like a typo of gmail.com.',
+        details: {reasons: ['Looks like a typo of gmail.com'], suggestedEmail: 'ana@gmail.com'},
+      },
+    });
+
+    const error = await client().request({path: '/contacts'}).catch((e: unknown) => e as PlunkApiError);
+
+    expect(error.message).toContain('Suggested address: ana@gmail.com');
+  });
+
   it('explains a 401 in terms of the key that is configured', async () => {
     mockFetch(401, {error: {code: 'INVALID_API_KEY', message: 'Invalid secret API key.'}});
 
