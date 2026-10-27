@@ -399,9 +399,11 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
-    options: {createdAt?: Date; explicit?: boolean} = {},
+    options: {createdAt?: Date; explicit?: boolean; retried?: boolean} = {},
   ): Promise<Contact> {
     const normalizedEmail = ContactService.normalizeEmail(email);
+    // What the caller asked for, before a suppression turns it down: a retry asks the same
+    const requestedSubscribed = subscribed;
 
     // Find existing contact
     const existing = await prisma.contact.findFirst({
@@ -466,6 +468,14 @@ export class ContactService {
           },
         });
       } catch (error) {
+        // Plunk Lite: created meanwhile by a concurrent request for the same address (a form sent
+        // twice), so this one updates it instead
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && !options.retried) {
+          return ContactService.upsert(projectId, email, data, requestedSubscribed, defaultSubscribed, {
+            ...options,
+            retried: true,
+          });
+        }
         // Provide helpful error message for database/validation issues
         throw new HttpException(
           500,

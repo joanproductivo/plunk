@@ -1,4 +1,5 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {prisma as appPrisma} from '../../database/prisma';
 import {CONTACT_FIELDS_MAX, ContactService} from '../ContactService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -9,6 +10,10 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
   beforeEach(async () => {
     const {project} = await factories.createUserWithProject();
     projectId = project.id;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('Duplicate Email Prevention', () => {
@@ -303,6 +308,29 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
 
       expect(merged.plunk_id).toBe(contact.id);
       expect(merged.plunk_email).toBe('real@example.com');
+    });
+  });
+
+  describe('Concurrent creation of the same contact (Plunk Lite)', () => {
+    it('updates the contact a concurrent request created instead of failing', async () => {
+      await ContactService.upsert(projectId, 'race@example.com', {first: 'a'});
+      // As if the other request created it between this one's lookup and its insert
+      const lookup = vi.spyOn(appPrisma.contact, 'findFirst').mockResolvedValueOnce(null);
+
+      const contact = await ContactService.upsert(projectId, 'race@example.com', {second: 'b'});
+
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(contact.data).toEqual({first: 'a', second: 'b'});
+      expect(await prisma.contact.count({where: {projectId, email: 'race@example.com'}})).toBe(1);
+    });
+
+    it('leaves one contact when two requests create the same address at once', async () => {
+      await Promise.all([
+        ContactService.upsert(projectId, 'twice@example.com', {name: 'Ana'}),
+        ContactService.upsert(projectId, 'twice@example.com', {name: 'Ana'}),
+      ]);
+
+      expect(await prisma.contact.count({where: {projectId, email: 'twice@example.com'}})).toBe(1);
     });
   });
 
