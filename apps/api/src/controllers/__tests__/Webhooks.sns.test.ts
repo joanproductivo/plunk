@@ -196,6 +196,29 @@ describe('Webhooks - SES event notifications', () => {
 
       const contact = await prisma.contact.findUnique({where: {id: contactId}});
       expect(contact?.subscribed).toBe(true);
+
+      // Tracked under its own name, which no workflow listening for email.bounce hears
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(0);
+      const event = await prisma.event.findFirst({where: {emailId: email.id, name: 'email.softbounce'}});
+      expect(event?.data).toMatchObject({bounceType: 'Transient', transientBounce: true});
+    });
+
+    it('does not start a workflow triggered by email.bounce on a transient bounce', async () => {
+      const workflow = await factories.createWorkflow({
+        projectId,
+        enabled: true,
+        triggerConfig: {eventName: 'email.bounce'},
+      });
+      await sentEmail('ses-bounce-soft-workflow');
+
+      await post(notification('Bounce', 'ses-bounce-soft-workflow', {bounce: {bounceType: 'Transient'}}));
+
+      expect(await prisma.workflowExecution.count({where: {workflowId: workflow.id}})).toBe(0);
+
+      // The permanent bounce that follows does
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      await post(notification('Bounce', 'ses-bounce-soft-workflow', {bounce: {bounceType: 'Permanent'}}));
+      expect(await prisma.workflowExecution.count({where: {workflowId: workflow.id}})).toBe(1);
     });
 
     it('records a complaint and unsubscribes the contact', async () => {

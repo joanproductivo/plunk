@@ -343,7 +343,7 @@ export class EventService {
   /**
    * Check if an event name is reserved for system use
    * Reserved patterns:
-   * - email.* (email.sent, email.delivery, email.open, email.click, email.bounce, email.complaint)
+   * - email.* (email.sent, email.delivery, email.open, email.click, email.bounce, email.softbounce, email.complaint)
    * - contact.subscribed, contact.unsubscribed
    * - segment.*.entry, segment.*.exit
    *

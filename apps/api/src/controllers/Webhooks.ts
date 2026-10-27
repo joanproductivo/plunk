@@ -470,7 +470,7 @@ export class Webhooks {
 
       const now = new Date();
       const updateData: Prisma.EmailUpdateInput = {};
-      const eventName = `email.${eventType.toLowerCase()}`;
+      let eventName = `email.${eventType.toLowerCase()}`;
 
       // The first-seen timestamp this event records, if it records one, and whether it counts
       // toward the rate enforcement checks. Claimed below only if the row does not hold it yet:
@@ -565,7 +565,9 @@ export class Webhooks {
               `[WEBHOOK] Transient bounce received for ${email.contact.email} from ${email.project.name} (not counted toward bounce rate)`,
             );
             // Don't update email status or unsubscribe contact
-            // Just track the event for visibility
+            // Just track the event for visibility, under its own name: a workflow or webhook
+            // listening for `email.bounce` acts on an address that is gone, which this one is not
+            eventName = 'email.softbounce';
             eventData = {
               ...baseEventData,
               bounceType,
