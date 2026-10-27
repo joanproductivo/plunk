@@ -24,6 +24,23 @@ describe('QueueService.scheduleCampaign', () => {
     expect(job!.opts.delay).toBeGreaterThan(6 * 24 * 60 * 60 * 1000);
   });
 
+  it('adds a job of its own when the earlier schedule is already running', async () => {
+    const campaignId = 'campaign-running';
+    await QueueService.scheduleCampaign(campaignId, new Date());
+    const worker = new Worker(scheduledQueue.name, null, {connection: scheduledQueue.opts.connection, autorun: false});
+    try {
+      await worker.getNextJob('test-token');
+
+      const later = new Date(Date.now() + 60 * 60 * 1000);
+      await QueueService.scheduleCampaign(campaignId, later);
+
+      const job = await scheduledQueue.getJob(`scheduled-campaign-${campaignId}-${later.getTime()}`);
+      expect(await job!.getState()).toBe('delayed');
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('replaces the failed job of an earlier schedule', async () => {
     const campaignId = 'campaign-rescheduled';
     await QueueService.scheduleCampaign(campaignId, new Date());

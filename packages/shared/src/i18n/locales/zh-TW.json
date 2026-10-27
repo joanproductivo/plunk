@@ -50,6 +50,7 @@
       "error": "發生錯誤",
       "loadFailed": "無法載入郵件偏好設定。請檢查連結後再試一次。",
       "actionFailed": "發生錯誤，請再試一次。",
+      "resubscribeNeedsEmail": "無法在此重新訂閱此地址。請使用您從我們收到的電子郵件中的連結。",
       "sentWith": "透過 {provider} 寄送"
     }
   },

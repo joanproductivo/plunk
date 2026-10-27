@@ -50,6 +50,7 @@
       "error": "Gwall",
       "loadFailed": "Doedden ni ddim yn gallu llwytho dy ddewisiadau e-bost. Gwna'n siŵr bod y ddolen yn gywir a thria eto.",
       "actionFailed": "Aeth rhywbeth o'i le. Tria eto.",
+      "resubscribeNeedsEmail": "Ni ellir ail-danysgrifio'r cyfeiriad hwn o'r fan hon. Defnyddiwch y ddolen mewn e-bost a gawsoch gennym.",
       "sentWith": "Anfonwyd drwy {provider}"
     }
   },

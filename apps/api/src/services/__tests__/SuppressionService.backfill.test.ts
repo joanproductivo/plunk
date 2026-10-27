@@ -66,6 +66,12 @@ describe('suppression list seeding', () => {
       headers: {'X-Plunk-Recipient-Override': 'team@else.test'},
     });
     await emailTo(false, {status: EmailStatus.DELIVERED});
+    // Snoozed: the sweep will resubscribe it, so it was resubscribed on purpose
+    const snoozed = await emailTo(false, {status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    await prisma.contact.updateMany({
+      where: {projectId, email: snoozed},
+      data: {snoozedUntil: new Date(Date.now() + 86_400_000)},
+    });
 
     await prisma.$executeRawUnsafe(backfill);
 

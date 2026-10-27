@@ -11,7 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
-import {contactStatus} from '@plunk/types';
+import {contactStatus, type ContactSuppression} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -36,9 +36,7 @@ export default function ContactDetailPage() {
     data: contact,
     mutate,
     isLoading,
-  } = useSWR<Contact & {suppression?: {reason: 'BOUNCE' | 'COMPLAINT'; createdAt: string} | null}>(
-    id ? `/contacts/${id}` : null,
-  );
+  } = useSWR<Contact & {suppression?: ContactSuppression<string> | null}>(id ? `/contacts/${id}` : null);
   const {mutate: mutateKey} = useSWRConfig();
 
   const [email, setEmail] = useState('');

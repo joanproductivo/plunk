@@ -13,8 +13,9 @@ CREATE TABLE "plunk_lite_suppressions" (
 );
 
 -- Seed it with the bounces and complaints already recorded, for contacts that are unsubscribed
--- today. A contact subscribed again since its bounce was resubscribed on purpose and is left
--- alone; so are emails to a workflow's custom recipient (not the contact) and simulator emails.
+-- today and not snoozed. A contact subscribed again since its bounce -- or snoozed, which ends in
+-- a resubscription -- was resubscribed on purpose and is left alone; so are emails to a
+-- workflow's custom recipient (not the contact) and simulator emails.
 INSERT INTO "plunk_lite_suppressions" ("projectId", "email", "reason", "emailId", "createdAt")
 SELECT DISTINCT ON (e."projectId", c."email")
     e."projectId",
@@ -25,6 +26,7 @@ SELECT DISTINCT ON (e."projectId", c."email")
 FROM "emails" e
 JOIN "contacts" c ON c."id" = e."contactId"
 WHERE c."subscribed" = false
+  AND c."snoozedUntil" IS NULL
   AND (e."bouncedAt" IS NOT NULL OR e."complainedAt" IS NOT NULL OR e."status" IN ('BOUNCED', 'COMPLAINED'))
   AND NOT e."simulated"
   AND NOT (COALESCE(e."headers", '{}'::jsonb) ? 'X-Plunk-Recipient-Override')

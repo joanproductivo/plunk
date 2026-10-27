@@ -499,7 +499,15 @@ function BulkResultSummary({result}: {result: BulkContactActionResult}) {
   };
   const rows: Row[] = [];
 
-  if (noChanges && copy.alreadyState) {
+  if (successCount === 0 && failureCount === 0 && unchangedCount === 0 && result.suppressedCount) {
+    // Nothing changed because every contact is suppressed: that is the lead, not "0 subscribed"
+    rows.push({
+      key: 'suppressed',
+      label: 'Suppressed after a bounce or complaint',
+      count: result.suppressedCount,
+      primary: true,
+    });
+  } else if (noChanges && copy.alreadyState) {
     rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount, primary: true});
   } else {
     rows.push({key: 'changed', label: copy.completedTitle, count: successCount, primary: true});
@@ -507,7 +515,7 @@ function BulkResultSummary({result}: {result: BulkContactActionResult}) {
       rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount});
     }
   }
-  if (result.suppressedCount) {
+  if (result.suppressedCount && !rows.some(row => row.key === 'suppressed')) {
     rows.push({key: 'suppressed', label: 'Suppressed after a bounce or complaint', count: result.suppressedCount});
   }
   if (failureCount > 0) {

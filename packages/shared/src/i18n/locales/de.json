@@ -50,6 +50,7 @@
       "error": "Fehler",
       "loadFailed": "Ihre E-Mail-Einstellungen konnten nicht geladen werden. Bitte prüfen Sie den Link und versuchen Sie es erneut.",
       "actionFailed": "Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut.",
+      "resubscribeNeedsEmail": "Diese Adresse kann hier nicht erneut angemeldet werden. Verwenden Sie den Link in einer E-Mail, die Sie von uns erhalten haben.",
       "sentWith": "Versendet mit {provider}"
     }
   },

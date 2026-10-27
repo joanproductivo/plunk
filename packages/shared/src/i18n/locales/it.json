@@ -50,6 +50,7 @@
       "error": "Errore",
       "loadFailed": "Non è stato possibile caricare le tue preferenze email. Controlla il link e riprova.",
       "actionFailed": "Qualcosa è andato storto. Riprova.",
+      "resubscribeNeedsEmail": "Questo indirizzo non può essere iscritto di nuovo da qui. Usa il link in un'email che hai ricevuto da noi.",
       "sentWith": "Inviato con {provider}"
     }
   },

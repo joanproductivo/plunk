@@ -936,6 +936,17 @@ describe('Webhooks - SES event notifications', () => {
       expect((await suppressionOf())?.reason).toBe('BOUNCE');
     });
 
+    it('does not record a bounce SES could not classify', async () => {
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      await sentEmail('ses-suppress-undetermined');
+
+      await post(notification('Bounce', 'ses-suppress-undetermined', {bounce: {bounceType: 'Undetermined'}}));
+
+      // Unsubscribed as before, but the address may well be fine: it is not kept off every send
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(await suppressionOf()).toBeNull();
+    });
+
     it('does not record a transient bounce, a simulated one or a custom recipient', async () => {
       vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
       await sentEmail('ses-suppress-transient');

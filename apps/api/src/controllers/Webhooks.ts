@@ -664,8 +664,10 @@ export class Webhooks {
 
               // And kept off every later send, whatever resubscribes the contact in passing. Only
               // the contact's own address: a workflow's custom recipient is rarely a contact, and
-              // the account's suppression list at SES already keeps it from being mailed.
-              if (!isSimulated) {
+              // the account's suppression list at SES already keeps it from being mailed. Not for a
+              // bounce SES could not classify: the address may well be fine, and SES leaves it off
+              // its own list too.
+              if (!isSimulated && (eventType === 'Complaint' || body.bounce?.bounceType === 'Permanent')) {
                 await SuppressionService.record(
                   tx,
                   email.projectId,

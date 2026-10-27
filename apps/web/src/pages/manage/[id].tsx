@@ -63,9 +63,16 @@ export default function Manage() {
         `/contacts/public/${id as string}/${next ? 'subscribe' : 'unsubscribe'}${sourceEmailQuery(router.query)}`,
       );
       updateContact(data);
-    } catch {
-      // Translated copy rather than the server's English message; see useRecipient.
-      setActionError(translator.t('pages.common.actionFailed'));
+    } catch (error) {
+      // Translated copy rather than the server's English message; see useRecipient. An address
+      // suppressed after a bounce or complaint is only resubscribed from an email's own link.
+      setActionError(
+        translator.t(
+          (error as {code?: string}).code === 'ADDRESS_SUPPRESSED'
+            ? 'pages.common.resubscribeNeedsEmail'
+            : 'pages.common.actionFailed',
+        ),
+      );
     } finally {
       setUpdating(false);
     }

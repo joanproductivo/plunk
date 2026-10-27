@@ -469,8 +469,13 @@ export class QueueService {
     // finished or could not start -- would make BullMQ ignore the new one: the campaign would go
     // out at the old time, or never. Only a job already running is left alone.
     const previous = await scheduledQueue.getJob(jobId);
+    let replaced = !previous;
     if (previous && (await previous.getState()) !== 'active') {
-      await previous.remove();
+      // It can start between the check and the removal, which then fails as locked
+      replaced = await previous.remove().then(
+        () => true,
+        () => false,
+      );
     }
 
     return scheduledQueue.add(
@@ -478,7 +483,9 @@ export class QueueService {
       {campaignId},
       {
         delay: Math.max(0, delay),
-        jobId,
+        // A job of the earlier schedule still running keeps the id; this one gets its own, and the
+        // running one skips the campaign once it reads the new time
+        jobId: replaced ? jobId : `${jobId}-${scheduledFor.getTime()}`,
       },
     );
   }

@@ -50,6 +50,7 @@
       "error": "Error",
       "loadFailed": "We couldn't load your email preferences. Check the link and try again.",
       "actionFailed": "Something went wrong. Please try again.",
+      "resubscribeNeedsEmail": "This address can't be resubscribed from here. Use the link in an email you received from us.",
       "sentWith": "Sent with {provider}"
     }
   },

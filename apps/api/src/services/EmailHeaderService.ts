@@ -23,6 +23,11 @@ export function recipientAddress(headers: unknown, contactEmail: string): string
   return typeof override === 'string' && override ? override : contactEmail;
 }
 
+/** Whether an email went to a workflow's custom recipient rather than to its contact */
+export function hasRecipientOverride(headers: unknown): boolean {
+  return recipientAddress(headers, '') !== '';
+}
+
 /**
  * Classification of an outbound email, derived by the caller from the email's
  * source type and template/campaign type. This is the single axis that decides

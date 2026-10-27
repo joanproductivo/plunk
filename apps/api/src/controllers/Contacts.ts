@@ -21,8 +21,8 @@ import {ContactExportService} from '../services/ContactExportService.js';
 import {ContactSegmentsService} from '../services/ContactSegmentsService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
-import {SuppressionService} from '../services/SuppressionService.js';
 import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
+import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 // Configure multer for file uploads (memory storage)
@@ -163,7 +163,8 @@ export class Contacts {
 
   /**
    * GET /contacts/:id
-   * Get a specific contact by ID
+   * Get a specific contact by ID, with `suppression` when its address is on the project's
+   * suppression list (Plunk Lite)
    */
   @Get(':id')
   @Middleware([requireAuth, requireEmailVerified])
@@ -206,7 +207,9 @@ export class Contacts {
 
   /**
    * POST /contacts
-   * Create or update a contact (upsert)
+   * Create or update a contact (upsert). A suppressed address is never subscribed: from a dashboard
+   * session the request is refused (409), from an API key the contact stays unsubscribed and
+   * `_meta.suppressed` says why.
    */
   @Post('')
   @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])

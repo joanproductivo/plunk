@@ -12,9 +12,9 @@ import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
-import {ConflictError, HttpException} from '../exceptions/index.js';
+import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
-import {recipientAddress} from './EmailHeaderService.js';
+import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
 import {SuppressionService} from './SuppressionService.js';
 
@@ -290,7 +290,7 @@ export class ContactService {
     const subscribes = data.subscribed === true && !existing.subscribed;
     const movesSubscribed = finalEmail !== existing.email && (data.subscribed ?? existing.subscribed);
     if (subscribes || movesSubscribed) {
-      await SuppressionService.assertSubscribable(projectId, finalEmail);
+      await SuppressionService.maySubscribe(projectId, finalEmail, {explicit: true});
     }
 
     const updateData: Prisma.ContactUpdateInput = {};
@@ -371,6 +371,8 @@ export class ContactService {
    * Reserved fields: plunk_id, plunk_email
    * `options.createdAt` dates a new contact (an import keeps the original sign-up date); an
    * existing contact keeps its own.
+   * A suppressed address (Plunk Lite) is never subscribed: it stays unsubscribed, or with
+   * `options.explicit` -- the dashboard's add-contact form -- the request is refused.
    */
   public static async upsert(
     projectId: string,
@@ -394,12 +396,8 @@ export class ContactService {
     // event, a send, an import, an inbound email -- and the contact simply stays unsubscribed;
     // an explicit request (the dashboard's add-contact form) is refused instead.
     const subscribesNow = existing ? subscribed === true && !existing.subscribed : (subscribed ?? defaultSubscribed);
-    if (subscribesNow) {
-      if (options.explicit) {
-        await SuppressionService.assertSubscribable(projectId, normalizedEmail);
-      } else if ((await SuppressionService.allowedSubscription(projectId, normalizedEmail, true)).suppression) {
-        subscribed = false;
-      }
+    if (subscribesNow && !(await SuppressionService.maySubscribe(projectId, normalizedEmail, options))) {
+      subscribed = false;
     }
 
     const mergedData = ContactService.mergeContactData(existing?.data ?? null, data ?? {});
@@ -543,28 +541,6 @@ export class ContactService {
   }
 
   /**
-   * Whether an email reached this contact's own mailbox: theirs, sent to their address rather
-   * than a workflow's custom recipient, and delivered (or opened, clicked, or reported as spam,
-   * which all need it delivered)
-   */
-  private static async receivedByContact(contactId: string, emailId?: string): Promise<boolean> {
-    if (!emailId) {
-      return false;
-    }
-
-    const email = await prisma.email.findUnique({
-      where: {id: emailId},
-      select: {contactId: true, status: true, headers: true},
-    });
-
-    return (
-      email?.contactId === contactId &&
-      RECEIVED_STATUSES.has(email.status) &&
-      recipientAddress(email.headers, '') === ''
-    );
-  }
-
-  /**
    * Resolve the email a recipient acted from, as claimed by the `e` parameter on
    * an unsubscribe or manage link.
    *
@@ -577,14 +553,22 @@ export class ContactService {
   private static async resolveSourceEmail(
     contactId: string,
     emailId?: string,
-  ): Promise<{id: string; campaignId: string | null; suppressed: boolean} | undefined> {
+  ): Promise<{id: string; campaignId: string | null; suppressed: boolean; received: boolean} | undefined> {
     if (!emailId) {
       return undefined;
     }
 
     const email = await prisma.email.findUnique({
       where: {id: emailId},
-      select: {id: true, contactId: true, campaignId: true, bouncedAt: true, complainedAt: true},
+      select: {
+        id: true,
+        contactId: true,
+        campaignId: true,
+        bouncedAt: true,
+        complainedAt: true,
+        status: true,
+        headers: true,
+      },
     });
 
     if (email?.contactId !== contactId) {
@@ -595,6 +579,9 @@ export class ContactService {
       id: email.id,
       campaignId: email.campaignId,
       suppressed: email.bouncedAt !== null || email.complainedAt !== null,
+      // It reached the contact's own mailbox: sent to their address, not a workflow's custom
+      // recipient, and delivered (or opened, clicked or reported as spam, which all need that)
+      received: RECEIVED_STATUSES.has(email.status) && !hasRecipientOverride(email.headers),
     };
   }
 
@@ -633,7 +620,8 @@ export class ContactService {
   }
 
   /**
-   * PUBLIC: Subscribe a contact
+   * PUBLIC: Subscribe a contact. A suppressed address (Plunk Lite) is subscribed only from an email
+   * that reached the contact's mailbox, which lifts the suppression; otherwise 409.
    *
    * @param source - Optional originating email, for attributing the change in
    *                 the activity feed. See {@link resolveSourceEmail}.
@@ -646,9 +634,11 @@ export class ContactService {
     // key hands out, so without that email the request is refused rather than trusted.
     const current = await prisma.contact.findUnique({where: {id: contactId}, select: {projectId: true, email: true}});
     if (current && (await SuppressionService.find(current.projectId, current.email))) {
-      if (!(await this.receivedByContact(contactId, sourceEmail?.id))) {
+      if (!sourceEmail?.received) {
         throw new ConflictError(
           'This address cannot be resubscribed from here. Use the subscribe link in an email you received from us.',
+          undefined,
+          ErrorCode.ADDRESS_SUPPRESSED,
         );
       }
       await SuppressionService.lift(current.projectId, current.email);
@@ -831,13 +821,14 @@ export class ContactService {
     const maxPerRun = options?.maxPerRun ?? 5000;
 
     let resumed = 0;
+    let processed = 0;
 
-    while (resumed < maxPerRun) {
+    while (processed < maxPerRun) {
       const found = await prisma.contact.findMany({
         where: {snoozedUntil: {lte: new Date()}},
         select: {id: true, projectId: true, email: true},
         orderBy: {snoozedUntil: 'asc'},
-        take: Math.min(batchSize, maxPerRun - resumed),
+        take: Math.min(batchSize, maxPerRun - processed),
       });
 
       if (found.length === 0) {
@@ -854,8 +845,10 @@ export class ContactService {
         });
       }
 
+      // Only contacts still snoozed: a bounce or complaint since they were read clears the date,
+      // and must not be undone here
       await prisma.contact.updateMany({
-        where: {id: {in: due.map(c => c.id)}},
+        where: {id: {in: due.map(c => c.id)}, snoozedUntil: {not: null, lte: new Date()}},
         data: {subscribed: true, snoozedUntil: null},
       });
 
@@ -878,7 +871,8 @@ export class ContactService {
         });
       }
 
-      resumed += found.length;
+      processed += found.length;
+      resumed += due.length;
 
       // A short batch means the queue is drained; anything else is a full page and there may
       // be more.
@@ -1177,6 +1171,7 @@ export class ContactService {
    * Updates multiple contacts to subscribed=true in batches.
    * `updated` = contacts flipped from unsubscribed to subscribed.
    * `unchanged` = contacts that were already subscribed (no-op, not a failure).
+   * `suppressed` = contacts left unsubscribed because their address is suppressed (Plunk Lite).
    */
   public static async bulkSubscribe(
     projectId: string,

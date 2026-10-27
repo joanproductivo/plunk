@@ -50,6 +50,7 @@
       "error": "Fel",
       "loadFailed": "Vi kunde inte läsa in dina e-postinställningar. Kontrollera länken och försök igen.",
       "actionFailed": "Något gick fel. Försök igen.",
+      "resubscribeNeedsEmail": "Den här adressen kan inte prenumerera igen härifrån. Använd länken i ett mejl som du har fått från oss.",
       "sentWith": "Skickat med {provider}"
     }
   },

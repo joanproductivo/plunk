@@ -1,16 +1,12 @@
 import type {Prisma} from '@plunk/db';
+import type {ContactSuppression, SuppressionReason} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
-import {ConflictError} from '../exceptions/index.js';
+import {ConflictError, ErrorCode} from '../exceptions/index.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
 
-export type SuppressionReason = 'BOUNCE' | 'COMPLAINT';
-
-export interface Suppression {
-  reason: SuppressionReason;
-  createdAt: Date;
-}
+type Suppression = ContactSuppression;
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -21,8 +17,9 @@ type Db = Prisma.TransactionClient | typeof prisma;
 export class SuppressedAddressError extends ConflictError {
   public constructor(email: string, suppression: Suppression) {
     super(
-      `${email} cannot be subscribed: it ${suppression.reason === 'COMPLAINT' ? 'reported an email as spam' : 'bounced'} on ${suppression.createdAt.toISOString().slice(0, 10)}. Remove the suppression on the contact's page to subscribe it again.`,
+      `${email} cannot be subscribed: it ${suppression.reason === 'COMPLAINT' ? 'reported an email as spam' : 'bounced'} on ${suppression.createdAt.toISOString().slice(0, 10)}. Remove the suppression on its contact page (adding the contact unsubscribed first, if there is none) to subscribe it again.`,
       {suppression},
+      ErrorCode.ADDRESS_SUPPRESSED,
     );
   }
 }
@@ -48,7 +45,8 @@ export class SuppressionService {
       await db.$executeRaw`
         INSERT INTO "plunk_lite_suppressions" ("projectId", "email", "reason", "emailId")
         VALUES (${projectId}, ${email}, ${reason}, ${emailId})
-        ON CONFLICT ("projectId", "email") DO UPDATE SET "reason" = EXCLUDED."reason", "emailId" = EXCLUDED."emailId"
+        ON CONFLICT ("projectId", "email") DO UPDATE
+          SET "reason" = EXCLUDED."reason", "emailId" = EXCLUDED."emailId", "createdAt" = now()
         WHERE "plunk_lite_suppressions"."reason" = 'BOUNCE' AND EXCLUDED."reason" = 'COMPLAINT'`;
     }
   }
@@ -100,37 +98,24 @@ export class SuppressionService {
     return (await this.suppressedAmong(projectId, [address])).get(normalizeEmail(address)) ?? null;
   }
 
-  /** Throw when an explicit subscription would subscribe a suppressed address */
-  public static async assertSubscribable(projectId: string, address: string): Promise<void> {
+  /**
+   * Whether a write may subscribe this address. An explicit request (`explicit`) for a suppressed
+   * address is refused with SuppressedAddressError; any other gets `false`, so the caller leaves
+   * the contact unsubscribed -- an event, an import, a workflow subscribing in passing.
+   */
+  public static async maySubscribe(projectId: string, address: string, {explicit = false} = {}): Promise<boolean> {
     const suppression = await this.find(projectId, address);
-    if (suppression) {
+    if (!suppression) {
+      return true;
+    }
+    if (explicit) {
       throw new SuppressedAddressError(normalizeEmail(address), suppression);
     }
-  }
 
-  /**
-   * The subscription a write may give an address: `false` instead of `true` for a suppressed
-   * one, so paths that subscribe in passing -- an event, an import, a workflow -- leave it
-   * unsubscribed. Returns the suppression too, so the caller can say why.
-   */
-  public static async allowedSubscription(
-    projectId: string,
-    address: string,
-    subscribed: boolean | undefined,
-  ): Promise<{subscribed: boolean | undefined; suppression: Suppression | null}> {
-    if (subscribed !== true) {
-      return {subscribed, suppression: null};
-    }
-
-    const suppression = await this.find(projectId, address);
-    if (suppression) {
-      signale.info(
-        `[SUPPRESSION] ${normalizeEmail(address)} stays unsubscribed: suppressed after a ${suppression.reason.toLowerCase()}`,
-      );
-      return {subscribed: false, suppression};
-    }
-
-    return {subscribed, suppression: null};
+    signale.info(
+      `[SUPPRESSION] ${normalizeEmail(address)} stays unsubscribed: suppressed after a ${suppression.reason.toLowerCase()}`,
+    );
+    return false;
   }
 
   /** Remove an address from the list, so it can be subscribed and emailed again */

@@ -50,6 +50,7 @@
       "error": "Fout",
       "loadFailed": "We konden je e-mailvoorkeuren niet laden. Controleer de link en probeer het opnieuw.",
       "actionFailed": "Er is iets misgegaan. Probeer het opnieuw.",
+      "resubscribeNeedsEmail": "Dit adres kan hier niet opnieuw worden aangemeld. Gebruik de link in een e-mail die je van ons hebt ontvangen.",
       "sentWith": "Verzonden met {provider}"
     }
   },

@@ -1284,7 +1284,7 @@ export class WorkflowExecutionService {
     if (
       desiredSubscribed === true &&
       !contact.subscribed &&
-      (await SuppressionService.allowedSubscription(execution.workflow.projectId, contact.email, true)).suppression
+      !(await SuppressionService.maySubscribe(execution.workflow.projectId, contact.email))
     ) {
       desiredSubscribed = undefined;
     }

@@ -60,7 +60,8 @@ export const AuthenticationSchemas = {
     token: z.string().length(64, 'Invalid verification token'),
   }),
   requestPasswordReset: z.object({
-    email,
+    // Public, like the login: no longer than a deliverable address
+    email: email.max(254),
   }),
   resetPassword: z.object({
     token: z.string().length(64, 'Invalid reset token'),

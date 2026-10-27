@@ -50,6 +50,7 @@
       "error": "Błąd",
       "loadFailed": "Nie udało się wczytać preferencji e-mail. Sprawdź link i spróbuj ponownie.",
       "actionFailed": "Coś poszło nie tak. Spróbuj ponownie.",
+      "resubscribeNeedsEmail": "Tego adresu nie można tu ponownie zapisać. Użyj linku z wiadomości e-mail, którą od nas otrzymałeś.",
       "sentWith": "Wysłano przez {provider}"
     }
   },
