@@ -822,6 +822,32 @@ describe('Webhooks - SES event notifications', () => {
       expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
     });
 
+    it('unsubscribes the contact when SES names the address their alias forwarded to', async () => {
+      const email = await sentEmail('ses-forwarded-bounce');
+
+      // SES reports the DSN's Final-Recipient: the mailbox the contact's address forwards to
+      await post(
+        notification('Bounce', 'ses-forwarded-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'gone@forwarded.test'}]},
+        }),
+      );
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+
+    it('does not unsubscribe again a contact who subscribed after the bounce was recorded', async () => {
+      await sentEmail('ses-bounce-redelivered');
+      const bounce = notification('Bounce', 'ses-bounce-redelivered', {bounce: {bounceType: 'Permanent'}});
+
+      await post(bounce);
+      await prisma.contact.update({where: {id: contactId}, data: {subscribed: true}});
+      // The same bounce again, as a replay from the dead-letter queue would deliver it
+      await post(bounce);
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(true);
+    });
+
     it.each([
       ['Bounce', {bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'}}],
       ['Complaint', {complaint: {complaintSubType: 'OnAccountSuppressionList'}}],

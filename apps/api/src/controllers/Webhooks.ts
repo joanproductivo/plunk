@@ -608,13 +608,15 @@ export class Webhooks {
       }
 
       // The addresses a bounce or complaint is about. The contact is only unsubscribed -- and
-      // the event only tracked against them -- when one of them is theirs: a workflow email sent
+      // the event only tracked against them -- when the email went to them: a workflow email sent
       // to a custom recipient bounces for that recipient, not the contact, and that address is
-      // kept off future sends by the account's suppression list.
-      const affected = unsubscribes
-        ? affectedAddresses(eventType, body, recipientAddress(email.headers, email.contact.email))
-        : [];
-      const contactIsAffected = affected.includes(email.contact.email.toLowerCase());
+      // kept off future sends by the account's suppression list. An email without a custom
+      // recipient had the contact as its only recipient, so its bounce is theirs even when SES
+      // names another address -- the DSN's Final-Recipient, for an alias or a forward.
+      const contactAddress = email.contact.email.toLowerCase();
+      const sentTo = recipientAddress(email.headers, email.contact.email).trim().toLowerCase();
+      const affected = unsubscribes ? affectedAddresses(eventType, body, sentTo) : [];
+      const contactIsAffected = unsubscribes && (sentTo === contactAddress || affected.includes(contactAddress));
 
       // `status` is dropped from the update when it would walk backwards over a suppression. SES
       // publishes through SNS, which does not guarantee ordering, so the ordinary sequence
@@ -636,13 +638,6 @@ export class Webhooks {
         // again. Other events are a single update and do not hold a transaction open.
         await prisma.$transaction(
           async tx => {
-            if (contactIsAffected) {
-              await tx.contact.update({
-                where: {id: email.contactId},
-                data: {subscribed: false, snoozedUntil: null},
-              });
-            }
-
             // Claimed by its first-seen timestamp, or -- for an address already on the
             // suppression list, which records none -- by moving the email to its status
             const claimed = suppression
@@ -656,6 +651,16 @@ export class Webhooks {
                   data: {status: updateData.status as EmailStatus},
                 });
             isNew = claimed.count === 1;
+
+            // Only the copy that records the event unsubscribes: an old bounce delivered again --
+            // from the dead-letter queue, say -- must not unsubscribe a contact who has since
+            // subscribed again
+            if (isNew && contactIsAffected) {
+              await tx.contact.update({
+                where: {id: email.contactId},
+                data: {subscribed: false, snoozedUntil: null},
+              });
+            }
 
             await tx.email.update({where: {id: email.id}, data: {...updateData, status}});
           },
