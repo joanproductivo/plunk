@@ -12,6 +12,61 @@ type Literal = z.infer<typeof literalSchema>;
 type Json = Literal | {[key: string]: Json} | Json[];
 const jsonSchema: z.ZodType<Json> = z.lazy(() => z.union([literalSchema, z.array(jsonSchema), z.record(jsonSchema)]));
 
+/** Plunk Lite: largest `data` that /v1/track and /v1/send take, serialized as JSON */
+export const TRACK_DATA_MAX_BYTES = 32 * 1024;
+/** Plunk Lite: deepest nesting of that `data`; `{value, persistent: false}` already takes one level */
+export const TRACK_DATA_MAX_DEPTH = 6;
+/** Plunk Lite: longest event name */
+export const EVENT_NAME_MAX = 100;
+/** Plunk Lite: most recipients in one /v1/send */
+export const SEND_MAX_RECIPIENTS = 50;
+
+// A surrogate without its pair. No lookbehind and not String#isWellFormed: the dashboard loads this
+// package too, and older Safari and Firefox have neither.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+
+/** Plunk Lite: whether Postgres can store a text: no \u0000 and no lone surrogate */
+const storableText = (text: string) => !text.includes('\u0000') && !LONE_SURROGATE.test(text);
+
+/** Plunk Lite: a /v1/send recipient's name, saved in the contact's data, so one Postgres can store */
+const recipientName = z.string().refine(text => storableText(text), 'Name contains invalid characters');
+
+/**
+ * Plunk Lite: a JSON value whose depth and size are checked before `jsonSchema` walks it. That
+ * walk is recursive, so a payload nested thousands of levels deep would overflow the stack and
+ * answer 500; this checks it iteratively and turns it away as a validation error instead.
+ */
+export function boundedJson(maxBytes: number, maxDepth: number) {
+  return z
+    .unknown()
+    .superRefine((value, ctx) => {
+      const stack: [unknown, number][] = [[value, 0]];
+      for (let item = stack.pop(); item; item = stack.pop()) {
+        const [node, depth] = item;
+        // Postgres cannot store \u0000 or half a surrogate pair: a 422 here rather than a 500 on writing it
+        if (typeof node === 'string' && !storableText(node)) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
+          return;
+        }
+        if (node === null || typeof node !== 'object') continue;
+        if (Object.keys(node).some(key => !storableText(key))) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
+          return;
+        }
+        if (depth >= maxDepth) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: `data is nested deeper than ${maxDepth} levels`});
+          return;
+        }
+        for (const child of Object.values(node)) stack.push([child, depth + 1]);
+      }
+      // TextEncoder rather than Buffer: the dashboard loads this package too
+      if (new TextEncoder().encode(JSON.stringify(value)).length > maxBytes) {
+        ctx.addIssue({code: z.ZodIssueCode.custom, message: `data must be at most ${maxBytes / 1024} KB`});
+      }
+    })
+    .pipe(jsonSchema);
+}
+
 const uuid = z.string().uuid();
 const email = z.string().email();
 
@@ -518,10 +573,16 @@ export const CampaignSchemas = {
 
 export const ActionSchemas = {
   track: z.object({
-    event: z.string().min(1),
+    event: z
+      .string()
+      .min(1)
+      .max(EVENT_NAME_MAX)
+      // No control characters: line breaks would split logs, and Postgres cannot store \u0000
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'Event name contains invalid characters')
+      .refine(text => storableText(text), 'Event name contains invalid characters'),
     email,
     subscribed: z.boolean().optional(),
-    data: jsonSchema.optional(),
+    data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
   }),
   send: z
     .object({
@@ -529,19 +590,22 @@ export const ActionSchemas = {
         email, // Simple email string (backward compatible)
         z.object({
           // Object with name and email
-          name: z.string().optional(),
+          name: recipientName.optional(),
           email: email,
         }),
-        z.array(
-          z.union([
-            email, // Array of email strings
-            z.object({
-              // Array of objects with name and email
-              name: z.string().optional(),
-              email: email,
-            }),
-          ]),
-        ),
+        z
+          .array(
+            z.union([
+              email, // Array of email strings
+              z.object({
+                // Array of objects with name and email
+                name: recipientName.optional(),
+                email: email,
+              }),
+            ]),
+          )
+          .min(1)
+          .max(SEND_MAX_RECIPIENTS),
       ]),
       subject: z.string().min(1).max(998).regex(/^[^\r\n]*$/, 'Subject contains invalid characters').optional(),
       body: z.string().min(1).optional(),
@@ -578,7 +642,7 @@ export const ActionSchemas = {
           z.string().max(998).regex(/^[^\r\n]*$/, 'Header value contains invalid characters'),
         )
         .optional(),
-      data: jsonSchema.optional(),
+      data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
       attachments: z
         .array(
           z.object({
@@ -677,13 +741,13 @@ export const ALERT_RECIPIENTS_MAX = 10;
 /** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
 export const FAILURE_ALERTS_OPEN_MAX = 20;
 
-const NOTICE_KINDS = ['project', 'brake', 'security', 'domain', 'sns', 'ses', 'aws'];
+const NOTICE_KINDS = ['project', 'brake', 'security', 'domain', 'sns', 'ses', 'aws', 'redis'];
 
 /**
  * Alert sources that report a condition rather than a failure, by the kind their key starts with:
  * the project disabled, a campaign or workflow stopped for its bounces, sending reputation, domains,
- * the SES event pipeline, the SES account itself (a sending quota, a pause) and the AWS account's
- * alarms (Plunk Lite)
+ * the SES event pipeline, the SES account itself (a sending quota, a pause), the AWS account's
+ * alarms and the installation's Redis running out of memory (Plunk Lite)
  */
 export const isFailureNotice = (sourceKey: string) => NOTICE_KINDS.includes(sourceKey.split(':')[0]!);
 

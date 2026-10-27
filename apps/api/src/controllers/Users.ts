@@ -24,6 +24,7 @@ import {DeletedEmailCounts} from '../services/DeletedEmailCounts.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
+import {ProjectService} from '../services/ProjectService.js';
 import {ReputationPolicy} from '../services/ReputationPolicy.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {UserService} from '../services/UserService.js';
@@ -256,6 +257,8 @@ export class Users {
       where: {id},
       data,
     });
+    // Plunk Lite: API requests see the change at once, not when their cached copy expires
+    await ProjectService.invalidate(project);
 
     return res.status(200).json(project);
   }
@@ -273,6 +276,12 @@ export class Users {
     // Generate new unique API keys
     const publicKey = `pk_${randomBytes(32).toString('hex')}`;
     const secretKey = `sk_${randomBytes(32).toString('hex')}`;
+
+    // Plunk Lite: the old keys stop working at once, not when their cached copy expires
+    const previous = await prisma.project.findUniqueOrThrow({
+      where: {id},
+      select: {id: true, public: true, secret: true},
+    });
 
     // Update the project with new keys
     const project = await prisma.project.update({
@@ -293,6 +302,8 @@ export class Users {
         subscription: true,
       },
     });
+
+    await ProjectService.invalidate(previous, project);
 
     // Send notification about API key regeneration
     await NtfyService.notifyApiKeysRegenerated(project.name!, id!, auth.userId!);
@@ -862,6 +873,9 @@ export class Users {
     const project = await prisma.project.findUnique({
       where: {id},
       select: {
+        id: true,
+        public: true,
+        secret: true,
         name: true,
         subscription: true,
         customer: true,
@@ -898,6 +912,8 @@ export class Users {
       prisma.plunkLiteDeletedEmailCount.deleteMany({where: {projectId: id}}),
       prisma.project.delete({where: {id}}),
     ]);
+    // Plunk Lite: its keys stop authenticating at once
+    await ProjectService.invalidate(project);
 
     // Send notification about project deletion
     await NtfyService.notifyProjectDeleted(project.name, id, auth.userId);

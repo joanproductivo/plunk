@@ -35,6 +35,18 @@ describe('useJsonBodyParsers', () => {
     expect(response.body.type).toBe('entity.too.large');
   });
 
+  it('takes at most 64 KB on /v1/track, whose key is public', async () => {
+    const over = await request(appWithParsers())
+      .post('/v1/track')
+      .send({filler: 'x'.repeat(100 * 1024)});
+    const within = await request(appWithParsers())
+      .post('/v1/track')
+      .send({filler: 'x'.repeat(32 * 1024)});
+
+    expect(over.status).toBe(413);
+    expect(within.status).toBe(200);
+  });
+
   it('refuses a large body on the SNS webhook', async () => {
     const response = await request(appWithParsers()).post('/webhooks/sns').send(bodyOf(3));
 

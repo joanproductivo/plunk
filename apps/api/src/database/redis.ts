@@ -1,4 +1,5 @@
 import {Redis} from 'ioredis';
+import signale from 'signale';
 
 import {REDIS_URL} from '../app/constants.js';
 
@@ -14,12 +15,24 @@ export const REDIS_ONE_MINUTE = 60;
 export const REDIS_DEFAULT_EXPIRY = REDIS_ONE_MINUTE;
 export const TEN_MINUTES_IN_SECONDS = 60 * 10;
 
+/** Plunk Lite: a key with any API key in it masked, for logs */
+export const redactKeys = (key: string) => key.replace(/\b(sk|pk)_[\w-]+/g, '$1_…');
+
+/** Plunk Lite: what to log of an error that may be Redis's, without the command it carries */
+export const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 /**
  * @param key The key for redis (use Keys#<type>)
  * @param fn The function to return a resource. Can be a promise
  * @param seconds The amount of seconds to hold this resource in redis for. Defaults to 60
+ * @param options.missSeconds Plunk Lite: also remember, for this long, that there was nothing
  */
-export async function wrapRedis<T>(key: string, fn: () => Promise<T>, seconds = REDIS_DEFAULT_EXPIRY): Promise<T> {
+export async function wrapRedis<T>(
+  key: string,
+  fn: () => Promise<T>,
+  seconds = REDIS_DEFAULT_EXPIRY,
+  {missSeconds}: {missSeconds?: number} = {},
+): Promise<T> {
   const cached = await redis.get(key);
   if (cached) {
     return JSON.parse(cached);
@@ -27,8 +40,18 @@ export async function wrapRedis<T>(key: string, fn: () => Promise<T>, seconds = 
 
   const recent = await fn();
 
-  if (recent) {
-    await redis.set(key, JSON.stringify(recent), 'EX', seconds);
+  // Plunk Lite: a cache that cannot be written (Redis full) must not fail the request it serves
+  try {
+    if (recent) {
+      await redis.set(key, JSON.stringify(recent), 'EX', seconds);
+    } else if (recent === null && missSeconds) {
+      // Read back as JSON.parse('null'), that is null, without calling fn
+      await redis.set(key, 'null', 'EX', missSeconds);
+    }
+  } catch (error) {
+    // Only the message: a Redis error carries its command's arguments, the cached value included, and
+    // keys may hold an API key (project:secret:sk_…), none of which must reach the logs
+    signale.warn(`[REDIS] Could not cache ${redactKeys(key)}: ${errorMessage(error)}`);
   }
 
   return recent;

@@ -8,6 +8,7 @@ import {FailureAlertService} from './FailureAlertService.js';
 import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
+import {ProjectService} from './ProjectService.js';
 import {QueueService} from './QueueService.js';
 import type {DisableVerdict, RateData} from './ReputationPolicy.js';
 import {ReputationPolicy} from './ReputationPolicy.js';
@@ -620,7 +621,7 @@ export class SecurityService {
     // Check if already disabled to avoid duplicate logs
     const project = await prisma.project.findUnique({
       where: {id: projectId},
-      select: {id: true, disabled: true, name: true},
+      select: {id: true, disabled: true, name: true, public: true, secret: true},
     });
 
     if (!project) {
@@ -636,6 +637,11 @@ export class SecurityService {
           where: {id: projectId, disabled: false},
           data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
         });
+
+    // Plunk Lite: API requests see it disabled at once, not when their cached copy expires
+    if (disabled.count === 1 && !withoutRedis) {
+      await ProjectService.invalidate(project);
+    }
 
     if (disabled.count !== 1) {
       // Already disabled, just log the current violations
@@ -947,10 +953,13 @@ ${strippedBody.substring(0, 2000)}`,
       }
 
       // Disable the project
-      await prisma.project.update({
+      const disabledProject = await prisma.project.update({
         where: {id: projectId},
         data: {disabled: true, disabledReason: 'PHISHING_DETECTED'},
+        select: {id: true, public: true, secret: true},
       });
+      // Plunk Lite: API requests see it disabled at once, not when their cached copy expires
+      await ProjectService.invalidate(disabledProject);
 
       const violation = `A policy violation was detected. Please contact support for more details.`;
 

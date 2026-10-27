@@ -7,6 +7,14 @@ import {jsonResult, register, requireConfirmation, runTool, type ToolContext} fr
 /** Above this many recipients a single send is treated as a bulk action. */
 const BULK_RECIPIENT_THRESHOLD = 1;
 
+/** Plunk Lite: a recipient of a partial send that was not sent */
+interface FailedRecipient {
+  email: string;
+  code: string;
+  message: string;
+  suggestedEmail?: string;
+}
+
 const recipient = z.union([
   z.string().describe('Email address'),
   z.object({
@@ -46,6 +54,13 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         'on a verified domain unless the template already sets one.',
         '',
         '**This cannot be undone once sent.** Sending to multiple recipients asks for confirmation first.',
+        'Up to 50 recipients. With several, one that is refused does not stop the others, though an unexpected',
+        'error stops the ones after it: the result says which were not sent and why. Do not resend to the ones',
+        'that went out.',
+        '',
+        '**New recipients:** an address whose domain does not exist, takes no email, is disposable or is a slip of',
+        "a large provider's (gmial.com) is refused with INVALID_EMAIL (with any suggested correction), and no",
+        'contact is created for it.',
         '',
         "**Suppressed addresses:** an address on the project's suppression list (it bounced permanently",
         'or reported spam) is never emailed, transactional email included. The send is still accepted and',
@@ -118,11 +133,23 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
           }
         }
 
-        const result = await client.request({
+        const result = await client.request<{data?: {emails?: unknown[]; failed?: FailedRecipient[]}}>({
           method: 'POST',
           path: '/v1/send',
           body: {to, subject, body, template, from, reply, data, subscribed},
         });
+
+        // Plunk Lite: a partial send (207) lists the recipients that were not sent
+        const failed = result?.data?.failed ?? [];
+        if (failed.length > 0) {
+          const sent = result?.data?.emails?.length ?? 0;
+          const notSent = failed
+            .map(
+              f => `${f.email} (${f.code}: ${f.message}${f.suggestedEmail ? ` Suggested: ${f.suggestedEmail}` : ''})`,
+            )
+            .join('; ');
+          return jsonResult(`Sent to ${sent} of ${recipients.length} recipient(s). Not sent: ${notSent}`, result);
+        }
 
         return jsonResult(`Sent to ${recipients.length} recipient(s).`, result);
       }),

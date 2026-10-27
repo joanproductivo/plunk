@@ -26,6 +26,7 @@ import {
   SMTP_ENABLED,
   STRIPE_ENABLED,
   TRACKING_TOGGLE_ENABLED,
+  verifySignupsEnabled,
 } from './app/constants.js';
 import {allowedOrigins, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
@@ -63,6 +64,7 @@ import {
   snoozeSweepQueue,
   plunkLiteChecksQueue,
 } from './services/QueueService.js';
+import {EmailVerificationService} from './services/EmailVerificationService.js';
 import * as S3Service from './services/S3Service.js';
 import {checkConfigurationSets} from './services/SesEventMatch.js';
 import {useJsonBodyParsers} from './middleware/bodyParsers.js';
@@ -432,7 +434,9 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', error => {
   signale.error('Uncaught Exception:', error);
-  // Don't exit the process - just log the error
+  // Plunk Lite: the process may be left in any state, so close as on a signal -- letting the
+  // requests running finish -- and exit with an error so pm2 starts it again, as the worker does
+  shutdown('uncaughtException', 1);
 });
 
 let httpServer: HttpServer | undefined;
@@ -443,7 +447,7 @@ let stopping = false;
  * email row and queueing its job would leave the row PENDING with nothing to send it. Work a
  * request starts without awaiting it (a manual workflow start) is not waited for.
  */
-function shutdown(signal: string) {
+function shutdown(signal: string, exitCode = 0) {
   // A second signal must not fall through to Node's default handler, which exits at once
   if (stopping) {
     return;
@@ -459,13 +463,13 @@ function shutdown(signal: string) {
   deadline.unref();
 
   if (!httpServer) {
-    process.exit(0);
+    process.exit(exitCode);
   }
 
   // Stops accepting connections and waits for the requests already running
   httpServer.close(() => {
     signale.success('[API] HTTP server closed');
-    process.exit(0);
+    process.exit(exitCode);
   });
 }
 
@@ -474,6 +478,11 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 void prisma.$connect().then(async () => {
   httpServer = server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
+
+  // Plunk Lite: the disposable domains list, fetched before the first sign-up needs it
+  if (verifySignupsEnabled()) {
+    void EmailVerificationService.warmUp();
+  }
 
   // Feature matrix
   const features = [
@@ -539,6 +548,31 @@ void prisma.$connect().then(async () => {
   // Plunk Lite: a set that does not publish its bounces and complaints is told to every project.
   void checkConfigurationSets();
 
+  scheduleRepeatables();
+}, startupFailed);
+
+/**
+ * Plunk Lite: the database could not be reached at startup. Exit so pm2 starts the api again;
+ * staying up would leave a process that never listens and that pm2 thinks is fine.
+ */
+function startupFailed(error: unknown): never {
+  signale.error('[API] Could not connect to the database, exiting so pm2 restarts the api:', error);
+  process.exit(1);
+}
+
+/**
+ * Plunk Lite: schedule the repeatable jobs, and if one cannot be added, all of them again in 30
+ * seconds, since each has a fixed id and adding it again changes nothing. Before, a failure skipped
+ * the jobs after it until the next restart, without a word.
+ */
+function scheduleRepeatables(): void {
+  addRepeatables().catch((error: unknown) => {
+    signale.error('[BACKGROUND-JOB] Could not schedule the repeatable jobs, trying again in 30 seconds:', error);
+    setTimeout(scheduleRepeatables, 30_000).unref();
+  });
+}
+
+async function addRepeatables(): Promise<void> {
   // Set up repeatable job for domain verification (BullMQ)
   // Run every 5 minutes to check domain verification status with AWS SES
   await domainVerificationQueue.add(
@@ -696,4 +730,19 @@ void prisma.$connect().then(async () => {
   );
 
   signale.info('[BACKGROUND-JOB] SES events check scheduled (BullMQ repeatable job, runs every 15 minutes)');
-});
+
+  // Plunk Lite: every 15 minutes, how full Redis is against its maxmemory; once full it refuses
+  // every write, queued emails included
+  await plunkLiteChecksQueue.add(
+    'redis-memory',
+    {},
+    {
+      repeat: {
+        pattern: '*/15 * * * *', // Every 15 minutes
+      },
+      jobId: 'redis-memory-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Redis memory check scheduled (BullMQ repeatable job, runs every 15 minutes)');
+}

@@ -4,12 +4,45 @@ import jsonwebtoken from 'jsonwebtoken';
 
 import type {AuthResponse} from '@plunk/types';
 
-import {JWT_SECRET, PLUNK_ENABLED} from '../app/constants.js';
+import {JWT_SECRET, PLUNK_ENABLED, PLUNK_LITE_PUBLIC_TRACK} from '../app/constants.js';
 import {isAllowedOrigin} from '../app/origins.js';
 import {ErrorCode, HttpException, NotAllowed, NotAuthenticated} from '../exceptions/index.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {ProjectService} from '../services/ProjectService.js';
 import {UserService} from '../services/UserService.js';
+
+const INVALID_PUBLIC_KEY = 'Invalid public API key. Ensure you are using a public key (pk_*) for this endpoint.';
+const INVALID_SECRET_KEY = 'Invalid secret API key. This endpoint requires a secret key (sk_*), not a public key.';
+
+/** Plunk Lite: what an API key can look like; anything else is refused without looking it up */
+const API_KEY_PATTERN = /^(pk|sk)_[A-Za-z0-9_-]{8,128}$/;
+
+/**
+ * The API key of a "Bearer <key>" Authorization header. Plunk Lite: a value that cannot be a key
+ * is refused here with `invalidKey`, so an invented one costs neither a query nor a cache entry.
+ */
+function bearerKey(authHeader: string, invalidKey: string): string {
+  const parts = authHeader.split(' ');
+  if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    throw new HttpException(
+      401,
+      'Authorization header must use Bearer token format: "Authorization: Bearer YOUR_API_KEY"',
+      ErrorCode.MISSING_AUTH,
+    );
+  }
+
+  const apiKey = parts[1];
+
+  if (!apiKey) {
+    throw new HttpException(401, 'API key is required in Authorization header', ErrorCode.MISSING_AUTH);
+  }
+
+  if (!API_KEY_PATTERN.test(apiKey)) {
+    throw new HttpException(401, invalidKey, ErrorCode.INVALID_API_KEY);
+  }
+
+  return apiKey;
+}
 
 /**
  * Middleware to check if this unsubscribe is authenticated on the dashboard
@@ -103,6 +136,15 @@ export function parseJwt(request: Request): string {
  */
 export const requirePublicKey = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // Plunk Lite: a server can switch off the public key, which anyone who reads a page can copy
+    if (!PLUNK_LITE_PUBLIC_TRACK) {
+      throw new HttpException(
+        403,
+        'Public keys are switched off on this server (PLUNK_LITE_PUBLIC_TRACK=off). Use a secret key: POST /contacts, and POST /events/track for events.',
+        ErrorCode.FORBIDDEN,
+      );
+    }
+
     // Get API key from Authorization header
     const authHeader = req.headers.authorization;
 
@@ -110,31 +152,13 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
       throw new HttpException(401, 'Authorization header is required', ErrorCode.MISSING_AUTH);
     }
 
-    // Support "Bearer <key>" format
-    const parts = authHeader.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      throw new HttpException(
-        401,
-        'Authorization header must use Bearer token format: "Authorization: Bearer YOUR_API_KEY"',
-        ErrorCode.MISSING_AUTH,
-      );
-    }
-
-    const apiKey = parts[1];
-
-    if (!apiKey) {
-      throw new HttpException(401, 'API key is required in Authorization header', ErrorCode.MISSING_AUTH);
-    }
+    const apiKey = bearerKey(authHeader, INVALID_PUBLIC_KEY);
 
     // Look up project by public key only
     const project = await ProjectService.public(apiKey);
 
     if (!project) {
-      throw new HttpException(
-        401,
-        'Invalid public API key. Ensure you are using a public key (pk_*) for this endpoint.',
-        ErrorCode.INVALID_API_KEY,
-      );
+      throw new HttpException(401, INVALID_PUBLIC_KEY, ErrorCode.INVALID_API_KEY);
     }
 
     // Set auth response with project ID (before disabled check so it's available for logging)
@@ -179,31 +203,13 @@ export const requireSecretKey = async (req: Request, res: Response, next: NextFu
       throw new HttpException(401, 'Authorization header is required', ErrorCode.MISSING_AUTH);
     }
 
-    // Support "Bearer <key>" format
-    const parts = authHeader.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      throw new HttpException(
-        401,
-        'Authorization header must use Bearer token format: "Authorization: Bearer YOUR_API_KEY"',
-        ErrorCode.MISSING_AUTH,
-      );
-    }
-
-    const apiKey = parts[1];
-
-    if (!apiKey) {
-      throw new HttpException(401, 'API key is required in Authorization header', ErrorCode.MISSING_AUTH);
-    }
+    const apiKey = bearerKey(authHeader, INVALID_SECRET_KEY);
 
     // Look up project by secret key only
     const project = await ProjectService.secret(apiKey);
 
     if (!project) {
-      throw new HttpException(
-        401,
-        'Invalid secret API key. This endpoint requires a secret key (sk_*), not a public key.',
-        ErrorCode.INVALID_API_KEY,
-      );
+      throw new HttpException(401, INVALID_SECRET_KEY, ErrorCode.INVALID_API_KEY);
     }
 
     // Set auth response with project ID (before disabled check so it's available for logging)
@@ -247,30 +253,12 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
     // If Authorization header is provided, use secret key authentication
     if (authHeader) {
-      // Support "Bearer <key>" format
-      const parts = authHeader.split(' ');
-      if (parts.length !== 2 || parts[0] !== 'Bearer') {
-        throw new HttpException(
-          401,
-          'Authorization header must use Bearer token format: "Authorization: Bearer YOUR_API_KEY"',
-          ErrorCode.MISSING_AUTH,
-        );
-      }
-
-      const apiKey = parts[1];
-
-      if (!apiKey) {
-        throw new HttpException(401, 'API key is required in Authorization header', ErrorCode.MISSING_AUTH);
-      }
+      const apiKey = bearerKey(authHeader, INVALID_SECRET_KEY);
       // Look up project by secret key only (public keys not allowed)
       const project = await ProjectService.secret(apiKey);
 
       if (!project) {
-        throw new HttpException(
-          401,
-          'Invalid secret API key. This endpoint requires a secret key (sk_*), not a public key.',
-          ErrorCode.INVALID_API_KEY,
-        );
+        throw new HttpException(401, INVALID_SECRET_KEY, ErrorCode.INVALID_API_KEY);
       }
 
       // Set auth response with project ID (before disabled check so it's available for logging)

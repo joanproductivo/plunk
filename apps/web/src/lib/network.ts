@@ -157,7 +157,8 @@ export class network {
 
     // Extract error message from standardized error response or fall back to direct message property
     const errorMessage = res.error?.message ?? res.message ?? 'Something went wrong!';
-    // The API's error code travels with the message, for callers that answer some errors apart
-    throw Object.assign(new Error(errorMessage), {code: res.error?.code});
+    // The API's error code travels with the message, for callers that answer some errors apart, and
+    // its details (Plunk Lite: an address refused at sign-up has its likely correction there)
+    throw Object.assign(new Error(errorMessage), {code: res.error?.code, details: res.error?.details});
   }
 }

@@ -1,5 +1,7 @@
-import {beforeEach, describe, expect, it} from 'vitest';
-import {ContactService} from '../ContactService';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {prisma as appPrisma} from '../../database/prisma';
+import {CONTACT_FIELDS_MAX, ContactService} from '../ContactService';
+import {SuppressionService} from '../SuppressionService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 describe('ContactService - Duplicate Prevention & Data Merging', () => {
@@ -9,6 +11,10 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
   beforeEach(async () => {
     const {project} = await factories.createUserWithProject();
     projectId = project.id;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('Duplicate Email Prevention', () => {
@@ -303,6 +309,88 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
 
       expect(merged.plunk_id).toBe(contact.id);
       expect(merged.plunk_email).toBe('real@example.com');
+    });
+  });
+
+  describe('Concurrent creation of the same contact (Plunk Lite)', () => {
+    it('updates the contact a concurrent request created instead of failing', async () => {
+      await ContactService.upsert(projectId, 'race@example.com', {first: 'a'});
+      // As if the other request created it between this one's lookup and its insert
+      const lookup = vi.spyOn(appPrisma.contact, 'findFirst').mockResolvedValueOnce(null);
+
+      const contact = await ContactService.upsert(projectId, 'race@example.com', {second: 'b'});
+
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(contact.data).toEqual({first: 'a', second: 'b'});
+      expect(await prisma.contact.count({where: {projectId, email: 'race@example.com'}})).toBe(1);
+    });
+
+    it('keeps the subscription the other request set when the address is suppressed', async () => {
+      // The concurrent request created it subscribed, before the address was suppressed
+      await prisma.contact.create({data: {projectId, email: 'kept@example.com', subscribed: true}});
+      await SuppressionService.record(appPrisma, projectId, ['kept@example.com'], 'BOUNCE', null);
+      vi.spyOn(appPrisma.contact, 'findFirst').mockResolvedValueOnce(null);
+
+      // An event that says nothing about the subscription: the retry must not unsubscribe it
+      const contact = await ContactService.upsert(projectId, 'kept@example.com', {plan: 'pro'});
+
+      expect(contact.subscribed).toBe(true);
+    });
+
+    it('leaves one contact when two requests create the same address at once', async () => {
+      await Promise.all([
+        ContactService.upsert(projectId, 'twice@example.com', {name: 'Ana'}),
+        ContactService.upsert(projectId, 'twice@example.com', {name: 'Ana'}),
+      ]);
+
+      expect(await prisma.contact.count({where: {projectId, email: 'twice@example.com'}})).toBe(1);
+    });
+  });
+
+  describe('Custom field cap (Plunk Lite)', () => {
+    const fields = (count: number, prefix = 'field') =>
+      Object.fromEntries(Array.from({length: count}, (_, i) => [`${prefix}${i}`, i]));
+
+    it('refuses the field that would take a contact past 200', async () => {
+      await ContactService.upsert(projectId, 'full@example.com', fields(CONTACT_FIELDS_MAX));
+
+      await expect(ContactService.upsert(projectId, 'full@example.com', {extra: 'x'})).rejects.toMatchObject({
+        code: 400,
+      });
+    });
+
+    it('lets a contact at the cap change the fields it has, or swap one for another', async () => {
+      const contact = await ContactService.upsert(projectId, 'full@example.com', fields(CONTACT_FIELDS_MAX));
+
+      const changed = await ContactService.upsert(projectId, 'full@example.com', {field0: 'changed'});
+      const swapped = await ContactService.update(projectId, contact.id, {data: {field1: null, extra: 'x'}});
+
+      expect((changed.data as Record<string, unknown>).field0).toBe('changed');
+      expect(Object.keys(swapped.data as Record<string, unknown>)).toHaveLength(CONTACT_FIELDS_MAX);
+    });
+
+    it('refuses custom fields that grow past 64 KB, and lets a contact already over it shrink', async () => {
+      const big = 'x'.repeat(40 * 1024);
+      const contact = await ContactService.upsert(projectId, 'large@example.com', {notes: big});
+
+      await expect(ContactService.upsert(projectId, 'large@example.com', {more: big})).rejects.toMatchObject({
+        code: 400,
+      });
+      const smaller = await ContactService.update(projectId, contact.id, {data: {notes: 'short'}});
+      expect((smaller.data as Record<string, unknown>).notes).toBe('short');
+    });
+
+    it('lets a contact already over the cap be updated without growing', async () => {
+      const contact = await prisma.contact.create({
+        data: {projectId, email: 'legacy@example.com', data: fields(CONTACT_FIELDS_MAX + 10)},
+      });
+
+      const updated = await ContactService.update(projectId, contact.id, {data: {field0: 'changed'}});
+      await expect(ContactService.update(projectId, contact.id, {data: {extra: 'x'}})).rejects.toMatchObject({
+        code: 400,
+      });
+
+      expect((updated.data as Record<string, unknown>).field0).toBe('changed');
     });
   });
 

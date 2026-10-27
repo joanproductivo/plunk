@@ -875,7 +875,10 @@ function CreateContactDialog({open, onOpenChange, onSuccess}: CreateContactDialo
       onOpenChange(false);
       onSuccess();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.');
+      // Plunk Lite: an address refused at sign-up comes with its likely correction
+      const suggested = (error as {details?: {suggestedEmail?: unknown}}).details?.suggestedEmail;
+      const message = error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.';
+      toast.error(typeof suggested === 'string' ? `${message} Suggested: ${suggested}` : message);
     } finally {
       setIsSubmitting(false);
     }

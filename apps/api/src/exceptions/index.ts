@@ -167,3 +167,25 @@ export class BadRequest extends HttpException {
     super(400, message, errorCode, details);
   }
 }
+
+/**
+ * Plunk Lite: the status, code and message an error answers with, for reporting one item of a
+ * request that went on with the rest. Codes as the global handler gives them, except that a client
+ * error without a code says so (a 429 without one is the billing limit) rather than INTERNAL_SERVER_ERROR.
+ */
+export function describeError(error: unknown): {status: number; code: string; message: string} {
+  if (error instanceof HttpException) {
+    const fallback =
+      error.code >= 500
+        ? ErrorCode.INTERNAL_SERVER_ERROR
+        : error.code === 429
+          ? ErrorCode.BILLING_LIMIT_EXCEEDED
+          : ErrorCode.BAD_REQUEST;
+    return {status: error.code, code: error.errorCode ?? fallback, message: error.message};
+  }
+  return {
+    status: 500,
+    code: ErrorCode.INTERNAL_SERVER_ERROR,
+    message: 'An unexpected error occurred; the email may have been queued, so check before sending it again',
+  };
+}

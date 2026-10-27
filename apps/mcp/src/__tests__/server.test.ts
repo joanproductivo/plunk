@@ -366,6 +366,38 @@ describe('tool behaviour', () => {
     await close();
   });
 
+  it('says which recipients of a partial send were not sent', async () => {
+    mockApi(() =>
+      json(
+        {
+          success: true,
+          data: {
+            emails: [{contact: {id: 'c1', email: 'ada@example.com'}, email: 'e1'}],
+            failed: [{email: 'bob@typo.test', code: 'INVALID_EMAIL', message: 'Domain does not exist'}],
+            timestamp: '2026-10-27T20:00:00.000Z',
+          },
+        },
+        207,
+      ),
+    );
+
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_send_email',
+      arguments: {to: ['ada@example.com', 'bob@typo.test'], subject: 's', body: 'b'},
+    });
+
+    expect(result.isError).toBeFalsy();
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Sent to 1 of 2 recipient(s)');
+    expect(text).toContain('bob@typo.test (INVALID_EMAIL: Domain does not exist)');
+
+    delete process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS;
+    await close();
+  });
+
   it('rejects a SEGMENT campaign with no segmentId', async () => {
     const {client, close} = await connect(baseConfig);
 

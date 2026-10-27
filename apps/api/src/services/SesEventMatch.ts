@@ -7,6 +7,7 @@ import {z} from 'zod';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {SES_EVENT_TRANSACTION, utcTimestamp} from '../utils/database.js';
+import {UUID_PATTERN} from '../utils/uuid.js';
 
 import {AwsAlarmService} from './AwsAlarmService.js';
 import {CampaignService} from './CampaignService.js';
@@ -149,7 +150,6 @@ export async function reportSubscriptionRemoved(topic: string): Promise<void> {
  */
 const UNMATCHED_EVENT_RETRY_MS = 30 * 60 * 1000;
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SES_KINDS: SesMessageTags['kind'][] = ['email', 'test', 'alert'];
 
 /**
@@ -164,7 +164,7 @@ function sesTags(mail: SesMail): Partial<SesMessageTags> {
   };
   const id = (name: string) => {
     const value = tag(name);
-    return value && UUID_RE.test(value) ? value : undefined;
+    return value && UUID_PATTERN.test(value) ? value : undefined;
   };
   const kind = tag(SES_TAG.kind) as SesMessageTags['kind'] | undefined;
   return {

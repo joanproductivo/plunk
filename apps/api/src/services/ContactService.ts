@@ -11,11 +11,13 @@ import type {
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
+import {verifySignupsEnabled} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
 import {LONG_TRANSACTION} from '../utils/database.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
 import {DeletedEmailCounts} from './DeletedEmailCounts.js';
+import {EmailVerificationService} from './EmailVerificationService.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -27,6 +29,10 @@ const RECEIVED_STATUSES = new Set<EmailStatus>([
   EmailStatus.CLICKED,
   EmailStatus.COMPLAINED,
 ]);
+
+/** Plunk Lite: most custom fields a contact can hold, and their largest size as JSON (see mergeContactData) */
+export const CONTACT_FIELDS_MAX = 200;
+export const CONTACT_DATA_MAX_BYTES = 64 * 1024;
 
 export class ContactService {
   /**
@@ -247,8 +253,9 @@ export class ContactService {
     existing: Prisma.JsonValue | null,
     incoming: Record<string, unknown>,
   ): Record<string, unknown> {
-    const merged: Record<string, unknown> =
-      existing && typeof existing === 'object' && !Array.isArray(existing) ? {...(existing as Record<string, unknown>)} : {};
+    const base: Record<string, unknown> =
+      existing && typeof existing === 'object' && !Array.isArray(existing) ? (existing as Record<string, unknown>) : {};
+    const merged: Record<string, unknown> = {...base};
 
     const reservedFields = ['plunk_id', 'plunk_email', 'id', 'email', 'unsubscribeUrl', 'subscribeUrl', 'manageUrl'];
 
@@ -272,6 +279,26 @@ export class ContactService {
         continue;
       }
       merged[key] = value;
+    }
+
+    // Plunk Lite: caps on custom fields, in number and in size, which only refuse a change that
+    // grows a contact past them, so one already over a cap can still be updated
+    const before = Object.keys(base).length;
+    const after = Object.keys(merged).length;
+    if (after > CONTACT_FIELDS_MAX && after > before) {
+      throw new HttpException(
+        400,
+        `A contact can hold at most ${CONTACT_FIELDS_MAX} custom fields`,
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    const bytesAfter = Buffer.byteLength(JSON.stringify(merged));
+    if (bytesAfter > CONTACT_DATA_MAX_BYTES && bytesAfter > Buffer.byteLength(JSON.stringify(base))) {
+      throw new HttpException(
+        400,
+        `A contact's custom fields can take at most ${CONTACT_DATA_MAX_BYTES / 1024} KB`,
+        ErrorCode.VALIDATION_ERROR,
+      );
     }
 
     return merged;
@@ -376,6 +403,7 @@ export class ContactService {
    * existing contact keeps its own.
    * A suppressed address (Plunk Lite) is never subscribed: it stays unsubscribed, or with
    * `options.explicit` -- the dashboard's add-contact form -- the request is refused.
+   * `options.verifySignup` (Plunk Lite) refuses a new contact whose address takes no email (422).
    */
   public static async upsert(
     projectId: string,
@@ -383,9 +411,11 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
-    options: {createdAt?: Date; explicit?: boolean} = {},
+    options: {createdAt?: Date; explicit?: boolean; verifySignup?: boolean; retried?: boolean} = {},
   ): Promise<Contact> {
     const normalizedEmail = ContactService.normalizeEmail(email);
+    // What the caller asked for, before a suppression turns it down: a retry asks the same
+    const requestedSubscribed = subscribed;
 
     // Find existing contact
     const existing = await prisma.contact.findFirst({
@@ -394,6 +424,12 @@ export class ContactService {
         email: normalizedEmail,
       },
     });
+
+    // Plunk Lite: a new contact from the API (`options.verifySignup`) needs an address that can
+    // receive email, so a form's typo or a made-up address is turned away while it can be fixed
+    if (!existing && options.verifySignup && verifySignupsEnabled()) {
+      await ContactService.requireValidSignup(normalizedEmail);
+    }
 
     // A suppressed address is never subscribed here. Most callers subscribe in passing -- an
     // event, a send, an import, an inbound email -- and the contact simply stays unsubscribed;
@@ -450,6 +486,14 @@ export class ContactService {
           },
         });
       } catch (error) {
+        // Plunk Lite: created meanwhile by a concurrent request for the same address (a form sent
+        // twice), so this one updates it instead
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && !options.retried) {
+          return ContactService.upsert(projectId, email, data, requestedSubscribed, defaultSubscribed, {
+            ...options,
+            retried: true,
+          });
+        }
         // Provide helpful error message for database/validation issues
         throw new HttpException(
           500,
@@ -457,6 +501,22 @@ export class ContactService {
         );
       }
     }
+  }
+
+  /** Plunk Lite: refuse, with the reasons and any likely correction, an address that takes no email */
+  private static async requireValidSignup(email: string): Promise<void> {
+    const verdict = await EmailVerificationService.verifySignup(email);
+    if (verdict.valid) {
+      return;
+    }
+    // The suggestion goes in the details only: the message reaches the logs and api_requests
+    const suggestion = verdict.suggestedEmail ? ' Did you mean the suggested address?' : '';
+    throw new HttpException(
+      422,
+      `This address cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,
+      ErrorCode.INVALID_EMAIL,
+      {reasons: verdict.reasons, ...(verdict.suggestedEmail ? {suggestedEmail: verdict.suggestedEmail} : {})},
+    );
   }
 
   /**

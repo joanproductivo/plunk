@@ -17,10 +17,12 @@ const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
  * the race between two concurrent retries.
  *
  * The claim is released when the handler responds 4xx, because those errors are
- * raised before any contact, event, or email is written and the caller should be
- * free to fix the request and retry with the same key. It is *kept* on 2xx (the
- * request succeeded) and on 5xx (the request failed with side effects in an
- * unknown state, so a blind retry is exactly what this feature exists to stop).
+ * raised before any email is written and the caller should be free to fix the
+ * request and retry with the same key (a /v1/send with several recipients may have
+ * created or updated their contacts by then). It is *kept* on 2xx (the request
+ * succeeded, a partial /v1/send's 207 included, so a retry cannot send the others
+ * twice) and on 5xx (the request failed with side effects in an unknown state, so a
+ * blind retry is exactly what this feature exists to stop).
  *
  * Must run after an auth middleware, which populates res.locals.auth.projectId.
  */

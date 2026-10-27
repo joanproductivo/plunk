@@ -87,7 +87,16 @@ export interface SnsHealthJobData {
 }
 
 /**
+ * Job data for the check of how full Redis is (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `redis-memory`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface RedisMemoryJobData {
+  // Empty - reads Redis's own INFO
+}
+
+/**
  * Job data of Plunk Lite's own checks
  * Used by: plunkLiteChecksQueue worker
  */
-export type PlunkLiteChecksJobData = SecurityCheckJobData | SnsHealthJobData;
+export type PlunkLiteChecksJobData = SecurityCheckJobData | SnsHealthJobData | RedisMemoryJobData;

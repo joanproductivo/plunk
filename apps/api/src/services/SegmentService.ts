@@ -517,12 +517,14 @@ export class SegmentService {
   }
 
   /**
-   * Refresh member counts for all segments in a project
+   * Refresh member counts for the segments of a project that do not track membership
    * Should be called by a background job periodically
+   * Plunk Lite: the ones that track it get their count from computeMembership in the same job, so
+   * counting them again here only doubled the work.
    */
   public static async refreshAllMemberCounts(projectId: string): Promise<void> {
     const segments = await prisma.segment.findMany({
-      where: {projectId},
+      where: {projectId, trackMembership: false},
       select: {id: true, type: true, condition: true},
     });
 

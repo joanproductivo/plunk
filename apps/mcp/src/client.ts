@@ -131,6 +131,12 @@ function toApiError(response: Response, payload: unknown, raw: string, project: 
     message = `${message} (${detail})`;
   }
 
+  // Plunk Lite: an address refused at sign-up comes with its likely correction
+  const details = error?.details as {suggestedEmail?: unknown} | undefined;
+  if (typeof details?.suggestedEmail === 'string') {
+    message = `${message} Suggested address: ${details.suggestedEmail}.`;
+  }
+
   if (response.status === 429) {
     const retryAfter = Number(response.headers.get('Retry-After'));
     const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined;
