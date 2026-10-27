@@ -7,6 +7,7 @@ import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 
 import {CampaignService} from './CampaignService.js';
+import {DeletedEmailCounts, RATE_COUNTS, RATED_EMAIL, utcTimestamp} from './DeletedEmailCounts.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {ProjectService} from './ProjectService.js';
 import type {SecurityMetric} from './SecurityService.js';
@@ -73,20 +74,27 @@ export class ReputationPolicy {
    * Only emails SES was given count, as only those count for AWS: a campaign creates its rows well
    * ahead of the send, and counting the ones still queued would understate the rate exactly while a
    * large send is going out.
+   *
+   * A project's rates also count its deleted emails (DeletedEmailCounts), as AWS still does; the
+   * rates of one campaign or workflow, for its brake, only count the emails it still has.
    */
   public static async rates({projectId, since, campaignId, workflowId}: RateFilter): Promise<RateData> {
+    const projectWide = !campaignId && !workflowId;
     const [row] = await prisma.$queryRaw<{total: number; bounces: number; complaints: number}[]>`
-      SELECT count(*)::int AS "total",
-             (count(*) FILTER (WHERE e."bouncedAt" IS NOT NULL))::int AS "bounces",
-             (count(*) FILTER (WHERE e."complainedAt" IS NOT NULL))::int AS "complaints"
-      FROM "emails" e
-      ${workflowId ? Prisma.sql`JOIN "workflow_executions" we ON we."id" = e."workflowExecutionId"` : Prisma.empty}
-      WHERE e."projectId" = ${projectId}
-        AND e."simulated" = false
-        AND e."sentAt" IS NOT NULL
-        ${since ? Prisma.sql`AND e."createdAt" >= (${since.toISOString()}::timestamptz AT TIME ZONE 'UTC')` : Prisma.empty}
-        ${campaignId ? Prisma.sql`AND e."campaignId" = ${campaignId}` : Prisma.empty}
-        ${workflowId ? Prisma.sql`AND we."workflowId" = ${workflowId}` : Prisma.empty}`;
+      SELECT live."total" + gone."total" AS "total",
+             live."bounces" + gone."bounces" AS "bounces",
+             live."complaints" + gone."complaints" AS "complaints"
+      FROM (
+        SELECT ${RATE_COUNTS}
+        FROM "emails" e
+        ${workflowId ? Prisma.sql`JOIN "workflow_executions" we ON we."id" = e."workflowExecutionId"` : Prisma.empty}
+        WHERE e."projectId" = ${projectId}
+          AND ${RATED_EMAIL}
+          ${since ? Prisma.sql`AND e."createdAt" >= ${utcTimestamp(since)}` : Prisma.empty}
+          ${campaignId ? Prisma.sql`AND e."campaignId" = ${campaignId}` : Prisma.empty}
+          ${workflowId ? Prisma.sql`AND we."workflowId" = ${workflowId}` : Prisma.empty}
+      ) AS live("total", "bounces", "complaints"),
+      ${projectWide ? DeletedEmailCounts.sums(projectId, since) : Prisma.sql`(SELECT 0, 0, 0)`} AS gone("total", "bounces", "complaints")`;
 
     const {total, bounces, complaints} = row ?? {total: 0, bounces: 0, complaints: 0};
     return {

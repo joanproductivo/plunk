@@ -20,6 +20,7 @@ import {isAuthenticated, requireEmailVerified} from '../middleware/auth.js';
 import {AuthService} from '../services/AuthService.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
 import {VERIFICATION_AMOUNT} from '../services/CardVerificationService.js';
+import {DeletedEmailCounts} from '../services/DeletedEmailCounts.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
@@ -797,10 +798,8 @@ export class Users {
 
     // Delete all project data in a transaction
     await prisma.$transaction(async tx => {
-      // Delete all emails
-      await tx.email.deleteMany({
-        where: {projectId: id},
-      });
+      // Delete all emails, still counted in the project's rates (Plunk Lite: DeletedEmailCounts)
+      await DeletedEmailCounts.deleteEmails(tx, id);
 
       // Delete all events
       await tx.event.deleteMany({
@@ -893,10 +892,12 @@ export class Users {
       }
     }
 
-    // Delete the project (cascading deletes will handle related data)
-    await prisma.project.delete({
-      where: {id},
-    });
+    // Delete the project (cascading deletes will handle related data). The counts of its deleted
+    // emails (Plunk Lite) have no relation to it, so they go explicitly.
+    await prisma.$transaction([
+      prisma.plunkLiteDeletedEmailCount.deleteMany({where: {projectId: id}}),
+      prisma.project.delete({where: {id}}),
+    ]);
 
     // Send notification about project deletion
     await NtfyService.notifyProjectDeleted(project.name, id, auth.userId);
