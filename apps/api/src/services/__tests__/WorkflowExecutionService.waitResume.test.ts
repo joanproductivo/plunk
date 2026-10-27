@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {StepExecutionStatus, WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
 import {prisma as servicePrisma} from '../../database/prisma';
+import {EmailService} from '../EmailService';
 import {QueueService} from '../QueueService';
 import {WorkflowExecutionService} from '../WorkflowExecutionService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -185,5 +186,35 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     await createRun();
 
     expect(statusWhenStepWaits).toEqual([WorkflowExecutionStatus.WAITING]);
+  });
+
+  it('never resumes a failed run, by its event or its timeout (Plunk Lite)', async () => {
+    const run = await createRun();
+    await prisma.workflowExecution.update({where: {id: run.executionId}, data: {status: WorkflowExecutionStatus.FAILED}});
+
+    await ship();
+    await run.timeOut();
+
+    expect(await outcome(run)).toEqual({sends: 0, emails: 0});
+    const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
+    expect(status).toBe(WorkflowExecutionStatus.FAILED);
+  });
+
+  it('keeps a run cancelled during its last step cancelled, not COMPLETED (Plunk Lite)', async () => {
+    const run = await createRun();
+    // A workflow's brake cancels the run while its last step sends
+    const send = EmailService.sendWorkflowEmail.bind(EmailService);
+    vi.spyOn(EmailService, 'sendWorkflowEmail').mockImplementationOnce(async (...args) => {
+      await prisma.workflowExecution.update({
+        where: {id: run.executionId},
+        data: {status: WorkflowExecutionStatus.CANCELLED},
+      });
+      return send(...args);
+    });
+
+    await ship();
+
+    const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
+    expect(status).toBe(WorkflowExecutionStatus.CANCELLED);
   });
 });

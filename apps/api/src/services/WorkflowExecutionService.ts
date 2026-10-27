@@ -31,6 +31,11 @@ import {SuppressionService} from './SuppressionService.js';
 // had completed; the step it came from has handled it, so those pass it up untouched.
 const handledFailures = new WeakSet<object>();
 
+// Plunk Lite: runs that never move again -- cancelled (by hand or by a workflow's brake), or failed
+// (by a step, or by the recovery sweep after a restart). An EXITED run is not one of them: Plunk
+// still completes it when its EXIT step has nothing after it.
+const STOPPED_STATUSES: WorkflowExecutionStatus[] = [WorkflowExecutionStatus.CANCELLED, WorkflowExecutionStatus.FAILED];
+
 type StepConfig = Prisma.JsonValue;
 type StepResult = Record<string, unknown>;
 type WorkflowExecutionWithRelations = WorkflowExecution & {contact: Contact; workflow: Workflow};
@@ -137,7 +142,7 @@ export class WorkflowExecutionService {
     if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
       signale.info(`[WORKFLOW] Setting execution ${executionId} from WAITING to RUNNING`);
       if (
-        !(await this.updateUnlessCancelled(executionId, {
+        !(await this.updateUnlessStopped(executionId, {
           status: WorkflowExecutionStatus.RUNNING,
           currentStepId: stepId,
         }))
@@ -335,10 +340,10 @@ export class WorkflowExecutionService {
     }
 
     // Only process if step is still waiting (event might have arrived before timeout)
-    // and the execution was not cancelled
+    // and the execution was not stopped (cancelled, or failed: Plunk Lite)
     if (
       stepExecution.status !== StepExecutionStatus.WAITING ||
-      stepExecution.execution.status === WorkflowExecutionStatus.CANCELLED
+      STOPPED_STATUSES.includes(stepExecution.execution.status)
     ) {
       return;
     }
@@ -379,7 +384,7 @@ export class WorkflowExecutionService {
     if (fallbackTransition) {
       // Follow timeout branch
       if (
-        await this.updateUnlessCancelled(stepExecution.executionId, {
+        await this.updateUnlessStopped(stepExecution.executionId, {
           status: WorkflowExecutionStatus.RUNNING,
           currentStepId: fallbackTransition.toStep.id,
         })
@@ -392,7 +397,7 @@ export class WorkflowExecutionService {
       if (firstTransition?.toStep) {
         const nextStep = firstTransition.toStep;
         if (
-          await this.updateUnlessCancelled(stepExecution.executionId, {
+          await this.updateUnlessStopped(stepExecution.executionId, {
             status: WorkflowExecutionStatus.RUNNING,
             currentStepId: nextStep.id,
           })
@@ -401,9 +406,9 @@ export class WorkflowExecutionService {
         }
       }
     } else {
-      // No transitions, complete workflow
-      await prisma.workflowExecution.update({
-        where: {id: stepExecution.executionId},
+      // No transitions, complete workflow (Plunk Lite: a cancelled or failed run keeps its status)
+      await prisma.workflowExecution.updateMany({
+        where: {id: stepExecution.executionId, status: {notIn: STOPPED_STATUSES}},
         data: {
           status: WorkflowExecutionStatus.COMPLETED,
           completedAt: new Date(),
@@ -432,7 +437,7 @@ export class WorkflowExecutionService {
 
     if (firstTransition) {
       if (
-        await this.updateUnlessCancelled(executionId, {
+        await this.updateUnlessStopped(executionId, {
           status: WorkflowExecutionStatus.RUNNING,
           currentStepId: firstTransition.toStepId,
         })
@@ -469,7 +474,8 @@ export class WorkflowExecutionService {
         status: StepExecutionStatus.WAITING,
         execution: {
           workflow: {projectId},
-          status: {not: WorkflowExecutionStatus.CANCELLED},
+          // Plunk Lite: a cancelled or failed run keeps its wait step WAITING, and never resumes
+          status: {notIn: STOPPED_STATUSES},
           ...(contactId ? {contactId} : {}),
         },
         step: {
@@ -748,7 +754,7 @@ export class WorkflowExecutionService {
     });
 
     // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
-    await this.updateUnlessCancelled(_execution.id, {status: WorkflowExecutionStatus.WAITING});
+    await this.updateUnlessStopped(_execution.id, {status: WorkflowExecutionStatus.WAITING});
 
     // Find next steps to queue
     const transitions = await prisma.workflowTransition.findMany({
@@ -922,7 +928,7 @@ export class WorkflowExecutionService {
         : 'exit_step';
 
     // Mark workflow as exited (a cancelled one stays cancelled, so nothing after this step runs)
-    await this.updateUnlessCancelled(execution.id, {
+    await this.updateUnlessStopped(execution.id, {
       status: WorkflowExecutionStatus.EXITED,
       exitReason: reason || undefined,
       completedAt: new Date(),
@@ -1382,8 +1388,9 @@ export class WorkflowExecutionService {
 
     if (transitions.length === 0) {
       // No more steps, complete the workflow
-      await prisma.workflowExecution.update({
-        where: {id: execution.id},
+      // Plunk Lite: a cancelled or failed run keeps its status
+      await prisma.workflowExecution.updateMany({
+        where: {id: execution.id, status: {notIn: STOPPED_STATUSES}},
         data: {
           status: WorkflowExecutionStatus.COMPLETED,
           completedAt: new Date(),
@@ -1428,8 +1435,9 @@ export class WorkflowExecutionService {
 
     if (!nextStep) {
       // No valid transition found, complete workflow
-      await prisma.workflowExecution.update({
-        where: {id: execution.id},
+      // Plunk Lite: a cancelled or failed run keeps its status
+      await prisma.workflowExecution.updateMany({
+        where: {id: execution.id, status: {notIn: STOPPED_STATUSES}},
         data: {
           status: WorkflowExecutionStatus.COMPLETED,
           completedAt: new Date(),
@@ -1441,7 +1449,7 @@ export class WorkflowExecutionService {
 
     // Update current step and continue execution
     if (
-      !(await this.updateUnlessCancelled(execution.id, {
+      !(await this.updateUnlessStopped(execution.id, {
         currentStepId: nextStep.id,
         status: WorkflowExecutionStatus.RUNNING,
       }))
@@ -1455,21 +1463,21 @@ export class WorkflowExecutionService {
   }
 
   /**
-   * Helper: Update an execution unless it has been cancelled
-   * Returns false for a cancelled (or deleted) execution, so a cancel that lands while a step runs
-   * is never undone by the engine moving on
+   * Helper: Update an execution unless it has been stopped -- cancelled, or (Plunk Lite) failed
+   * Returns false for a stopped (or deleted) execution, so a cancel that lands while a step runs, or
+   * a run the recovery sweep failed, is never undone by the engine moving on
    */
-  private static async updateUnlessCancelled(
+  private static async updateUnlessStopped(
     executionId: string,
     data: Prisma.WorkflowExecutionUncheckedUpdateManyInput,
   ): Promise<boolean> {
     const {count} = await prisma.workflowExecution.updateMany({
-      where: {id: executionId, status: {not: WorkflowExecutionStatus.CANCELLED}},
+      where: {id: executionId, status: {notIn: STOPPED_STATUSES}},
       data,
     });
 
     if (count === 0) {
-      signale.info(`[WORKFLOW] Execution ${executionId} was cancelled or no longer exists, leaving it as it is`);
+      signale.info(`[WORKFLOW] Execution ${executionId} was stopped or no longer exists, leaving it as it is`);
     }
 
     return count > 0;
