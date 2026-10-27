@@ -121,22 +121,44 @@ export const databaseRequestLogger = (req: Request, res: Response, next: NextFun
   next();
 };
 
-/** Plunk Lite: most rows written to api_requests at once; past it, rows are dropped, not queued */
+/**
+ * Plunk Lite: most rows written to api_requests at once; past it, rows are dropped, not queued.
+ * Sign-in requests are always written: they are rate limited on their own, and are the audit trail.
+ */
 const MAX_LOG_WRITES_IN_FLIGHT = 4;
-const DROPPED_WARNING_INTERVAL_MS = 60_000;
+const SKIPPED_WARNING_INTERVAL_MS = 60_000;
 let logWritesInFlight = 0;
-let droppedLogWrites = 0;
-let lastDroppedWarningAt = 0;
+const skipped = {droppedUnderLoad: 0, unauthenticated401s: 0};
+let lastSkippedWarningAt = 0;
 
 /**
  * Plunk Lite: responses not worth a row. SNS notifications that were handled -- two or three per
- * email sent -- and the 401s of made-up keys on the public API, which cost nothing to send in bulk.
+ * email sent -- and the 401s of made-up keys on the public API, which cost nothing to send in bulk;
+ * those are counted in the warning below instead, so someone trying keys still shows in the logs.
  */
 function skipsRow(path: string, statusCode: number, authenticated: boolean): boolean {
   if (path === '/webhooks/sns') {
     return statusCode < 400;
   }
-  return path.startsWith('/v1/') && statusCode === 401 && !authenticated;
+  if (path.startsWith('/v1/') && statusCode === 401 && !authenticated) {
+    skipped.unauthenticated401s++;
+    return true;
+  }
+  return false;
+}
+
+/** Plunk Lite: what was not written, at most once a minute */
+function warnSkipped(res: Response): void {
+  if (Date.now() - lastSkippedWarningAt < SKIPPED_WARNING_INTERVAL_MS) {
+    return;
+  }
+  if (skipped.droppedUnderLoad === 0 && skipped.unauthenticated401s === 0) {
+    return;
+  }
+  lastSkippedWarningAt = Date.now();
+  logger.warn('API requests not written to api_requests', {...skipped}, res);
+  skipped.droppedUnderLoad = 0;
+  skipped.unauthenticated401s = 0;
 }
 
 /**
@@ -157,18 +179,15 @@ async function logRequestToDatabase(
     const duration = Date.now() - startTime;
     const statusCode = res.statusCode;
 
-    if (skipsRow(logger.path(req), statusCode, Boolean(auth))) {
-      return;
-    }
-
+    const path = logger.path(req);
+    const skips = skipsRow(path, statusCode, Boolean(auth));
     // Plunk Lite: under a burst, the log gives way rather than holding database connections
-    if (logWritesInFlight >= MAX_LOG_WRITES_IN_FLIGHT) {
-      droppedLogWrites++;
-      if (Date.now() - lastDroppedWarningAt >= DROPPED_WARNING_INTERVAL_MS) {
-        lastDroppedWarningAt = Date.now();
-        logger.warn('Dropped API request log rows under load', {dropped: droppedLogWrites}, res);
-        droppedLogWrites = 0;
-      }
+    const dropped = !skips && logWritesInFlight >= MAX_LOG_WRITES_IN_FLIGHT && !path.startsWith('/auth/');
+    if (dropped) {
+      skipped.droppedUnderLoad++;
+    }
+    warnSkipped(res);
+    if (skips || dropped) {
       return;
     }
     logWritesInFlight++;
@@ -196,36 +215,40 @@ async function logRequestToDatabase(
     const responseSize = JSON.stringify(responseBody).length;
 
     // Insert into database
-    await prisma.apiRequest.create({
-      data: {
-        id: requestId || crypto.randomUUID(), // Use request ID as primary key
-        method: req.method,
-        // logger.path, not req.path: this runs from the res.json override, i.e.
-        // inside the router, where req.path has been rewritten mount-relative.
-        path: logger.path(req),
-        statusCode,
-        duration,
-        projectId: auth?.projectId || null,
-        userId: auth?.userId || null,
-        authType: auth?.type || null,
-        ip: req.ip || req.socket.remoteAddress || null,
-        userAgent: req.get('user-agent') || null,
-        errorCode: errorCode || null,
-        errorMessage: errorMessage || null,
-        requestSize: requestSize || null,
-        responseSize,
-      },
-    });
+    const row = {
+      id: requestId || crypto.randomUUID(), // Use request ID as primary key
+      method: req.method,
+      // logger.path, not req.path: this runs from the res.json override, i.e.
+      // inside the router, where req.path has been rewritten mount-relative.
+      path: logger.path(req),
+      statusCode,
+      duration,
+      projectId: auth?.projectId || null,
+      userId: auth?.userId || null,
+      authType: auth?.type || null,
+      ip: req.ip || req.socket.remoteAddress || null,
+      userAgent: req.get('user-agent') || null,
+      errorCode: errorCode || null,
+      errorMessage: errorMessage || null,
+      requestSize: requestSize || null,
+      responseSize,
+    };
+    try {
+      await prisma.apiRequest.create({data: row});
+    } catch (error) {
+      // Plunk Lite: a request id a client sent again is taken: the row gets one of the server's
+      // instead, so reusing an id cannot keep a request out of the log
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) {
+        throw error;
+      }
+      await prisma.apiRequest.create({data: {...row, id: crypto.randomUUID()}});
+    }
 
     // Log success for debugging (only in development)
     if (process.env.NODE_ENV === 'development') {
       logger.debug('Request logged to database', {requestId}, res);
     }
   } catch (error) {
-    // Plunk Lite: a request id sent twice by a client is already logged; nothing to report
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      return;
-    }
     // Log the error but don't throw - we don't want logging failures to affect the API
     logger.error('Failed to log request to database', error, {
       path: logger.path(req),

@@ -1,7 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {NextFunction, Request, Response} from 'express';
 import {prisma as appPrisma} from '../../database/prisma.js';
-import {logger} from '../../utils/logger.js';
 import {databaseRequestLogger} from '../requestLogger.js';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -383,7 +382,14 @@ describe('Request Logger Middleware', () => {
 
   describe('Rows not worth writing, and writes under load (Plunk Lite)', () => {
     /** Respond with a status and say whether a row was written */
+    let json: Response['json'];
+    beforeEach(() => {
+      json = res.json!;
+    });
+
     async function logged(path: string, statusCode: number, auth?: object): Promise<boolean> {
+      // A response of its own each time, as Express gives every request
+      res.json = json;
       req.originalUrl = path;
       res.locals = {requestId: crypto.randomUUID(), ...(auth ? {auth} : {})};
       res.statusCode = statusCode;
@@ -411,6 +417,7 @@ describe('Request Logger Middleware', () => {
       );
 
       for (let i = 0; i < 10; i++) {
+        res.json = json;
         res.locals = {requestId: crypto.randomUUID()};
         databaseRequestLogger(req as Request, res as Response, next);
         await res.json!({});
@@ -424,18 +431,41 @@ describe('Request Logger Middleware', () => {
       expect(await logged('/v1/send', 200)).toBe(true);
     });
 
-    it('stays quiet about a request id a client sent twice', async () => {
-      const error = vi.spyOn(logger, 'error');
+    it('logs a request whose id a client sent again, under an id of its own', async () => {
       const id = crypto.randomUUID();
       for (let i = 0; i < 2; i++) {
+        res.json = json;
         res.locals = {requestId: id};
         databaseRequestLogger(req as Request, res as Response, next);
         await res.json!({});
-        await waitForLog(prisma, id);
+        await waitForNoLog();
       }
-      await waitForNoLog();
 
-      expect(error).not.toHaveBeenCalled();
+      expect(await prisma.apiRequest.findUnique({where: {id}})).not.toBeNull();
+      expect(await prisma.apiRequest.count({where: {path: '/v1/send', id: {not: id}}})).toBe(1);
+    });
+
+    it('always writes sign-in requests, even at the cap', async () => {
+      const pending: (() => void)[] = [];
+      const real = appPrisma.apiRequest.create.bind(appPrisma.apiRequest);
+      const create = vi.spyOn(appPrisma.apiRequest, 'create').mockImplementation(((args: never) =>
+        (args as {data: {path: string}}).data.path === '/auth/login'
+          ? real(args)
+          : new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
+
+      for (let i = 0; i < 4; i++) {
+        res.json = json;
+        res.locals = {requestId: crypto.randomUUID()};
+        databaseRequestLogger(req as Request, res as Response, next);
+        await res.json!({});
+      }
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(4));
+      const written = await logged('/auth/login', 401);
+      pending.forEach(settle => settle());
+      await new Promise(resolve => setTimeout(resolve, 20));
+      create.mockRestore();
+
+      expect(written).toBe(true);
     });
   });
 
