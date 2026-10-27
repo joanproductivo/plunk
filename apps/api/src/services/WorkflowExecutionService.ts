@@ -132,9 +132,6 @@ export class WorkflowExecutionService {
 
     signale.info(`[WORKFLOW] Found step: ${step.name} (${step.type})`);
 
-    // Track if this execution was in WAITING state (meaning it's a delayed step)
-    const isResumingFromDelay = initialExecution.status === WorkflowExecutionStatus.WAITING;
-
     // If workflow execution is WAITING (e.g., from a delay), set it back to RUNNING
     let execution = initialExecution;
     if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
@@ -227,29 +224,11 @@ export class WorkflowExecutionService {
       const result = await this.executeStep(step, execution, stepExecution);
       signale.info(`[WORKFLOW] Step ${stepId} executed successfully`);
 
-      // Check if step is in a waiting state (WAIT_FOR_EVENT steps only)
-      // DELAY steps now mark themselves as COMPLETED and queue the next step
-      const updatedStepExecution = await prisma.workflowStepExecution.findUnique({
-        where: {id: stepExecution.id},
-      });
-
-      if (updatedStepExecution?.status === StepExecutionStatus.WAITING) {
-        // Don't mark as completed or process next steps - the step will be resumed later
+      // Plunk Lite: a wait or a delay never moves on from here -- the event, its timeout or the
+      // delay's job does. Reading the state back raced with an event that claimed the wait in
+      // between, and the run moved on twice.
+      if (step.type === 'WAIT_FOR_EVENT' || step.type === 'DELAY') {
         return;
-      }
-
-      // Check if the workflow execution is now in WAITING state (DELAY steps do this)
-      // Only check this if we're NOT resuming from a delay - if we are resuming,
-      // we've already set it to RUNNING and the step just executed
-      if (!isResumingFromDelay) {
-        const updatedExecution = await prisma.workflowExecution.findUnique({
-          where: {id: execution.id},
-        });
-
-        if (updatedExecution?.status === WorkflowExecutionStatus.WAITING) {
-          // Workflow is waiting (DELAY step has queued the next step) - don't process next steps now
-          return;
-        }
       }
 
       // Mark step as completed (for normal steps that complete immediately)
@@ -811,6 +790,17 @@ export class WorkflowExecutionService {
     // Calculate timeout
     const timeoutDate = timeout ? new Date(Date.now() + timeout * 1000) : null;
 
+    // Plunk Lite: the run waits before its step does. The other way round, an event could claim the
+    // step and move the run on before it was marked WAITING, leaving it WAITING for good. A run that
+    // is no longer running (cancelled meanwhile) sets up no wait.
+    const {count} = await prisma.workflowExecution.updateMany({
+      where: {id: _execution.id, status: WorkflowExecutionStatus.RUNNING},
+      data: {status: WorkflowExecutionStatus.WAITING},
+    });
+    if (count === 0) {
+      return {eventName, timeout: timeout || null, waitingUntil: null};
+    }
+
     // Update step execution to waiting
     await prisma.workflowStepExecution.update({
       where: {id: stepExecution.id},
@@ -819,9 +809,6 @@ export class WorkflowExecutionService {
         executeAfter: timeoutDate,
       },
     });
-
-    // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
-    await this.updateUnlessCancelled(_execution.id, {status: WorkflowExecutionStatus.WAITING});
 
     // Queue timeout handler if timeout is specified
     if (timeout && timeout > 0) {

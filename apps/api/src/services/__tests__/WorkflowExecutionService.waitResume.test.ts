@@ -22,8 +22,8 @@ let projectId: string;
 let contactId: string;
 const prisma = getPrismaClient();
 
-/** TRIGGER → WAIT_FOR_EVENT → SEND_EMAIL, started and parked on the wait. */
-async function createRun() {
+/** TRIGGER → WAIT_FOR_EVENT → SEND_EMAIL, started and parked on the wait (unless an event already took it). */
+async function createRun({parked = true} = {}) {
   const workflow = await factories.createWorkflow({projectId});
   const trigger = await prisma.workflowStep.findFirstOrThrow({
     where: {workflowId: workflow.id, type: WorkflowStepType.TRIGGER},
@@ -49,7 +49,9 @@ async function createRun() {
 
   const waitExecution = () =>
     prisma.workflowStepExecution.findFirstOrThrow({where: {executionId: execution.id, stepId: wait.id}});
-  expect((await waitExecution()).status).toBe(StepExecutionStatus.WAITING);
+  if (parked) {
+    expect((await waitExecution()).status).toBe(StepExecutionStatus.WAITING);
+  }
 
   return {
     executionId: execution.id,
@@ -150,5 +152,38 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     expect(await outcome(run)).toEqual(once);
     const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
     expect(status).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+
+  it('moves on once when the event arrives while the wait is being set up (Plunk Lite)', async () => {
+    // The event lands between setting up the wait and the step returning to processStepExecution
+    vi.mocked(QueueService.queueWorkflowTimeout).mockImplementationOnce(async () => {
+      await ship();
+      return {id: 'mock-timeout-job-id'} as never;
+    });
+
+    const run = await createRun({parked: false});
+
+    expect(await outcome(run)).toEqual(once);
+    const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
+    expect(status).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+
+  it('marks the run WAITING before its wait step, so an event cannot strand it (Plunk Lite)', async () => {
+    const statusWhenStepWaits: string[] = [];
+    const update = servicePrisma.workflowStepExecution.update.bind(servicePrisma.workflowStepExecution);
+    vi.spyOn(servicePrisma.workflowStepExecution, 'update').mockImplementation(((args: never) => {
+      const {where, data} = args as {where: {id: string}; data: {status?: string}};
+      if (data.status === StepExecutionStatus.WAITING) {
+        return prisma.workflowStepExecution
+          .findUniqueOrThrow({where, include: {execution: true}})
+          .then(step => statusWhenStepWaits.push(step.execution.status))
+          .then(() => update(args));
+      }
+      return update(args);
+    }) as never);
+
+    await createRun();
+
+    expect(statusWhenStepWaits).toEqual([WorkflowExecutionStatus.WAITING]);
   });
 });
