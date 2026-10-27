@@ -43,7 +43,8 @@ export async function wrapRedis<T>(
       await redis.set(key, 'null', 'EX', missSeconds);
     }
   } catch (error) {
-    signale.warn(`[REDIS] Could not cache ${key}:`, error);
+    // Keys may hold an API key (project:secret:sk_…), which must not reach the logs
+    signale.warn(`[REDIS] Could not cache ${key.replace(/\b(sk|pk)_[\w-]+/g, '$1_…')}:`, error);
   }
 
   return recent;

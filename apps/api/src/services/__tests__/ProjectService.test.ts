@@ -1,6 +1,7 @@
 import {randomBytes} from 'node:crypto';
 
 import type {NextFunction, Request, Response} from 'express';
+import signale from 'signale';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -63,6 +64,17 @@ describe('ProjectService cache', () => {
     vi.spyOn(redis, 'del').mockRejectedValueOnce(new Error('Redis is down'));
 
     await expect(ProjectService.invalidate({id: 'p', secret: 's', public: 'k'})).resolves.toBeUndefined();
+  });
+
+  it('keeps the API key out of the log when it cannot cache it', async () => {
+    vi.spyOn(redis, 'set').mockRejectedValueOnce(new Error('OOM command not allowed'));
+    const warn = vi.spyOn(signale, 'warn');
+    const unknown = newKey('sk');
+
+    await ProjectService.secret(unknown);
+
+    expect(warn).toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(unknown.slice(3));
   });
 
   it('answers even when the cache cannot be written (Redis full)', async () => {
