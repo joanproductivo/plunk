@@ -160,6 +160,11 @@ export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string)
 export const PLUNK_LITE_DISABLE_BOUNCE_PERCENT = parsePercent('PLUNK_LITE_DISABLE_BOUNCE_PERCENT', '8');
 export const PLUNK_LITE_DISABLE_COMPLAINT_PERCENT = parsePercent('PLUNK_LITE_DISABLE_COMPLAINT_PERCENT', '0.4');
 
+// Plunk Lite: whether /v1/track takes the public key (default: on). A form that calls it from the
+// browser exposes the key; with 'off' (or 'false') it answers 403, and contacts come through
+// POST /contacts with a secret key from the form's server instead.
+export const PLUNK_LITE_PUBLIC_TRACK = !['off', 'false'].includes((process.env.PLUNK_LITE_PUBLIC_TRACK ?? '').toLowerCase());
+
 // Plunk Lite: a new contact from /v1/track, /v1/send or POST /contacts needs an address whose domain
 // takes email and is not disposable (default: true). Read on each use, so the suite can switch it.
 export const verifySignupsEnabled = () => process.env.PLUNK_LITE_VERIFY_SIGNUPS !== 'false';

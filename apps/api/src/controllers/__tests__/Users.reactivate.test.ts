@@ -153,7 +153,12 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
   });
 
   it('leaves the project disabled when its grace period cannot be stored', async () => {
-    vi.spyOn(redis, 'set').mockRejectedValueOnce(new Error('Redis down'));
+    // Only the grace period's key: a cache write that fails is not fatal (wrapRedis)
+    const set = redis.set.bind(redis);
+    vi.spyOn(redis, 'set').mockImplementation(((key: string, ...rest: unknown[]) =>
+      key.startsWith('plunk-lite:reactivated:')
+        ? Promise.reject(new Error('Redis down'))
+        : (set as (...args: unknown[]) => Promise<unknown>)(key, ...rest)) as typeof redis.set);
 
     const {error} = await reactivate(userId, projectId);
 

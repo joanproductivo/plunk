@@ -1,4 +1,5 @@
 import {Redis} from 'ioredis';
+import signale from 'signale';
 
 import {REDIS_URL} from '../app/constants.js';
 
@@ -18,8 +19,14 @@ export const TEN_MINUTES_IN_SECONDS = 60 * 10;
  * @param key The key for redis (use Keys#<type>)
  * @param fn The function to return a resource. Can be a promise
  * @param seconds The amount of seconds to hold this resource in redis for. Defaults to 60
+ * @param options.missSeconds Plunk Lite: also remember, for this long, that there was nothing
  */
-export async function wrapRedis<T>(key: string, fn: () => Promise<T>, seconds = REDIS_DEFAULT_EXPIRY): Promise<T> {
+export async function wrapRedis<T>(
+  key: string,
+  fn: () => Promise<T>,
+  seconds = REDIS_DEFAULT_EXPIRY,
+  {missSeconds}: {missSeconds?: number} = {},
+): Promise<T> {
   const cached = await redis.get(key);
   if (cached) {
     return JSON.parse(cached);
@@ -27,8 +34,16 @@ export async function wrapRedis<T>(key: string, fn: () => Promise<T>, seconds = 
 
   const recent = await fn();
 
-  if (recent) {
-    await redis.set(key, JSON.stringify(recent), 'EX', seconds);
+  // Plunk Lite: a cache that cannot be written (Redis full) must not fail the request it serves
+  try {
+    if (recent) {
+      await redis.set(key, JSON.stringify(recent), 'EX', seconds);
+    } else if (recent === null && missSeconds) {
+      // Read back as JSON.parse('null'), that is null, without calling fn
+      await redis.set(key, 'null', 'EX', missSeconds);
+    }
+  } catch (error) {
+    signale.warn(`[REDIS] Could not cache ${key}:`, error);
   }
 
   return recent;
