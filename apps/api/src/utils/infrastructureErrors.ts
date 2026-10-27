@@ -12,9 +12,16 @@ export function isInfrastructureError(error: unknown): boolean {
     return true;
   }
 
-  // P1xxx are connection and server errors; P2024 is a timeout waiting for a pool connection
+  // P1xxx are connection and server errors; P2024 is a timeout waiting for a pool connection,
+  // and P2028 a transaction that could not start or finish in time
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    return error.code.startsWith('P1') || error.code === 'P2024';
+    return error.code.startsWith('P1') || error.code === 'P2024' || error.code === 'P2028';
+  }
+
+  // A connection the database closed under a running query (a Postgres restart) comes back
+  // unclassified
+  if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+    return /connection/i.test(error.message);
   }
 
   const code = (error as {code?: unknown} | null)?.code;
@@ -23,5 +30,7 @@ export function isInfrastructureError(error: unknown): boolean {
   }
 
   // ioredis, once its connection is gone
-  return error instanceof Error && /Connection is closed|MaxRetriesPerRequestError/.test(error.message);
+  return (
+    error instanceof Error && (error.name === 'MaxRetriesPerRequestError' || /Connection is closed/.test(error.message))
+  );
 }

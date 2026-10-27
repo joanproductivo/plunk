@@ -153,10 +153,10 @@ describe('CampaignService - idempotent batches', () => {
 
   it('retries the batch when the database is unreachable, instead of skipping its contacts', async () => {
     const campaign = await sendingCampaign();
-    const outage = Object.assign(new Prisma.PrismaClientKnownRequestError("Can't reach database server", {
+    const outage = new Prisma.PrismaClientKnownRequestError("Can't reach database server", {
       code: 'P1001',
       clientVersion: 'test',
-    }));
+    });
     vi.spyOn(EmailService, 'sendCampaignEmail').mockRejectedValueOnce(outage);
 
     await expect(CampaignService.processBatch(batch(campaign.id, campaign.sentAt!.getTime()))).rejects.toBe(outage);

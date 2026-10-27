@@ -166,18 +166,28 @@ async function fetchSigningCert(certUrl: string): Promise<string> {
   const cached = snsSigningCertCache.get(certUrl);
   if (cached) return cached;
 
+  // Anything that keeps an answer from arriving -- the network, the timeout (which runs from
+  // the request to the last byte of the body), a 5xx -- is unavailable. A 4xx is an answer: the
+  // certificate does not exist, so the signature cannot be valid.
+  const signal = AbortSignal.timeout(5000);
   let response: Response;
   try {
-    response = await fetch(certUrl, {signal: AbortSignal.timeout(5000)});
+    response = await fetch(certUrl, {signal});
   } catch (error) {
     throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
   }
   if (response.status >= 500) {
-    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.statusText}`);
+    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.status}`);
   }
   if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
 
-  const pem = await response.text();
+  let pem: string;
+  try {
+    pem = await response.text();
+  } catch (error) {
+    throw new SigningCertUnavailableError(`Failed to read SNS signing cert: ${String(error)}`);
+  }
+
   snsSigningCertCache.set(certUrl, pem);
   return pem;
 }

@@ -32,6 +32,7 @@ import {
   buildEmailHeaders,
   classifyEmail,
   RECIPIENT_OVERRIDE_HEADER,
+  recipientAddress,
   withSourceEmail,
 } from '../services/EmailHeaderService.js';
 import {EmailService} from '../services/EmailService.js';
@@ -254,7 +255,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       : undefined;
 
   // Check for custom recipient override in headers
-  const recipientEmail = customHeaders?.[RECIPIENT_OVERRIDE_HEADER] || email.contact.email;
+  const recipientEmail = recipientAddress(email.headers, email.contact.email);
 
   // SES accepted this email on an earlier attempt and recording the send failed. The row is
   // still SENDING, so the check below would skip it and leave it without its messageId --

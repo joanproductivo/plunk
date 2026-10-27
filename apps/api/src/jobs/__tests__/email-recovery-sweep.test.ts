@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
 
+import {FailureAlertService} from '../../services/FailureAlertService';
 import {emailQueue, QueueService} from '../../services/QueueService';
 import {sweepStuckEmails} from '../email-recovery-sweep-processor';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -64,23 +65,27 @@ describe('sweepStuckEmails', () => {
     expect(queueEmail).not.toHaveBeenCalled();
   });
 
-  it('queues again a pending email that has no job', async () => {
+  it('fails, never sends, a pending email that has no job', async () => {
+    // A job that is gone may have finished (a database restored from a backup), and a
+    // transactional email the API answered 500 for was usually sent again by its caller
     const email = await stuckEmail(EmailStatus.PENDING, minutesAgo(30));
     const queueEmail = vi.spyOn(QueueService, 'queueEmail');
 
     const result = await sweepStuckEmails(now);
 
-    expect(result.requeued).toBe(1);
-    expect(queueEmail).toHaveBeenCalledWith(email.id, EmailSourceType.CAMPAIGN);
+    expect(result.failed).toBe(1);
+    const row = await prisma.email.findUnique({where: {id: email.id}});
+    expect(row?.status).toBe(EmailStatus.FAILED);
+    expect(row?.error).toBe('Never sent: its job is gone');
+    expect(queueEmail).not.toHaveBeenCalled();
   });
 
   it('does not touch a pending email younger than fifteen minutes', async () => {
-    await stuckEmail(EmailStatus.PENDING, minutesAgo(5));
-    const queueEmail = vi.spyOn(QueueService, 'queueEmail');
+    const email = await stuckEmail(EmailStatus.PENDING, minutesAgo(5));
 
     await sweepStuckEmails(now);
 
-    expect(queueEmail).not.toHaveBeenCalled();
+    expect((await prisma.email.findUnique({where: {id: email.id}}))?.status).toBe(EmailStatus.PENDING);
   });
 
   it('fails a pending email whose job ran out of attempts, and finishes its campaign', async () => {
@@ -110,27 +115,17 @@ describe('sweepStuckEmails', () => {
     expect(queueEmail).not.toHaveBeenCalled();
   });
 
-  it('expires a pending email older than two days instead of sending it', async () => {
-    const email = await stuckEmail(EmailStatus.PENDING, minutesAgo(49 * 60));
-    const queueEmail = vi.spyOn(QueueService, 'queueEmail');
+  it('fails without an alert the stuck email of a disabled project', async () => {
+    const email = await stuckEmail(EmailStatus.PENDING, minutesAgo(30));
+    await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
+    const alert = vi.spyOn(FailureAlertService, 'recordEmail');
 
     await sweepStuckEmails(now);
 
     const row = await prisma.email.findUnique({where: {id: email.id}});
     expect(row?.status).toBe(EmailStatus.FAILED);
-    expect(row?.error).toBe('Expired, never sent');
-    expect(queueEmail).not.toHaveBeenCalled();
-  });
-
-  it('does not queue an email of a disabled project', async () => {
-    const email = await stuckEmail(EmailStatus.PENDING, minutesAgo(30));
-    await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
-    const queueEmail = vi.spyOn(QueueService, 'queueEmail');
-
-    await sweepStuckEmails(now);
-
-    expect((await prisma.email.findUnique({where: {id: email.id}}))?.status).toBe(EmailStatus.FAILED);
-    expect(queueEmail).not.toHaveBeenCalled();
+    expect(row?.error).toBe('Project is disabled');
+    expect(alert).not.toHaveBeenCalled();
   });
 
   it('retries the job of an email SES accepted, so it is recorded rather than resent', async () => {
@@ -144,9 +139,10 @@ describe('sweepStuckEmails', () => {
     expect((await prisma.email.findUnique({where: {id: email.id}}))?.status).toBe(EmailStatus.SENDING);
   });
 
-  it('leaves alone a sending email whose job is still running', async () => {
+  it.each(['active', 'prioritized'])('leaves alone a sending email whose job is %s', async state => {
     const email = await stuckEmail(EmailStatus.SENDING, minutesAgo(30));
-    jobInState('active');
+    // `prioritized`: a retry that records an accepted send, waiting behind a large campaign
+    jobInState(state);
 
     await sweepStuckEmails(now);
 

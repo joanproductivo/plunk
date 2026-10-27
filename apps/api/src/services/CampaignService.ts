@@ -18,8 +18,8 @@ import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 import {renderBody} from '../utils/emailBody.js';
-import type {ListSort} from '../utils/listSort.js';
 import {isInfrastructureError} from '../utils/infrastructureErrors.js';
+import type {ListSort} from '../utils/listSort.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
 import {uuidv5} from '../utils/uuid.js';
 

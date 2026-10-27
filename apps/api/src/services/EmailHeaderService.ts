@@ -11,6 +11,19 @@ import {API_URI} from '../app/constants.js';
 export const RECIPIENT_OVERRIDE_HEADER = 'X-Plunk-Recipient-Override';
 
 /**
+ * The address an email goes to: the custom recipient of a workflow email when its headers carry
+ * one, the contact's address otherwise. The send path addresses the email with it, and the SES
+ * webhook uses it to tell whether a bounce is the contact's.
+ */
+export function recipientAddress(headers: unknown, contactEmail: string): string {
+  const override =
+    headers && typeof headers === 'object' && !Array.isArray(headers)
+      ? (headers as Record<string, unknown>)[RECIPIENT_OVERRIDE_HEADER]
+      : undefined;
+  return typeof override === 'string' && override ? override : contactEmail;
+}
+
+/**
  * Classification of an outbound email, derived by the caller from the email's
  * source type and template/campaign type. This is the single axis that decides
  * which standards-based headers a message carries:

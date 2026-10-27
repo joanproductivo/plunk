@@ -659,7 +659,7 @@ void prisma.$connect().then(async () => {
   // Set up repeatable job for the email recovery sweep (BullMQ)
   // Every 5 minutes: an email left PENDING without a job, or SENDING after its worker stopped,
   // holds its campaign in SENDING until something settles it. A run with nothing stuck costs
-  // two indexed queries returning no rows.
+  // two indexed queries returning no rows; it never sends anything.
   await emailRecoverySweepQueue.add(
     'sweep-stuck-emails',
     {},

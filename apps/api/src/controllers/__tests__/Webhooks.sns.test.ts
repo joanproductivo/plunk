@@ -12,7 +12,7 @@ import {Keys} from '../../services/keys';
 import {NtfyService} from '../../services/NtfyService';
 import {SecurityService} from '../../services/SecurityService';
 import {getAwsAccountId} from '../../services/SESService';
-import {Webhooks} from '../Webhooks';
+import {affectedAddresses, Webhooks} from '../Webhooks';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 // The account the SES credentials belong to, normally looked up through STS
@@ -805,6 +805,8 @@ describe('Webhooks - SES event notifications', () => {
       expect(contact?.subscribed).toBe(true);
       const updated = await prisma.email.findUnique({where: {id: email.id}});
       expect(updated?.status).toBe(EmailStatus.BOUNCED);
+      // Nor is the bounce tracked as the contact's: their workflows and webhooks would read it so
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(0);
     });
 
     it('unsubscribes the contact when the bounced address listed by SES is theirs', async () => {
@@ -834,6 +836,19 @@ describe('Webhooks - SES event notifications', () => {
       expect(updated?.complainedAt).toBeNull();
       expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
       expect(enforce).not.toHaveBeenCalled();
+      const status = await SecurityService.getSecurityStatus(projectId);
+      expect(status.allTime.bounces + status.allTime.complaints).toBe(0);
+    });
+
+    it('tracks a bounce for an address already on the suppression list once, however many copies arrive', async () => {
+      const email = await sentEmail('ses-suppressed-copies');
+      const bounce = notification('Bounce', 'ses-suppressed-copies', {
+        bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'},
+      });
+
+      await Promise.all([post(bounce), post(bounce)]);
+
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
     });
 
     it('counts opens that arrive together', async () => {
@@ -843,6 +858,22 @@ describe('Webhooks - SES event notifications', () => {
       await Promise.all([post(open), post(open), post(open)]);
 
       expect((await prisma.email.findUnique({where: {id: email.id}}))?.opens).toBe(3);
+    });
+  });
+
+  describe('affectedAddresses', () => {
+    it('reads the addresses SES lists, lowercased, with or without a display name', () => {
+      expect(
+        affectedAddresses(
+          'Bounce',
+          {bounce: {bouncedRecipients: [{emailAddress: 'Ana <ANA@Example.com>'}, {emailAddress: ' bo@example.com '}]}},
+          'sent@example.com',
+        ),
+      ).toEqual(['ana@example.com', 'bo@example.com']);
+    });
+
+    it('falls back to the address the email was sent to when SES lists none', () => {
+      expect(affectedAddresses('Complaint', {complaint: {}}, 'Sent@Example.com')).toEqual(['sent@example.com']);
     });
   });
 });
