@@ -242,6 +242,19 @@ describe('deleteUnsentCampaignEmails', () => {
     expect(await prisma.email.findUnique({where: {id: sent.id}})).not.toBeNull();
   });
 
+  it('never deletes a row being sent, which SES may be accepting at that moment', async () => {
+    const sending = await makeEmail();
+    await prisma.email.update({where: {id: sending.id}, data: {status: EmailStatus.SENDING}});
+    await makeEmail();
+
+    const deleted = await deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
+
+    // The row stays, so the revert sees an email that may have departed and keeps the campaign
+    // cancelled instead of letting it be sent again
+    expect(deleted).toBe(1);
+    expect(await prisma.email.findUnique({where: {id: sending.id}})).not.toBeNull();
+  });
+
   it('leaves rows created after the cancellation alone', async () => {
     // The campaign went back to draft and was sent again while this cleanup was still
     // draining. Those rows belong to the new send and deleting them would gut it.

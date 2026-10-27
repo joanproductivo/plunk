@@ -27,30 +27,33 @@ import {
 
 /**
  * Security thresholds for bounce and complaint rates
- * These limits protect AWS SES reputation and prevent account suspension
+ * These limits protect AWS SES reputation and prevent account suspension. The critical ones sit
+ * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate -- so a
+ * project is stopped before SES has to act on the whole account. The dashboard repeats them
+ * (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
  */
 const SECURITY_THRESHOLDS = {
   // Minimum emails required before enforcing rate-based limits (prevents false positives)
   MIN_EMAILS_FOR_ENFORCEMENT: 100,
 
   // Bounce rate thresholds (hard bounces only)
-  BOUNCE_7DAY_WARNING: 5,
-  BOUNCE_7DAY_CRITICAL: 10,
-  BOUNCE_ALLTIME_WARNING: 4,
-  BOUNCE_ALLTIME_CRITICAL: 8,
+  BOUNCE_7DAY_WARNING: 2.5,
+  BOUNCE_7DAY_CRITICAL: 5,
+  BOUNCE_ALLTIME_WARNING: 2,
+  BOUNCE_ALLTIME_CRITICAL: 4,
 
   // Complaint rate thresholds (spam reports)
-  COMPLAINT_7DAY_WARNING: 0.075,
-  COMPLAINT_7DAY_CRITICAL: 0.15,
+  COMPLAINT_7DAY_WARNING: 0.05,
+  COMPLAINT_7DAY_CRITICAL: 0.1,
   COMPLAINT_ALLTIME_WARNING: 0.03,
-  COMPLAINT_ALLTIME_CRITICAL: 0.12,
+  COMPLAINT_ALLTIME_CRITICAL: 0.08,
 
   // Minimum absolute counts (prevents small sample size false positives)
   // Both percentage AND absolute count must be exceeded to trigger rate-based checks
   MIN_BOUNCES_FOR_CRITICAL: 10,
   MIN_BOUNCES_FOR_WARNING: 5,
-  MIN_COMPLAINTS_FOR_CRITICAL: 5,
-  MIN_COMPLAINTS_FOR_WARNING: 3,
+  MIN_COMPLAINTS_FOR_CRITICAL: 3,
+  MIN_COMPLAINTS_FOR_WARNING: 2,
 
   // === Absolute count ceilings (new projects only) ===
   // These trigger regardless of rate — catches new accounts blasting emails
@@ -153,14 +156,38 @@ interface SecurityStatus {
 const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
 const snsSigningCertCache = new Map<string, string>();
 
+/** The outcome of checking an SNS message signature */
+export type SnsSignatureCheck = 'valid' | 'invalid' | 'unavailable';
+
+/** AWS's signing certificate could not be fetched: the network failed, or SNS answered with a 5xx */
+class SigningCertUnavailableError extends Error {}
+
 async function fetchSigningCert(certUrl: string): Promise<string> {
   const cached = snsSigningCertCache.get(certUrl);
   if (cached) return cached;
 
-  const response = await fetch(certUrl);
+  // Anything that keeps an answer from arriving -- the network, the timeout (which runs from
+  // the request to the last byte of the body), a 5xx -- is unavailable. A 4xx is an answer: the
+  // certificate does not exist, so the signature cannot be valid.
+  const signal = AbortSignal.timeout(5000);
+  let response: Response;
+  try {
+    response = await fetch(certUrl, {signal});
+  } catch (error) {
+    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
+  }
+  if (response.status >= 500) {
+    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.status}`);
+  }
   if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
 
-  const pem = await response.text();
+  let pem: string;
+  try {
+    pem = await response.text();
+  } catch (error) {
+    throw new SigningCertUnavailableError(`Failed to read SNS signing cert: ${String(error)}`);
+  }
+
   snsSigningCertCache.set(certUrl, pem);
   return pem;
 }
@@ -215,17 +242,17 @@ export class SecurityService {
   }
 
   /**
-   * Verify an AWS SNS message signature. Returns false if the cert URL is
-   * untrusted, or the signature doesn't match.
+   * Verify an AWS SNS message signature: 'invalid' if the cert URL is untrusted or the
+   * signature doesn't match, 'unavailable' if AWS's certificate could not be fetched.
    */
-  public static async verifySnsSignature(body: Record<string, string>): Promise<boolean> {
+  public static async verifySnsSignature(body: Record<string, string>): Promise<SnsSignatureCheck> {
     try {
       const certUrl = body['SigningCertURL'];
       const signature = body['Signature'];
 
       if (!certUrl || !signature) {
         signale.warn('[SNS] Missing SigningCertURL or Signature');
-        return false;
+        return 'invalid';
       }
 
       let parsedUrl: URL;
@@ -233,12 +260,12 @@ export class SecurityService {
         parsedUrl = new URL(certUrl);
       } catch {
         signale.warn('[SNS] Unparseable SigningCertURL');
-        return false;
+        return 'invalid';
       }
 
       if (parsedUrl.protocol !== 'https:' || !SNS_CERT_HOST_RE.test(parsedUrl.hostname)) {
         signale.warn(`[SNS] Untrusted SigningCertURL host: ${parsedUrl.hostname}`);
-        return false;
+        return 'invalid';
       }
 
       const pem = await fetchSigningCert(certUrl);
@@ -247,10 +274,10 @@ export class SecurityService {
 
       const verifier = crypto.createVerify(algorithm);
       verifier.update(stringToSign, 'utf8');
-      return verifier.verify(pem, signature, 'base64');
+      return verifier.verify(pem, signature, 'base64') ? 'valid' : 'invalid';
     } catch (err) {
       signale.error('[SNS] Signature verification error:', err);
-      return false;
+      return err instanceof SigningCertUnavailableError ? 'unavailable' : 'invalid';
     }
   }
 
@@ -520,6 +547,10 @@ export class SecurityService {
       // Nothing else changes for these emails -- the webhook fires, the activity feed
       // shows the bounce, the contact is still suppressed.
       simulated: false,
+      // Only emails SES was given count, as only those count for AWS: a campaign creates its
+      // rows well ahead of the send, and counting the ones still queued (or never sent) would
+      // understate the rate exactly while a large send is going out
+      sentAt: {not: null},
       ...(startDate && {
         createdAt: {
           gte: startDate,

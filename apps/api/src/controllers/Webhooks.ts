@@ -23,6 +23,7 @@ import {BillingLimitService} from '../services/BillingLimitService.js';
 import {CampaignService} from '../services/CampaignService.js';
 import {CardVerificationService} from '../services/CardVerificationService.js';
 import {ContactService} from '../services/ContactService.js';
+import {recipientAddress} from '../services/EmailHeaderService.js';
 import {EventService} from '../services/EventService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {MeterService} from '../services/MeterService.js';
@@ -89,6 +90,36 @@ export function isAutomaticOpen(open?: {isBotEvent?: unknown} | null, enabled = 
 }
 
 /**
+ * The addresses a bounce or complaint is about, lowercased. SES lists them in
+ * `bouncedRecipients` / `complainedRecipients`; when it does not, the event is about the address
+ * the email was sent to.
+ */
+export function affectedAddresses(
+  eventType: string,
+  body: {bounce?: {bouncedRecipients?: unknown}; complaint?: {complainedRecipients?: unknown}},
+  sentTo: string,
+): string[] {
+  const listed = eventType === 'Complaint' ? body.complaint?.complainedRecipients : body.bounce?.bouncedRecipients;
+  const addresses = Array.isArray(listed)
+    ? (listed as {emailAddress?: unknown}[])
+        .map(recipient => (typeof recipient?.emailAddress === 'string' ? recipient.emailAddress : ''))
+        // An address can come as `Name <address>`
+        .map(address => (address.match(/<([^>]+)>/)?.[1] ?? address).trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+
+  return addresses.length > 0 ? addresses : [sentTo.trim().toLowerCase()];
+}
+
+/**
+ * How long after SES accepted an email an event for it may still find no row. The send path
+ * stamps the messageId right after SES answers and retries the stamp for about four minutes if
+ * the database is down, and the recovery sweep records it after that; until then, a 503 has SNS
+ * deliver the event again instead of losing it.
+ */
+const UNMATCHED_EVENT_RETRY_MS = 30 * 60 * 1000;
+
+/**
  * Webhooks Controller
  * Handles incoming webhooks from external services (AWS SNS/SES)
  */
@@ -104,8 +135,14 @@ export class Webhooks {
   public async receiveSNSWebhook(req: Request, res: Response) {
     try {
       // Verify SNS message signature before processing anything
-      const signatureValid = await SecurityService.verifySnsSignature(req.body as Record<string, string>);
-      if (!signatureValid) {
+      const signature = await SecurityService.verifySnsSignature(req.body as Record<string, string>);
+      if (signature === 'unavailable') {
+        // AWS's signing certificate could not be fetched. Nothing says the message is forged,
+        // so a 5xx has SNS deliver it again rather than losing it.
+        signale.warn('[WEBHOOK] SNS signing certificate unavailable, asking SNS to retry');
+        return res.status(503).json({success: false, message: 'Could not verify SNS signature'});
+      }
+      if (signature === 'invalid') {
         // Error level, not warn: this is indistinguishable from a working install right up
         // until someone notices that no engagement has been recorded for days. Every event
         // for every project drops here, and nothing else in the system counts the misses.
@@ -385,6 +422,16 @@ export class Webhooks {
       });
 
       if (!email) {
+        // An email sent moments ago may not have its messageId stored yet: ask SNS to deliver
+        // the event again. Test sends and alerts have no row at all, and land here too until
+        // the window passes.
+        // A timestamp in the future (a skewed clock) is not trusted beyond a minute
+        const age = Date.now() - Date.parse(body.mail?.timestamp ?? '');
+        if (Number.isFinite(age) && age > -60_000 && age < UNMATCHED_EVENT_RETRY_MS) {
+          signale.warn(`[WEBHOOK] ${eventType} event for unknown messageId ${messageId}, asking SNS to retry`);
+          return res.status(503).json({success: false, error: 'Email not found yet'});
+        }
+
         // Error level for the same reason as a signature failure: an event that matches no
         // email row is silently lost, and SES gives up after its retries. A run of these
         // means the send path is not stamping `messageId`, which is invisible from outside.
@@ -405,22 +452,16 @@ export class Webhooks {
       const updateData: Prisma.EmailUpdateInput = {};
       const eventName = `email.${eventType.toLowerCase()}`;
 
-      // SNS is at-least-once, so the same bounce or complaint notification arrives again
-      // hours or days later. `email` is the row as it stood before this event, so these read
-      // whether the suppression had already been recorded by an earlier delivery. Everything
-      // below that is not idempotent -- the first-seen timestamps, the operator alert, and
-      // the reputation enforcement that can disable a project -- is gated on them.
-      const alreadyBounced = !!email.bouncedAt;
-      const alreadyComplained = !!email.complainedAt;
+      // The first-seen timestamp this event records, if it records one, and whether it counts
+      // toward the rate enforcement checks. Claimed below only if the row does not hold it yet:
+      // SNS is at-least-once, so the same bounce or complaint arrives again -- sometimes several
+      // copies at once -- and only the copy that claims it is the new suppression. Everything
+      // that is not idempotent -- the operator alert, the tracked event and the enforcement that
+      // can disable a project -- runs for that copy alone.
+      let suppression: {field: 'bouncedAt' | 'complainedAt'; enforces: boolean} | undefined;
 
-      // Set by the Bounce branch when the event counts toward the bounce rate. Only a
-      // permanent bounce does: transient bounces are not counted, and an unknown type is
-      // suppressed but deliberately left out of the rate -- see the branch for why.
-      let countsTowardBounceRate = false;
-
-      // Operator notification for a new suppression, sent last: it is not part of recording
-      // the suppression, so a failure to send it must never fail the event.
-      let notify: (() => Promise<void>) | undefined;
+      // Whether this event takes the recipient off the list
+      let unsubscribes = false;
 
       // Base event data with email metadata
       const baseEventData = {
@@ -463,7 +504,9 @@ export class Webhooks {
           if (!email.openedAt) {
             updateData.openedAt = now;
           }
-          updateData.opens = (email.opens || 0) + 1;
+          // Incremented in the database: opens of one email arrive together, and a read-then-write
+          // count lost all but one of them
+          updateData.opens = {increment: 1};
           updateData.status = EmailStatus.OPENED;
           eventData = {
             ...baseEventData,
@@ -480,7 +523,7 @@ export class Webhooks {
           if (!email.clickedAt) {
             updateData.clickedAt = now;
           }
-          updateData.clicks = (email.clicks || 0) + 1;
+          updateData.clicks = {increment: 1};
           updateData.status = EmailStatus.CLICKED;
           eventData = {
             ...baseEventData,
@@ -494,36 +537,9 @@ export class Webhooks {
 
         case 'Bounce': {
           const bounceType = body.bounce?.bounceType;
-          const isPermanentBounce = bounceType === 'Permanent';
-          const isTransientBounce = bounceType === 'Transient';
+          const bounceSubType = body.bounce?.bounceSubType;
 
-          if (isPermanentBounce) {
-            // Hard bounce - counts toward bounce rate and unsubscribes contact
-            signale.warn(`[WEBHOOK] Permanent bounce received for ${email.contact.email} from ${email.project.name}`);
-            updateData.status = EmailStatus.BOUNCED;
-            // The first bounce is the one that happened; a redelivery of that notification
-            // must not move the timestamp forward into a window it does not belong to.
-            updateData.bouncedAt = email.bouncedAt ?? now;
-            countsTowardBounceRate = true;
-            // Unsubscribe contact on permanent bounce. Clearing `snoozedUntil` is what stops
-            // the snooze sweep from resubscribing a hard-bounced address later and mailing it
-            // again. See SNOOZE_CLEARED_ON_WRITE in ContactService.
-            await prisma.contact.update({
-              where: {id: email.contactId},
-              data: {subscribed: false, snoozedUntil: null},
-            });
-            eventData = {
-              ...baseEventData,
-              bounceType,
-              bouncedAt: (email.bouncedAt ?? now).toISOString(),
-            };
-
-            // Send notification about permanent bounce
-            if (!isSimulated && !alreadyBounced) {
-              notify = () =>
-                NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
-            }
-          } else if (isTransientBounce) {
+          if (bounceType === 'Transient') {
             // Soft bounce (e.g., out-of-office, mailbox full) - don't count toward bounce rate
             signale.info(
               `[WEBHOOK] Transient bounce received for ${email.contact.email} from ${email.project.name} (not counted toward bounce rate)`,
@@ -535,55 +551,55 @@ export class Webhooks {
               bounceType,
               transientBounce: true,
             };
-          } else {
-            // Unknown bounce type - treat as permanent to be safe
-            signale.warn(
-              `[WEBHOOK] Unknown bounce type (${bounceType}) received for ${email.contact.email} from ${email.project.name} - treating as permanent`,
-            );
-            updateData.status = EmailStatus.BOUNCED;
-            updateData.bouncedAt = email.bouncedAt ?? now;
-            // Suppressed like a permanent bounce, but deliberately not counted toward the
-            // bounce rate: an unclassifiable bounce is the one case where we are guessing,
-            // and a guess should not be able to disable a project.
-            // Suppress and clear any snooze, exactly as the permanent-bounce branch does.
-            await prisma.contact.update({
-              where: {id: email.contactId},
-              data: {subscribed: false, snoozedUntil: null},
-            });
-            eventData = {
-              ...baseEventData,
-              bounceType,
-              bouncedAt: (email.bouncedAt ?? now).toISOString(),
-            };
-
-            if (!isSimulated && !alreadyBounced) {
-              notify = () =>
-                NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
-            }
+            break;
           }
+
+          // A permanent bounce, or one SES could not classify, which is treated as permanent to
+          // be safe. Both unsubscribe the recipient; clearing `snoozedUntil` is what stops the
+          // snooze sweep from resubscribing a hard-bounced address later and mailing it again
+          // (see SNOOZE_CLEARED_ON_WRITE in ContactService).
+          signale.warn(
+            `[WEBHOOK] ${bounceType === 'Permanent' ? 'Permanent' : `Unknown (${bounceType})`} bounce received for ${email.contact.email} from ${email.project.name}`,
+          );
+          updateData.status = EmailStatus.BOUNCED;
+          unsubscribes = true;
+
+          // An address already on the account's suppression list was never attempted: SES
+          // answers for it with a bounce of this subtype, and leaves it out of its own bounce
+          // rate. It is left out of ours too -- no `bouncedAt` -- or reimporting addresses that
+          // bounced long ago would push the project over its threshold without a single real
+          // bounce. An unknown type does record `bouncedAt`, and so counts toward the rate, but
+          // a guess never triggers enforcement on its own.
+          if (bounceSubType !== 'OnAccountSuppressionList') {
+            suppression = {field: 'bouncedAt', enforces: bounceType === 'Permanent'};
+          }
+
+          eventData = {
+            ...baseEventData,
+            bounceType,
+            bounceSubType,
+            ...(suppression && {bouncedAt: (email.bouncedAt ?? now).toISOString()}),
+          };
           break;
         }
 
         case 'Complaint':
           signale.warn(`[WEBHOOK] Complaint received for ${email.contact.email} from ${email.project.name}`);
           updateData.status = EmailStatus.COMPLAINED;
-          // As with bounces, keep the timestamp of the complaint that actually arrived.
-          updateData.complainedAt = email.complainedAt ?? now;
-          // Unsubscribe contact on complaint. `snoozedUntil` is cleared so the snooze sweep
-          // can never resubscribe someone who reported this mail as spam.
-          await prisma.contact.update({
-            where: {id: email.contactId},
-            data: {subscribed: false, snoozedUntil: null},
-          });
+          // Unsubscribe on complaint. `snoozedUntil` is cleared so the snooze sweep can never
+          // resubscribe someone who reported this mail as spam.
+          unsubscribes = true;
+
+          // As with bounces, a complaint SES reports for an address already on the account's
+          // suppression list is left out of the rate
+          if (body.complaint?.complaintSubType !== 'OnAccountSuppressionList') {
+            suppression = {field: 'complainedAt', enforces: true};
+          }
+
           eventData = {
             ...baseEventData,
-            complainedAt: (email.complainedAt ?? now).toISOString(),
+            ...(suppression && {complainedAt: (email.complainedAt ?? now).toISOString()}),
           };
-
-          // Send notification about complaint
-          if (!isSimulated && !alreadyComplained) {
-            notify = () => NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
-          }
           break;
 
         default:
@@ -591,34 +607,78 @@ export class Webhooks {
           return res.status(200).json({success: true});
       }
 
-      // Update email with new status and timestamps.
-      //
-      // `status` is dropped from the update when it would walk backwards over a
-      // suppression. SES publishes through SNS, which does not guarantee ordering, so the
-      // ordinary sequence "opened, then reported as spam" reaches this handler the other
-      // way round often enough to matter -- one complaint in five, measured. Applying the
-      // Open blindly left the row reading `OPENED` with `complainedAt` set, and anything
-      // that selects complaints by status then silently missed it.
-      await prisma.email.update({
-        where: {id: email.id},
-        // `undefined` leaves the column alone, which is what nextStatus returns when the
-        // event would downgrade a suppression.
-        data: {...updateData, status: nextStatus(email.status, updateData.status as EmailStatus | undefined)},
-      });
+      // The addresses a bounce or complaint is about. The contact is only unsubscribed -- and
+      // the event only tracked against them -- when one of them is theirs: a workflow email sent
+      // to a custom recipient bounces for that recipient, not the contact, and that address is
+      // kept off future sends by the account's suppression list.
+      const affected = unsubscribes
+        ? affectedAddresses(eventType, body, recipientAddress(email.headers, email.contact.email))
+        : [];
+      const contactIsAffected = affected.includes(email.contact.email.toLowerCase());
 
-      // Check security limits only when this event is a suppression the project has not been
-      // charged for yet. Transient bounces never count. Neither does a redelivered
-      // notification: the rates are computed by counting `bouncedAt`/`complainedAt` rows, so a
-      // second copy of an old event leaves every number exactly where it was. Re-running
-      // enforcement on one could only re-disable a project over history it has already been
-      // judged against -- which is what happened to projects that were manually re-enabled.
-      //
-      // Runs before anything below, which may fail without failing the event. Up to the
-      // email update above, a failure answers 500 and SNS delivers the notification again;
-      // this check logs its own failures rather than throwing.
-      const isNewSuppression =
-        (countsTowardBounceRate && !alreadyBounced) || (eventType === 'Complaint' && !alreadyComplained);
-      if (isNewSuppression && !isSimulated) {
+      // `status` is dropped from the update when it would walk backwards over a suppression. SES
+      // publishes through SNS, which does not guarantee ordering, so the ordinary sequence
+      // "opened, then reported as spam" reaches this handler the other way round often enough
+      // to matter -- one complaint in five, measured. Applying the Open blindly left the row
+      // reading `OPENED` with `complainedAt` set, and anything that selects complaints by status
+      // then silently missed it. `undefined` leaves the column alone.
+      const status = nextStatus(email.status, updateData.status as EmailStatus | undefined);
+
+      // Whether this copy of the event is the one that records it. SNS is at-least-once, so the
+      // same bounce or complaint arrives again -- sometimes several copies at once -- and only
+      // the copy that claims it may alert, enforce or start workflows. Other events are new
+      // every time.
+      let isNew = true;
+
+      if (unsubscribes) {
+        // Everything that records a bounce or complaint, written together: if any of it fails,
+        // none of it is written, SNS delivers the notification again, and the redelivery is new
+        // again. Other events are a single update and do not hold a transaction open.
+        await prisma.$transaction(
+          async tx => {
+            if (contactIsAffected) {
+              await tx.contact.update({
+                where: {id: email.contactId},
+                data: {subscribed: false, snoozedUntil: null},
+              });
+            }
+
+            // Claimed by its first-seen timestamp, or -- for an address already on the
+            // suppression list, which records none -- by moving the email to its status
+            const claimed = suppression
+              ? await tx.email.updateMany({
+                  where: {id: email.id, [suppression.field]: null},
+                  data: {[suppression.field]: now},
+                })
+              : await tx.email.updateMany({
+                  // Never over a bounce or complaint already recorded, which this would downgrade
+                  where: {id: email.id, status: {notIn: [EmailStatus.BOUNCED, EmailStatus.COMPLAINED]}},
+                  data: {status: updateData.status as EmailStatus},
+                });
+            isNew = claimed.count === 1;
+
+            await tx.email.update({where: {id: email.id}, data: {...updateData, status}});
+          },
+          // A burst of events can queue for a connection; the default two-second wait would
+          // answer 500 and lean on SNS's retries
+          {maxWait: 10_000, timeout: 10_000},
+        );
+      } else {
+        await prisma.email.update({where: {id: email.id}, data: {...updateData, status}});
+      }
+
+      // A copy of a bounce or complaint that is already recorded: the suppression stands, and
+      // nothing that follows may run a second time
+      if (!isNew) {
+        signale.info(`[WEBHOOK] ${eventType} for email ${email.id} already recorded, ignoring the copy`);
+        return res.status(200).json({success: true});
+      }
+
+      // Check security limits only for a suppression the project has not been charged for
+      // yet. Re-running enforcement on a copy could only re-disable a project over history it
+      // has already been judged against -- which is what happened to projects that were
+      // manually re-enabled. The check logs its own failures rather than throwing.
+      if (suppression?.enforces && !isSimulated) {
         // Only one metric moved, so only that metric's thresholds may disable the project.
         // One notification is one event type, so it can never be both.
         await SecurityService.checkAndEnforceSecurityLimits(
@@ -626,6 +686,23 @@ export class Webhooks {
           eventType === 'Complaint' ? 'complaint' : 'bounce',
         );
       }
+
+      // Operator notification for a new suppression, naming the address it is about, sent
+      // last: it is not part of recording the suppression, so a failure to send it must never
+      // fail the event
+      const address = affected[0] ?? email.contact.email;
+      const notify =
+        suppression && !isSimulated
+          ? eventType === 'Complaint'
+            ? () => NtfyService.notifyEmailComplaint(email.project.name, email.projectId, address)
+            : () =>
+                NtfyService.notifyEmailBounce(
+                  email.project.name,
+                  email.projectId,
+                  address,
+                  String(body.bounce?.bounceType),
+                )
+          : undefined;
 
       // The suppression is recorded. What follows is answered with 200 even when it fails:
       // a redelivery would record the event again and start the workflows listening for it a
@@ -642,8 +719,12 @@ export class Webhooks {
           await CampaignService.markStatsDirty(email.campaignId);
         }
 
-        // Track event (this will trigger workflows)
-        await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
+        // Track event (this will trigger workflows). Not for a bounce or complaint of an
+        // address that is not the contact's: their workflows, segments and webhooks would read
+        // it as the contact's own.
+        if (!unsubscribes || contactIsAffected) {
+          await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
+        }
       } catch (error) {
         signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but tracking the event failed:`, error);
       }

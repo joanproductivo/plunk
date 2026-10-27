@@ -60,6 +60,7 @@ import {
   emailBodyCleanupQueue,
   idempotencyKeyCleanupQueue,
   segmentCountQueue,
+  emailRecoverySweepQueue,
   snoozeSweepQueue,
 } from './services/QueueService.js';
 import * as S3Service from './services/S3Service.js';
@@ -654,4 +655,21 @@ void prisma.$connect().then(async () => {
   );
 
   signale.info('[BACKGROUND-JOB] Snooze sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
+
+  // Set up repeatable job for the email recovery sweep (BullMQ)
+  // Every 5 minutes: an email left PENDING without a job, or SENDING after its worker stopped,
+  // holds its campaign in SENDING until something settles it. A run with nothing stuck costs
+  // two indexed queries returning no rows; it never sends anything.
+  await emailRecoverySweepQueue.add(
+    'sweep-stuck-emails',
+    {},
+    {
+      repeat: {
+        pattern: '*/5 * * * *', // Every 5 minutes
+      },
+      jobId: 'email-recovery-sweep-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Email recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
 });

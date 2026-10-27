@@ -9,6 +9,7 @@ import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {HttpException} from '../exceptions/index.js';
 import {CampaignService} from '../services/CampaignService.js';
 import {scheduledQueue} from '../services/QueueService.js';
 
@@ -55,8 +56,17 @@ export function createScheduledCampaignWorker() {
         return;
       }
 
-      // Start sending the campaign
-      await CampaignService.startSending(campaign.projectId, campaignId);
+      // Start sending the campaign, only from SCHEDULED: a schedule cancelled back to a draft
+      // between the check above and this call stays a draft, and is not a failure to retry
+      try {
+        await CampaignService.startSending(campaign.projectId, campaignId, undefined, [CampaignStatus.SCHEDULED]);
+      } catch (error) {
+        if (error instanceof HttpException && error.code === 400) {
+          signale.warn(`[SCHEDULED-PROCESSOR] Campaign ${campaignId} left SCHEDULED before it fired, skipping`);
+          return;
+        }
+        throw error;
+      }
 
       signale.info(`[SCHEDULED-PROCESSOR] Started sending campaign ${campaignId}`);
     },

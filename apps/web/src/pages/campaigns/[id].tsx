@@ -120,14 +120,14 @@ const SUPPORTING_FIGURES: SupportingFigure[] = [
     label: 'Bounced',
     count: s => s.bouncedCount,
     rate: s => s.bounceRate,
-    adverse: {warnRate: 5, minCount: 5},
+    adverse: {warnRate: 2.5, minCount: 5},
     drillDown: 'bounced',
   },
   {
     label: 'Spam reports',
     count: s => s.complainedCount,
     rate: s => s.complaintRate,
-    adverse: {warnRate: 0.075, minCount: 3},
+    adverse: {warnRate: 0.05, minCount: 2},
     drillDown: 'complained',
   },
   // No enforcement threshold applies to unsubscribes, so this one never turns red: it is

@@ -47,6 +47,15 @@ export interface EmailBodyCleanupJobData {
 }
 
 /**
+ * Job data for recovering emails left PENDING without a job or stuck in SENDING
+ * Used by: emailRecoverySweepQueue worker
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface EmailRecoverySweepJobData {
+  // Empty - sweeps the oldest stuck emails of every project
+}
+
+/**
  * Job data for resubscribing contacts whose snooze has run out
  * Used by: snoozeSweepQueue worker
  */

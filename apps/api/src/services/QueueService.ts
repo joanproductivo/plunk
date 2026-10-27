@@ -15,6 +15,7 @@ import type {
   DomainVerificationJobData,
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
+  EmailRecoverySweepJobData,
   IdempotencyKeyCleanupJobData,
   MeterEventJobData,
   ScheduledCampaignJobData,
@@ -63,7 +64,9 @@ export const emailQueue = new Queue<SendEmailJobData>('email', {
 export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Exponential from 5s: about ten minutes of retries, so a database outage does not end
+    // the batch chain and leave the campaign half sent. A batch is safe to run again.
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 5000,
@@ -251,6 +254,24 @@ export const campaignStatsSweepQueue = new Queue<CampaignStatsSweepJobData>('cam
 });
 
 export const cardVerificationSweepQueue = new Queue<CardVerificationSweepJobData>('card-verification-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+/**
+ * Recovers emails nothing will move on its own: PENDING with no job, or SENDING after the run
+ * that claimed them stopped. Retries are safe: every change is conditional on the state the
+ * sweep found.
+ */
+export const emailRecoverySweepQueue = new Queue<EmailRecoverySweepJobData>('email-recovery-sweep', {
   connection: redisConnection,
   defaultJobOptions: {
     attempts: 2,

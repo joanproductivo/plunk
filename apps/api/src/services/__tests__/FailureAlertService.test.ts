@@ -253,8 +253,8 @@ describe('FailureAlertService', () => {
 
   describe('conditions', () => {
     const warning = (bounces: number) =>
-      `7-day bounce rate (${(bounces / 2).toFixed(2)}%, ${bounces} bounces) exceeds warning threshold (5%, 5 minimum)`;
-    const complaint = 'All-time complaint rate (0.050%, 4 complaints) exceeds warning threshold (0.03%, 3 minimum)';
+      `7-day bounce rate (${(bounces / 2).toFixed(2)}%, ${bounces} bounces) exceeds warning threshold (2.5%, 5 minimum)`;
+    const complaint = 'All-time complaint rate (0.050%, 4 complaints) exceeds warning threshold (0.03%, 2 minimum)';
     const reputation = () => prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'security:warning'}});
 
     it('alerts on the sending reputation as needing attention, not as a failure', async () => {

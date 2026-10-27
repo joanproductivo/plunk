@@ -23,6 +23,7 @@ import {createSnoozeSweepWorker} from './snooze-sweep-processor.js';
 import {createCardVerificationSweepWorker} from './card-verification-sweep-processor.js';
 import {createDomainVerificationWorker} from './domain-verification-processor.js';
 import {createEmailBodyCleanupWorker} from './email-body-cleanup-processor.js';
+import {createEmailRecoverySweepWorker} from './email-recovery-sweep-processor.js';
 import {createEmailWorker} from './email-processor.js';
 import {createImportWorker} from './import-processor.js';
 import {createMeterWorker} from './meter-processor.js';
@@ -121,6 +122,11 @@ async function startWorkers() {
     const cardVerificationSweepWorker = createCardVerificationSweepWorker();
     workers.push({name: 'card-verification-sweep', worker: cardVerificationSweepWorker});
     signale.success('[WORKER] Card verification sweep worker started');
+
+    // Start email recovery sweep worker
+    const emailRecoverySweepWorker = createEmailRecoverySweepWorker();
+    workers.push({name: 'email-recovery-sweep', worker: emailRecoverySweepWorker});
+    signale.success('[WORKER] Email recovery sweep worker started');
 
     // Start segment membership events worker
     const segmentMembershipEventsWorker = createSegmentMembershipEventsWorker();
