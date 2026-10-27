@@ -146,49 +146,49 @@ export class WorkflowExecutionService {
 
     signale.info(`[WORKFLOW] Found step: ${step.name} (${step.type})`);
 
+    // Plunk Lite: each step runs once per run (the graph has no cycles). A repeated job -- a retry
+    // after a restart in the middle of a chain -- finds what this run already did here and carries
+    // on from it, without doing it again: a condition keeps its branch, an email is not resent.
+    const previous = await prisma.workflowStepExecution.findFirst({
+      where: {executionId, stepId, status: {in: [StepExecutionStatus.COMPLETED, StepExecutionStatus.WAITING]}},
+      orderBy: {createdAt: 'desc'},
+      select: {status: true, output: true},
+    });
+    if (previous) {
+      // A copy of a job for a run that has since moved on and waits further along
+      if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
+        return;
+      }
+      // A wait already set up, or a delay whose end is queued: the run waits there
+      if (previous.status === StepExecutionStatus.WAITING || step.type === 'DELAY') {
+        await prisma.workflowExecution.updateMany({
+          where: {id: executionId, status: WorkflowExecutionStatus.RUNNING},
+          data: {status: WorkflowExecutionStatus.WAITING, currentStepId: stepId},
+        });
+        return;
+      }
+      // A wait its event or timeout already claimed: whoever claimed it moves the run on
+      if (step.type === 'WAIT_FOR_EVENT') {
+        return;
+      }
+      await this.processNextSteps(initialExecution, step, this.storedResult(previous.output));
+      return;
+    }
+
     // If workflow execution is WAITING (e.g., from a delay), set it back to RUNNING
     let execution = initialExecution;
     if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
       signale.info(`[WORKFLOW] Setting execution ${executionId} from WAITING to RUNNING`);
-      if (
-        !(await this.updateUnlessStopped(executionId, {
-          status: WorkflowExecutionStatus.RUNNING,
-          currentStepId: stepId,
-        }))
-      ) {
+      // Plunk Lite: only one caller resumes a waiting run -- a cancel, or another copy of this job,
+      // leaves it alone
+      const {count} = await prisma.workflowExecution.updateMany({
+        where: {id: executionId, status: WorkflowExecutionStatus.WAITING},
+        data: {status: WorkflowExecutionStatus.RUNNING, currentStepId: stepId},
+      });
+      if (count === 0) {
         return;
       }
-
-      // Re-fetch the execution with the updated status
-      const updatedExecution = await prisma.workflowExecution.findUnique({
-        where: {id: executionId},
-        include: {
-          workflow: {
-            include: {
-              steps: {
-                include: {
-                  template: true,
-                  outgoingTransitions: {
-                    orderBy: {priority: 'asc'},
-                    include: {toStep: true},
-                  },
-                },
-              },
-              project: {
-                select: {disabled: true, id: true, name: true},
-              },
-            },
-          },
-          contact: true,
-        },
-      });
-
-      if (!updatedExecution) {
-        signale.error(`[WORKFLOW] Execution ${executionId} not found after status update`);
-        throw new HttpException(404, 'Workflow execution not found');
-      }
-
-      execution = updatedExecution;
+      execution = {...initialExecution, status: WorkflowExecutionStatus.RUNNING, currentStepId: stepId};
 
       signale.info(`[WORKFLOW] Execution ${executionId} status updated to RUNNING`);
     }
@@ -245,15 +245,19 @@ export class WorkflowExecutionService {
         return;
       }
 
-      // Mark step as completed (for normal steps that complete immediately)
-      await prisma.workflowStepExecution.update({
-        where: {id: stepExecution.id},
+      // Mark step as completed (for normal steps that complete immediately). Plunk Lite: only once --
+      // another copy of this job that completed it first moves the run on, not this one
+      const {count: completed} = await prisma.workflowStepExecution.updateMany({
+        where: {id: stepExecution.id, status: StepExecutionStatus.RUNNING},
         data: {
           status: StepExecutionStatus.COMPLETED,
           completedAt: new Date(),
           output: result ? toPrismaJson(result) : undefined,
         },
       });
+      if (completed === 0) {
+        return;
+      }
       stepCompleted = true;
 
       // Determine next step(s) based on transitions and conditions
@@ -675,6 +679,21 @@ export class WorkflowExecutionService {
 
     // Get contact data for variable substitution
     const contact = execution.contact;
+
+    // Determine recipient email
+    // Schema validation ensures customEmail exists when type is CUSTOM
+    const recipientEmail = recipientConfig.type === 'CUSTOM' ? recipientConfig.customEmail! : contact.email;
+
+    // Plunk Lite: a repeated run of this step (a job retried after the send) finds the email it
+    // already queued -- or the failed one of an unsubscribed contact -- and does not send another
+    const sent = await prisma.email.findFirst({
+      where: {workflowStepExecutionId: stepExecution.id},
+      select: {id: true, createdAt: true},
+    });
+    if (sent) {
+      return {emailId: sent.id, sentAt: sent.createdAt, recipientType: recipientConfig.type, recipientEmail, repeated: true};
+    }
+
     const contactData =
       contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
         ? (contact.data as Record<string, unknown>)
@@ -700,10 +719,6 @@ export class WorkflowExecutionService {
 
     const renderedSubject = this.renderTemplate(step.template.subject, variables);
     const renderedBody = this.renderTemplate(step.template.body, variables);
-
-    // Determine recipient email
-    // Schema validation ensures customEmail exists when type is CUSTOM
-    const recipientEmail = recipientConfig.type === 'CUSTOM' ? recipientConfig.customEmail! : contact.email;
 
     // Send email via EmailService
     const email = await EmailService.sendWorkflowEmail({
@@ -1467,6 +1482,13 @@ export class WorkflowExecutionService {
     // Process the next step
     // All steps are processed immediately - DELAY and WAIT_FOR_EVENT will pause the workflow internally
     await this.processStepExecution(execution.id, nextStep.id);
+  }
+
+  /**
+   * Plunk Lite: what a step stored as its output, to carry on from it without running it again
+   */
+  private static storedResult(output: Prisma.JsonValue): StepResult {
+    return output && typeof output === 'object' && !Array.isArray(output) ? (output as StepResult) : {};
   }
 
   /**
