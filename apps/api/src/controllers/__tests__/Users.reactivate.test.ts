@@ -8,6 +8,7 @@ import {CampaignStatus, EmailSourceType, EmailStatus, Role} from '@plunk/db';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {redis} from '../../database/redis';
 import {HttpException} from '../../exceptions/index';
+import {ContactService} from '../../services/ContactService';
 import {Keys} from '../../services/keys';
 import {ProjectService} from '../../services/ProjectService';
 import {ReputationPolicy} from '../../services/ReputationPolicy';
@@ -146,10 +147,10 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
 
   describe('the grace period', () => {
     /** 300 emails sent, 30 of them bounced (10%, past disabling), created at `createdAt` */
-    async function bounced(createdAt: Date) {
+    async function bounced(createdAt: Date, {total = 300, bounces = 30} = {}) {
       const contact = await factories.createContact({projectId});
       await prisma.email.createMany({
-        data: Array.from({length: 300}, (_, i) => ({
+        data: Array.from({length: total}, (_, i) => ({
           projectId,
           contactId: contact.id,
           subject: 'Hi',
@@ -159,9 +160,10 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
           status: EmailStatus.SENT,
           sentAt: createdAt,
           createdAt,
-          bouncedAt: i < 30 ? createdAt : null,
+          bouncedAt: i < bounces ? createdAt : null,
         })),
       });
+      return contact;
     }
 
     it('keeps the bounces from before the reactivation from disabling the project again', async () => {
@@ -174,6 +176,21 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
       const verdict = await ReputationPolicy.disableByMetric(projectId);
       expect(verdict.bounce).toBe(true);
       expect(verdict.violations[0]).toMatch(/^Since reactivation, bounce rate \(10\.00%, 30 of 300 emails\)/);
+    });
+
+    it('does not count again the bounces deleted in the hour of the reactivation', async () => {
+      // Disabled for them, their contacts deleted, then reactivated, all in the same hour: the
+      // deleted emails are counted by that hour
+      const contact = await bounced(new Date());
+      await ContactService.bulkDelete(projectId, [contact.id]);
+      await reactivate(userId, projectId);
+
+      await bounced(new Date(Date.now() + 1000), {total: 10, bounces: 1});
+
+      expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+      // The 7 days still count them
+      await redis.del(graceKey());
+      expect((await ReputationPolicy.disableByMetric(projectId)).sevenDay).toMatchObject({total: 310, bounces: 31});
     });
 
     it('counts the whole 7 days again once it is lost', async () => {

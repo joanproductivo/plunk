@@ -24,7 +24,7 @@ import type {SecurityMetric} from './SecurityService.js';
  *
  * A project disabled for its reputation can be reactivated from the dashboard. For the next 7 days
  * only the emails it sends from then on count towards disabling it again, or the bounces that
- * disabled it would do so at once.
+ * disabled it would do so at once -- deleted ones included, which are counted by the hour.
  */
 
 export interface RateData {
@@ -39,6 +39,11 @@ export interface RateData {
 export interface RateFilter {
   projectId: string;
   since?: Date;
+  /**
+   * The deleted emails count only from the hour after `since` (DeletedEmailCounts.sums): for a
+   * window that starts at a reactivation
+   */
+  deletedFromNextHour?: boolean;
   campaignId?: string;
   workflowId?: string;
 }
@@ -78,7 +83,13 @@ export class ReputationPolicy {
    * A project's rates also count its deleted emails (DeletedEmailCounts), as AWS still does; the
    * rates of one campaign or workflow, for its brake, only count the emails it still has.
    */
-  public static async rates({projectId, since, campaignId, workflowId}: RateFilter): Promise<RateData> {
+  public static async rates({
+    projectId,
+    since,
+    deletedFromNextHour,
+    campaignId,
+    workflowId,
+  }: RateFilter): Promise<RateData> {
     const projectWide = !campaignId && !workflowId;
     const [row] = await prisma.$queryRaw<{total: number; bounces: number; complaints: number}[]>`
       SELECT live."total" + gone."total" AS "total",
@@ -94,7 +105,7 @@ export class ReputationPolicy {
           ${campaignId ? Prisma.sql`AND e."campaignId" = ${campaignId}` : Prisma.empty}
           ${workflowId ? Prisma.sql`AND we."workflowId" = ${workflowId}` : Prisma.empty}
       ) AS live("total", "bounces", "complaints"),
-      ${projectWide ? DeletedEmailCounts.sums(projectId, since) : Prisma.sql`(SELECT 0, 0, 0)`} AS gone("total", "bounces", "complaints")`;
+      ${projectWide ? DeletedEmailCounts.sums(projectId, since, {fromNextHour: deletedFromNextHour}) : Prisma.sql`(SELECT 0, 0, 0)`} AS gone("total", "bounces", "complaints")`;
 
     const {total, bounces, complaints} = row ?? {total: 0, bounces: 0, complaints: 0};
     return {
@@ -114,8 +125,11 @@ export class ReputationPolicy {
     const reactivatedAt = await this.reactivatedAt(projectId);
     const weekAgo = new Date(Date.now() - SEVEN_DAYS_MS);
     const since = reactivatedAt && reactivatedAt > weekAgo ? reactivatedAt : weekAgo;
-    const window = since === weekAgo ? '7-day' : 'Since reactivation,';
-    const sevenDay = await this.rates({projectId, since});
+    const sinceReactivation = since !== weekAgo;
+    const window = sinceReactivation ? 'Since reactivation,' : '7-day';
+    // The emails deleted in the hour of the reactivation are counted by that hour, with the bounces
+    // that disabled the project: they are left out with it
+    const sevenDay = await this.rates({projectId, since, deletedFromNextHour: sinceReactivation});
     const enough = sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS;
     const bounce =
       enough &&

@@ -59,13 +59,22 @@ export const DeletedEmailCounts = {
    * The deleted emails of a project a rate adds, created since a date or ever, as a subquery of
    * three int columns like RATE_COUNTS. They are counted by the hour, so the hour `since` falls in
    * counts whole: up to an hour more than the window, never less.
+   *
+   * With `fromNextHour`, that hour is left out instead, and with it any email from before `since`:
+   * up to an hour less than the window, never more. For a window that starts at a reactivation,
+   * whose bounces deleted in the same hour must not count again.
    */
-  sums(projectId: string, since?: Date): Prisma.Sql {
+  sums(projectId: string, since?: Date, {fromNextHour = false}: {fromNextHour?: boolean} = {}): Prisma.Sql {
+    const from = since
+      ? fromNextHour
+        ? Prisma.sql`AND d."hour" >= date_trunc('hour', ${utcTimestamp(since)}) + interval '1 hour'`
+        : Prisma.sql`AND d."hour" >= date_trunc('hour', ${utcTimestamp(since)})`
+      : Prisma.empty;
     return Prisma.sql`(
       SELECT coalesce(sum(d."sent"), 0)::int, coalesce(sum(d."bounced"), 0)::int, coalesce(sum(d."complained"), 0)::int
       FROM "plunk_lite_deleted_email_counts" d
       WHERE d."projectId" = ${projectId}
-        ${since ? Prisma.sql`AND d."hour" >= date_trunc('hour', ${utcTimestamp(since)})` : Prisma.empty}
+        ${from}
     )`;
   },
 };

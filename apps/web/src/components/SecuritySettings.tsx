@@ -72,8 +72,8 @@ export function SecuritySettings({metrics, isLoading}: SecuritySettingsProps) {
                 {reactivatable ? (
                   <div className="space-y-3">
                     <p>
-                      This project was disabled for its bounce or complaint rate. Remove the addresses that bounced or
-                      complained, then reactivate it.
+                      This project was disabled for its bounce or complaint rate. The addresses that bounced or
+                      complained are already suppressed: check where they came from, then reactivate it.
                     </p>
                     <ReactivateProjectButton />
                   </div>

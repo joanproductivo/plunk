@@ -65,7 +65,7 @@ const DISABLED_COPY: Record<string, {body: string; action: string; href: string}
     href: '/settings?tab=billing',
   },
   EMAIL_REPUTATION: {
-    body: 'Your bounce or complaint rate got too high. Remove the addresses that bounced or complained, then reactivate the project.',
+    body: 'Your bounce or complaint rate got too high. Those addresses are already suppressed: check where they came from, then reactivate the project.',
     action: 'Review deliverability',
     href: '/settings?tab=security',
   },
