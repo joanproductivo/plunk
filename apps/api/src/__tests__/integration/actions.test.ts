@@ -306,6 +306,13 @@ describe('Actions API Integration Tests', () => {
         expect(track({}, 'x'.repeat(100)).success).toBe(true);
         expect(track({}, 'x'.repeat(101)).success).toBe(false);
         expect(track({}, 'sign\nup').success).toBe(false);
+        expect(track({}, 'sign\u0000up').success).toBe(false);
+      });
+
+      it('refuses the character \\u0000, which Postgres cannot store, in values and keys', () => {
+        expect(track({note: 'a\u0000b'}).success).toBe(false);
+        expect(track({['a\u0000b']: 1}).success).toBe(false);
+        expect(send({deep: {note: 'a\u0000b'}}).success).toBe(false);
       });
 
       it('takes at most 50 recipients in one send', () => {

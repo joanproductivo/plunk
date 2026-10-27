@@ -30,8 +30,9 @@ const RECEIVED_STATUSES = new Set<EmailStatus>([
   EmailStatus.COMPLAINED,
 ]);
 
-/** Plunk Lite: most custom fields a contact can hold (see mergeContactData) */
+/** Plunk Lite: most custom fields a contact can hold, and their largest size as JSON (see mergeContactData) */
 export const CONTACT_FIELDS_MAX = 200;
+export const CONTACT_DATA_MAX_BYTES = 64 * 1024;
 
 export class ContactService {
   /**
@@ -280,14 +281,22 @@ export class ContactService {
       merged[key] = value;
     }
 
-    // Plunk Lite: a cap on custom fields, which only refuses a change that grows a contact past
-    // it, so one already over the cap can still be updated
+    // Plunk Lite: caps on custom fields, in number and in size, which only refuse a change that
+    // grows a contact past them, so one already over a cap can still be updated
     const before = Object.keys(base).length;
     const after = Object.keys(merged).length;
     if (after > CONTACT_FIELDS_MAX && after > before) {
       throw new HttpException(
         400,
         `A contact can hold at most ${CONTACT_FIELDS_MAX} custom fields`,
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    const bytesAfter = Buffer.byteLength(JSON.stringify(merged));
+    if (bytesAfter > CONTACT_DATA_MAX_BYTES && bytesAfter > Buffer.byteLength(JSON.stringify(base))) {
+      throw new HttpException(
+        400,
+        `A contact's custom fields can take at most ${CONTACT_DATA_MAX_BYTES / 1024} KB`,
         ErrorCode.VALIDATION_ERROR,
       );
     }
@@ -503,7 +512,7 @@ export class ContactService {
     const suggestion = verdict.suggestedEmail ? ` Did you mean ${verdict.suggestedEmail}?` : '';
     throw new HttpException(
       422,
-      `${email} cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,
+      `This address cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,
       ErrorCode.INVALID_EMAIL,
       {reasons: verdict.reasons, ...(verdict.suggestedEmail ? {suggestedEmail: verdict.suggestedEmail} : {})},
     );

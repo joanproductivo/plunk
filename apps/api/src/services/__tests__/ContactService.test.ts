@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {prisma as appPrisma} from '../../database/prisma';
 import {CONTACT_FIELDS_MAX, ContactService} from '../ContactService';
+import {SuppressionService} from '../SuppressionService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 describe('ContactService - Duplicate Prevention & Data Merging', () => {
@@ -324,6 +325,18 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
       expect(await prisma.contact.count({where: {projectId, email: 'race@example.com'}})).toBe(1);
     });
 
+    it('keeps the subscription the other request set when the address is suppressed', async () => {
+      // The concurrent request created it subscribed, before the address was suppressed
+      await prisma.contact.create({data: {projectId, email: 'kept@example.com', subscribed: true}});
+      await SuppressionService.record(appPrisma, projectId, ['kept@example.com'], 'BOUNCE', null);
+      vi.spyOn(appPrisma.contact, 'findFirst').mockResolvedValueOnce(null);
+
+      // An event that says nothing about the subscription: the retry must not unsubscribe it
+      const contact = await ContactService.upsert(projectId, 'kept@example.com', {plan: 'pro'});
+
+      expect(contact.subscribed).toBe(true);
+    });
+
     it('leaves one contact when two requests create the same address at once', async () => {
       await Promise.all([
         ContactService.upsert(projectId, 'twice@example.com', {name: 'Ana'}),
@@ -354,6 +367,17 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
 
       expect((changed.data as Record<string, unknown>).field0).toBe('changed');
       expect(Object.keys(swapped.data as Record<string, unknown>)).toHaveLength(CONTACT_FIELDS_MAX);
+    });
+
+    it('refuses custom fields that grow past 64 KB, and lets a contact already over it shrink', async () => {
+      const big = 'x'.repeat(40 * 1024);
+      const contact = await ContactService.upsert(projectId, 'large@example.com', {notes: big});
+
+      await expect(ContactService.upsert(projectId, 'large@example.com', {more: big})).rejects.toMatchObject({
+        code: 400,
+      });
+      const smaller = await ContactService.update(projectId, contact.id, {data: {notes: 'short'}});
+      expect((smaller.data as Record<string, unknown>).notes).toBe('short');
     });
 
     it('lets a contact already over the cap be updated without growing', async () => {

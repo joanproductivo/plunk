@@ -33,7 +33,16 @@ export function boundedJson(maxBytes: number, maxDepth: number) {
       const stack: [unknown, number][] = [[value, 0]];
       for (let item = stack.pop(); item; item = stack.pop()) {
         const [node, depth] = item;
+        // Postgres cannot store \u0000 in text or JSON: a 422 here rather than a 500 on writing it
+        if (typeof node === 'string' && node.includes('\u0000')) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data cannot contain the character \\u0000'});
+          return;
+        }
         if (node === null || typeof node !== 'object') continue;
+        if (Object.keys(node).some(key => key.includes('\u0000'))) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data cannot contain the character \\u0000'});
+          return;
+        }
         if (depth >= maxDepth) {
           ctx.addIssue({code: z.ZodIssueCode.custom, message: `data is nested deeper than ${maxDepth} levels`});
           return;
@@ -558,7 +567,8 @@ export const ActionSchemas = {
       .string()
       .min(1)
       .max(EVENT_NAME_MAX)
-      .regex(/^[^\r\n\t]+$/, 'Event name contains invalid characters'),
+      // No control characters: line breaks would split logs, and Postgres cannot store \u0000
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'Event name contains invalid characters'),
     email,
     subscribed: z.boolean().optional(),
     data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
