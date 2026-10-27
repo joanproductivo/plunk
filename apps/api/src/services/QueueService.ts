@@ -64,7 +64,9 @@ export const emailQueue = new Queue<SendEmailJobData>('email', {
 export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Exponential from 5s: about ten minutes of retries, so a database outage does not end
+    // the batch chain and leave the campaign half sent. A batch is safe to run again.
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 5000,

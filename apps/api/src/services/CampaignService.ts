@@ -19,6 +19,7 @@ import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 import {renderBody} from '../utils/emailBody.js';
 import type {ListSort} from '../utils/listSort.js';
+import {isInfrastructureError} from '../utils/infrastructureErrors.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
 import {uuidv5} from '../utils/uuid.js';
 
@@ -26,6 +27,7 @@ import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
 import {buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SegmentService} from './SegmentService.js';
@@ -593,7 +595,14 @@ export class CampaignService {
    * Start sending campaign (called immediately or when scheduled time arrives)
    * Now uses cursor-based pagination for better performance with large recipient lists
    */
-  public static async startSending(projectId: string, campaignId: string, recipientCount?: number): Promise<void> {
+  public static async startSending(
+    projectId: string,
+    campaignId: string,
+    recipientCount?: number,
+    // The statuses a send may start from. The scheduled send passes only SCHEDULED, so a
+    // campaign whose schedule was cancelled back to a draft as it fired does not go out.
+    from: CampaignStatus[] = [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED],
+  ): Promise<void> {
     const campaign = await this.get(projectId, campaignId);
 
     // Another request started this send first -- see the transition below
@@ -603,7 +612,7 @@ export class CampaignService {
     }
 
     // Validate status
-    if (campaign.status !== CampaignStatus.DRAFT && campaign.status !== CampaignStatus.SCHEDULED) {
+    if (!from.includes(campaign.status)) {
       throw new HttpException(400, 'Campaign cannot be sent in its current status');
     }
 
@@ -618,7 +627,7 @@ export class CampaignService {
     // emails with different ids.
     const sentAt = new Date();
     const started = await prisma.campaign.updateMany({
-      where: {id: campaignId, status: {in: [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED]}},
+      where: {id: campaignId, status: {in: from}},
       data: {
         status: CampaignStatus.SENDING,
         totalRecipients: recipientCount,
@@ -742,8 +751,19 @@ export class CampaignService {
           isTransactional: campaign.type === TemplateType.TRANSACTIONAL,
         });
       } catch (error) {
+        // A database or Redis outage would fail every contact after this one too, and they
+        // would be skipped for good. BullMQ retries the batch instead, which finds the emails
+        // it already created by their ids.
+        if (isInfrastructureError(error)) {
+          throw error;
+        }
+
+        // Anything else is about this contact (a billing limit, its data): skip it, and say so
         signale.error(`[CAMPAIGN] Failed to queue email for contact ${contact.id}:`, error);
-        // Continue with other contacts even if one fails
+        await FailureAlertService.recordCampaignJob(
+          campaignId,
+          `Could not queue the email to ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 

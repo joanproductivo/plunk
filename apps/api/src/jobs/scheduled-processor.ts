@@ -56,7 +56,8 @@ export function createScheduledCampaignWorker() {
       }
 
       // Start sending the campaign
-      await CampaignService.startSending(campaign.projectId, campaignId);
+      // Only from SCHEDULED: a schedule cancelled back to a draft as this fired stays a draft
+      await CampaignService.startSending(campaign.projectId, campaignId, undefined, [CampaignStatus.SCHEDULED]);
 
       signale.info(`[SCHEDULED-PROCESSOR] Started sending campaign ${campaignId}`);
     },

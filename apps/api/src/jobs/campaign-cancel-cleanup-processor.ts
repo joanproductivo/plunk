@@ -59,6 +59,7 @@ export async function deleteUnsentCampaignEmails(
         SELECT "id" FROM "emails"
         WHERE "campaignId" = ${campaignId}
           AND "sentAt" IS NULL
+          AND "status" <> 'SENDING'
           AND "createdAt" <= ${cutoff}
         LIMIT ${BATCH_SIZE}
       )

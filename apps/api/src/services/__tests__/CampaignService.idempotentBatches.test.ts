@@ -1,8 +1,9 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {CampaignAudienceType, CampaignStatus, EmailStatus} from '@plunk/db';
+import {CampaignAudienceType, CampaignStatus, EmailStatus, Prisma} from '@plunk/db';
 
 import {CampaignService} from '../CampaignService';
 import {EmailService} from '../EmailService';
+import {FailureAlertService} from '../FailureAlertService';
 import {campaignQueue, QueueService} from '../QueueService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -148,5 +149,39 @@ describe('CampaignService - idempotent batches', () => {
     const after = await prisma.campaign.findUnique({where: {id: campaign.id}});
     expect(after?.status).toBe(CampaignStatus.SENDING);
     expect(after?.totalRecipients).toBe(3);
+  });
+
+  it('retries the batch when the database is unreachable, instead of skipping its contacts', async () => {
+    const campaign = await sendingCampaign();
+    const outage = Object.assign(new Prisma.PrismaClientKnownRequestError("Can't reach database server", {
+      code: 'P1001',
+      clientVersion: 'test',
+    }));
+    vi.spyOn(EmailService, 'sendCampaignEmail').mockRejectedValueOnce(outage);
+
+    await expect(CampaignService.processBatch(batch(campaign.id, campaign.sentAt!.getTime()))).rejects.toBe(outage);
+  });
+
+  it('skips a contact whose email cannot be queued for a reason of its own, and says so', async () => {
+    const campaign = await sendingCampaign();
+    vi.spyOn(EmailService, 'sendCampaignEmail').mockRejectedValueOnce(new Error('Billing limit exceeded'));
+    const alert = vi.spyOn(FailureAlertService, 'recordCampaignJob').mockResolvedValue();
+
+    await CampaignService.processBatch(batch(campaign.id, campaign.sentAt!.getTime()));
+
+    expect(await prisma.email.count({where: {campaignId: campaign.id}})).toBe(2);
+    expect(alert).toHaveBeenCalledWith(campaign.id, expect.stringContaining('Billing limit exceeded'));
+  });
+
+  it('does not let a scheduled send start a campaign that went back to a draft', async () => {
+    const campaign = await factories.createCampaign({projectId, audienceType: CampaignAudienceType.ALL});
+    const queueBatch = vi.spyOn(QueueService, 'queueCampaignBatch');
+
+    await expect(
+      CampaignService.startSending(projectId, campaign.id, undefined, [CampaignStatus.SCHEDULED]),
+    ).rejects.toThrow();
+
+    expect(queueBatch).not.toHaveBeenCalled();
+    expect((await prisma.campaign.findUnique({where: {id: campaign.id}}))?.status).toBe(CampaignStatus.DRAFT);
   });
 });
