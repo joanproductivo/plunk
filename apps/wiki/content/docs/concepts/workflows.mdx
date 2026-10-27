@@ -74,18 +74,25 @@ Each execution carries a `context` JSON object that's merged with the contact's 
 
 ## When something fails
 
-The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow, campaign or domain, one for transactional emails, one for the project being disabled, and one each for sending reputation warnings and critical ones. What it shows:
+The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow, campaign or domain, one for transactional emails, and one for each condition below. Failures:
 
 - an execution that fails in a step, for example a webhook to an address Plunk refuses to call. A webhook that answers with an error status does not fail the execution: its step records the status and the workflow carries on;
-- an email of a workflow, a campaign or an API call that SES does not accept. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
-- a campaign batch, or a workflow job, that runs out of attempts;
-- the project being disabled;
-- bounce or complaint rates past a warning threshold, or past a critical one when `AUTO_PROJECT_DISABLE` is off. With it on, a critical rate disables the project and the banner shows that instead. The rates are checked on every bounce and complaint, and some cover all the project's emails, so they can stay past a threshold for a long time: once an alert about some conditions goes out, they show up again after a day, and a new condition at once;
-- a domain that SES stops verifying, for example because its DNS records were removed. Emails from it fail until they are back.
+- an email of a workflow, a campaign or an API call that SES does not accept, or that SES rejects afterwards for its content. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
+- a campaign batch, or a workflow job, that runs out of attempts.
+
+Conditions that need attention:
+
+- **A campaign or workflow stopped for its bounces or complaints.** After a burst of bounces or complaints, Plunk checks the campaigns and workflows they came from, once for the whole burst (about ten seconds after the first one). A campaign still sending is cancelled once it has 100 emails sent and reaches 5% bounces (with at least 10) or 0.1% complaints (with at least 3); to send it again, duplicate it, and the copy goes to its whole audience. A workflow is disabled when its emails of the last day, at least 50, reach the same rates; its runs that have not sent an email yet are cancelled, with the emails they had queued. If you enable it again, only the emails it sends from then on count.
+- **Sending reputation.** The project's bounce and complaint rates past a warning threshold, or past a critical one. These only alert: once an alert about some conditions goes out, they show up again after a day, and a new condition at once.
+- **The project disabled.** With `AUTO_PROJECT_DISABLE` on, a project is disabled, as a last resort, only past `PLUNK_LITE_DISABLE_BOUNCE_PERCENT` of bounces in 7 days (8% by default, with at least 25 bounces in 200 emails) or `PLUNK_LITE_DISABLE_COMPLAINT_PERCENT` of complaints (0.4%, with at least 5 complaints). The addresses that bounced or complained are already suppressed. An owner or admin can reactivate it from the banner or **Settings → Security**; for the next 7 days only the emails sent from then on count towards disabling it again. The reactivation is shown too.
+- **The reputation check could not run**, so nothing would stop the project if its rates were too high.
+- **A domain that SES stops verifying**, for example because its DNS records were removed. Emails from it fail until they are back.
+- **SES events**: bounces or complaints that match no email (the address is still suppressed), notifications that cannot be read, the webhook's subscription to the events topic removed, events that stop arriving for the emails SES accepted, and configuration sets that do not publish them.
+- **The AWS account's CloudWatch alarms**, in every project, disabled ones included, until the alarm is back to OK. They show only in the banner: AWS emails them itself.
 
 Marking a source reviewed closes what the banner showed. If it fails again, it shows up again, counting from one, and its alert email goes out again.
 
-In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. If the sender's domain stops being verified, alerts go from the same name on the project's oldest other verified domain; with none, only the banner shows them, and a test alert always uses the address you saved. A disabled project sends no alerts.
+In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. If the sender's domain stops being verified, alerts go from the same name on the project's oldest other verified domain; with none, only the banner shows them, and a test alert always uses the address you saved. A disabled project still sends the alerts about its suspension, its sending reputation, the campaigns and workflows stopped, and SES events; nothing else, and no test alert.
 
 ## Locking active workflows
 
