@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {prisma as appPrisma} from '../../database/prisma';
+import {QueueService} from '../QueueService';
 import {CONTACT_FIELDS_MAX, ContactService} from '../ContactService';
 import {SuppressionService} from '../SuppressionService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -625,6 +626,16 @@ describe('ContactService - Duplicate Prevention & Data Merging', () => {
 
   describe('Bulk Contact Operations', () => {
     describe('bulkSubscribe', () => {
+      it('queues the contact.subscribed events of the change instead of firing them inline (Plunk Lite)', async () => {
+        const queued = vi.spyOn(QueueService, 'queueContactSubscriptionEvents').mockResolvedValue({id: 'job'} as never);
+        const contact = await factories.createContact({projectId, subscribed: false});
+
+        await ContactService.bulkSubscribe(projectId, [contact.id]);
+
+        expect(queued).toHaveBeenCalledWith({projectId, eventName: 'contact.subscribed', contactIds: [contact.id]});
+        expect(await prisma.event.count({where: {projectId, name: 'contact.subscribed'}})).toBe(0);
+      });
+
       it('should subscribe multiple unsubscribed contacts', async () => {
         const contact1 = await factories.createContact({projectId, subscribed: false});
         const contact2 = await factories.createContact({projectId, subscribed: false});

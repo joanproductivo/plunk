@@ -9,9 +9,6 @@ import {HttpException} from '../exceptions/index.js';
 import {EventService} from './EventService.js';
 import {QueueService} from './QueueService.js';
 
-/** How long a background change waits for the events queue before carrying on without it */
-const QUEUE_WAIT_MS = 3000;
-
 /**
  * How a static segment membership change behaves:
  * - `await`: entry/exit events, and the workflows they start, run before returning
@@ -195,33 +192,16 @@ export class SegmentMembershipService {
     }
 
     // The membership is already written, so a queue that cannot take the job must not fail the
-    // caller: a retried request would write the change again and, re-entering, queue it again.
-    // With Redis down `add` waits instead of failing; it still completes once Redis is back.
-    const settled = QueueService.queueSegmentMembershipEvents({
-      projectId,
-      segmentId: segment.id,
-      segmentName: segment.name,
-      kind,
-      contactIds,
-    }).then(
-      () => true,
-      error => {
-        signale.error(`[SEGMENT] Failed to queue ${kind} events for segment ${segment.id}:`, error);
-        return true;
-      },
-    );
-
-    let timer: NodeJS.Timeout | undefined;
-    const done = await Promise.race([
-      settled,
-      new Promise<false>(resolve => {
-        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+    // caller: a retried request would write the change again and, re-entering, queue it again
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueSegmentMembershipEvents({
+        projectId,
+        segmentId: segment.id,
+        segmentName: segment.name,
+        kind,
+        contactIds,
       }),
-    ]);
-    clearTimeout(timer);
-
-    if (!done) {
-      signale.warn(`[SEGMENT] Queueing ${kind} events for segment ${segment.id} is taking long; not waiting for it`);
-    }
+      `${kind} events for segment ${segment.id}`,
+    );
   }
 }

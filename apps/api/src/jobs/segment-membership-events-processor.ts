@@ -1,10 +1,15 @@
 /**
  * Segment Membership Events Worker
- * Fires the entry/exit events of static segment membership changes made over HTTP
+ * Fires the entry/exit events of static segment membership changes made over HTTP, and (Plunk
+ * Lite) the subscription events of bulk subscription changes, in one ordered queue
  */
 
 import {segmentEventName} from '@plunk/shared';
-import type {SegmentMembershipEventsJobData} from '@plunk/types';
+import type {
+  ContactSubscriptionEventsJobData,
+  MembershipEventsJobData,
+  SegmentMembershipEventsJobData,
+} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
@@ -23,8 +28,20 @@ import {segmentMembershipEventsQueue} from '../services/QueueService.js';
  * The events keep the name the segment had when the change was made. A segment deleted, or no
  * longer tracking membership, by the time the job runs fires nothing.
  */
-export async function processSegmentMembershipEvents(job: Job<SegmentMembershipEventsJobData>): Promise<void> {
-  const {projectId, segmentId, segmentName, kind, contactIds} = job.data;
+export async function processSegmentMembershipEvents(job: Job<MembershipEventsJobData>): Promise<void> {
+  const start = typeof job.progress === 'number' ? job.progress : 0;
+
+  // Plunk Lite: the events of a bulk subscription change, with the same progress
+  if (job.data.type === 'contact-subscription') {
+    const {projectId, eventName, contactIds} = job.data as ContactSubscriptionEventsJobData;
+    await EventService.trackEventsSequentially(projectId, eventName, contactIds.slice(start), undefined, {
+      onTracked: async done => job.updateProgress(start + done),
+    });
+    return;
+  }
+
+  // A segment's, also the ones queued before the queue carried a type
+  const {projectId, segmentId, segmentName, kind, contactIds} = job.data as SegmentMembershipEventsJobData;
 
   const segment = await prisma.segment.findFirst({
     where: {id: segmentId, projectId},
@@ -34,8 +51,6 @@ export async function processSegmentMembershipEvents(job: Job<SegmentMembershipE
     signale.info(`[SEGMENT-EVENTS-WORKER] Segment ${segmentId} is gone or no longer tracked; skipping ${kind} events`);
     return;
   }
-
-  const start = typeof job.progress === 'number' ? job.progress : 0;
 
   await EventService.trackEventsSequentially(
     projectId,
@@ -50,9 +65,9 @@ export async function processSegmentMembershipEvents(job: Job<SegmentMembershipE
  * Create and export the segment membership events worker
  */
 export function createSegmentMembershipEventsWorker(): Worker {
-  const worker = new Worker<SegmentMembershipEventsJobData>(
+  const worker = new Worker<MembershipEventsJobData>(
     segmentMembershipEventsQueue.name,
-    async (job: Job<SegmentMembershipEventsJobData>) => {
+    async (job: Job<MembershipEventsJobData>) => {
       await processSegmentMembershipEvents(job);
     },
     {

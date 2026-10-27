@@ -12,12 +12,14 @@ import type {
   CardVerificationJobData,
   CardVerificationSweepJobData,
   ContactImportJobData,
+  ContactSubscriptionEventsJobData,
   DomainVerificationJobData,
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
   EmailRecoverySweepJobData,
   EventTrackingJobData,
   IdempotencyKeyCleanupJobData,
+  MembershipEventsJobData,
   MeterEventJobData,
   PlunkLiteChecksJobData,
   ScheduledCampaignJobData,
@@ -32,6 +34,9 @@ import type {
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {parseRedisUrl} from '../utils/redis.js';
+
+/** How long a change that is already written waits for a queue before carrying on without it */
+const QUEUE_WAIT_MS = 3000;
 
 /**
  * Queue Configuration
@@ -307,10 +312,11 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
 });
 
 /**
- * Static segment entry/exit events fired outside the request that changed the membership.
+ * Static segment entry/exit events fired outside the request that changed the membership, and
+ * (Plunk Lite) the subscription events of bulk subscription changes.
  * Retries are safe: the worker records how far it got and resumes from there.
  */
-export const segmentMembershipEventsQueue = new Queue<SegmentMembershipEventsJobData>('segment-membership-events', {
+export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('segment-membership-events', {
   connection: redisConnection,
   defaultJobOptions: {
     attempts: 3,
@@ -681,10 +687,54 @@ export class QueueService {
    */
   public static async queueSegmentMembershipEvents(
     data: SegmentMembershipEventsJobData,
-  ): Promise<Job<SegmentMembershipEventsJobData>> {
+  ): Promise<Job<MembershipEventsJobData>> {
     return segmentMembershipEventsQueue.add('track-segment-membership-events', data, {
       jobId: `segment-events-${crypto.randomUUID()}`,
     });
+  }
+
+  /**
+   * Plunk Lite: queue the contact.subscribed / contact.unsubscribed events of a bulk subscription
+   * change, in the same ordered queue, so they run with progress and retries instead of in a loop
+   * nobody waits for
+   */
+  public static async queueContactSubscriptionEvents(
+    data: Omit<ContactSubscriptionEventsJobData, 'type'>,
+  ): Promise<Job<MembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add(
+      'track-contact-subscription-events',
+      {type: 'contact-subscription', ...data},
+      {jobId: `contact-events-${crypto.randomUUID()}`},
+    );
+  }
+
+  /**
+   * Queue the job of a change that is already written, without letting the queue fail the caller
+   * or hold it up: a retried request would write the change again. With Redis down `add` waits
+   * instead of failing; it still completes once Redis is back, but the caller carries on after
+   * QUEUE_WAIT_MS. A job the queue refuses is logged and lost.
+   */
+  public static async queueWithoutWaiting(add: Promise<unknown>, what: string): Promise<void> {
+    const settled = add.then(
+      () => true,
+      error => {
+        signale.error(`[QUEUE] Failed to queue ${what}:`, error);
+        return true;
+      },
+    );
+
+    let timer: NodeJS.Timeout | undefined;
+    const done = await Promise.race([
+      settled,
+      new Promise<false>(resolve => {
+        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    if (!done) {
+      signale.warn(`[QUEUE] Queueing ${what} is taking long; not waiting for it`);
+    }
   }
 
   /**

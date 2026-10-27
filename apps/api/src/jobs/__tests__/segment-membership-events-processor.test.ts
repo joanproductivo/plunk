@@ -1,4 +1,4 @@
-import type {SegmentEventKind, SegmentMembershipEventsJobData} from '@plunk/types';
+import type {ContactSubscriptionEventsJobData, SegmentEventKind, SegmentMembershipEventsJobData} from '@plunk/types';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {createMockJob, factories, getPrismaClient} from '../../../../../test/helpers';
 import {processSegmentMembershipEvents} from '../segment-membership-events-processor.js';
@@ -89,4 +89,35 @@ describe('processSegmentMembershipEvents', () => {
     expect(await events('segment.workshop.entry')).toEqual([contact.id]);
     expect(job.updateProgress).toHaveBeenLastCalledWith(2);
   });
+
+  describe('the events of a bulk subscription change (Plunk Lite)', () => {
+    function subscriptionJob(contactIds: string[], progress = 0) {
+      const job = createMockJob<ContactSubscriptionEventsJobData>({
+        type: 'contact-subscription',
+        projectId,
+        eventName: 'contact.subscribed',
+        contactIds,
+      });
+      return Object.assign(job, {progress});
+    }
+
+    it('tracks the event for each contact, with progress', async () => {
+      const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+      const job = subscriptionJob(ids);
+
+      await processSegmentMembershipEvents(job);
+
+      expect(await events('contact.subscribed')).toEqual([...ids].sort());
+      expect(job.updateProgress).toHaveBeenLastCalledWith(3);
+    });
+
+    it('resumes after the contacts a previous run already handled', async () => {
+      const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+
+      await processSegmentMembershipEvents(subscriptionJob(ids, 2));
+
+      expect(await events('contact.subscribed')).toEqual([ids[2]]);
+    });
+  });
 });
+
