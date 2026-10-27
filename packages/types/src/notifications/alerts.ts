@@ -13,8 +13,8 @@ export interface FailureAlert {
   id: string;
   /**
    * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
-   * `security:critical`, `domain:<id>` or `sns:<what>` for conditions (see `isFailureNotice` in
-   * `@plunk/shared`)
+   * `security:critical`, `domain:<id>`, `sns:<what>` or `aws:alarm:<name>` for conditions (see
+   * `isFailureNotice` in `@plunk/shared`)
    */
   sourceKey: string;
   label: string;

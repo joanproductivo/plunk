@@ -20,6 +20,7 @@ import {
 } from '../app/constants.js';
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
+import {AwsAlarmService} from '../services/AwsAlarmService.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
 import {CampaignService} from '../services/CampaignService.js';
 import {CardVerificationService} from '../services/CardVerificationService.js';
@@ -232,6 +233,12 @@ export class Webhooks {
       if (body === undefined) {
         await reportUnreadable('the message is not JSON');
         return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
+
+      // The account's CloudWatch alarms come through the same webhook
+      if (AwsAlarmService.isAlarm(body, req.body.TopicArn)) {
+        await AwsAlarmService.handle(body);
+        return res.status(200).json({success: true});
       }
 
       const notification = readSesNotification(body);

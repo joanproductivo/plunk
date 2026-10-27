@@ -677,11 +677,11 @@ export const ALERT_RECIPIENTS_MAX = 10;
 /** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
 export const FAILURE_ALERTS_OPEN_MAX = 20;
 
-const NOTICE_PREFIXES = ['security:', 'domain:', 'sns:'];
+const NOTICE_PREFIXES = ['security:', 'domain:', 'sns:', 'aws:'];
 
 /**
- * Alert sources that report a condition rather than a failure: sending reputation, domains and the
- * SES event pipeline (Plunk Lite)
+ * Alert sources that report a condition rather than a failure: sending reputation, domains, the
+ * SES event pipeline and the AWS account's alarms (Plunk Lite)
  */
 export const isFailureNotice = (sourceKey: string) => NOTICE_PREFIXES.some(prefix => sourceKey.startsWith(prefix));
 

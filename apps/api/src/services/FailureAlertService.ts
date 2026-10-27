@@ -15,8 +15,8 @@ import {failureSourceFor} from './failureSources.js';
 export interface FailureReport {
   /**
    * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
-   * `security:critical`, `domain:<id>` or `sns:<what>` (the SES event pipeline) for conditions the
-   * project should hear about. Each kind is in SOURCE_KINDS.
+   * `security:critical`, `domain:<id>`, `sns:<what>` (the SES event pipeline) or `aws:alarm:<name>`
+   * for conditions the project should hear about. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -89,6 +89,11 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     path: () => SECURITY_PATH,
   },
   'sns:invalid': {name: {en: label => label, es: () => 'Eventos de SES ilegibles'}, path: () => SECURITY_PATH},
+  // A CloudWatch alarm of the AWS account, by its name
+  'aws:alarm': {
+    name: {en: label => `AWS alarm "${label}"`, es: label => `Alarma de AWS «${label}»`},
+    path: () => SECURITY_PATH,
+  },
 };
 
 const TRANSACTIONAL: SourceKind = {
@@ -150,9 +155,13 @@ export class FailureAlertService {
   /**
    * Records a failure under its source and alerts the project if it is the source's turn. True when
    * it was, so the alert is on its way; false when the source was alerted on within the hour, or
-   * the failure could not be recorded.
+   * the failure could not be recorded. With `alert` off it is only recorded, for the banner.
    */
-  public static async record(projectId: string, report: FailureReport): Promise<boolean> {
+  public static async record(
+    projectId: string,
+    report: FailureReport,
+    {alert = true}: {alert?: boolean} = {},
+  ): Promise<boolean> {
     try {
       const error = report.error.slice(0, ERROR_MAX);
       // A source reviewed since its last failure opens again: its count starts over and it gets
@@ -174,6 +183,9 @@ export class FailureAlertService {
           "lastError" = EXCLUDED."lastError",
           "lastContactEmail" = EXCLUDED."lastContactEmail"
         RETURNING "id", "sourceKey", "label", "count", "lastError", "lastContactEmail", "firstAt", "lastAt"`;
+      if (!alert) {
+        return false;
+      }
 
       // One alert per source an hour: of failures arriving together, the one that moves
       // `notifiedAt` sends it.
@@ -215,17 +227,38 @@ export class FailureAlertService {
   }
 
   /**
-   * A condition of the whole installation rather than of one project -- the SES event pipeline --
-   * recorded in every project that can act on it, each alerting as `record` does. Never throws.
+   * A condition of the whole installation rather than of one project -- the SES event pipeline, an
+   * alarm of the AWS account -- recorded in every project that can act on it, each alerting as
+   * `record` does. Disabled projects are left out unless `includeDisabled`. Never throws.
    */
-  public static async recordForAll(report: FailureReport): Promise<void> {
+  public static async recordForAll(
+    report: FailureReport,
+    {includeDisabled = false, alert = true}: {includeDisabled?: boolean; alert?: boolean} = {},
+  ): Promise<void> {
     try {
-      const projects = await prisma.project.findMany({where: {disabled: false}, select: {id: true}});
+      const projects = await prisma.project.findMany({
+        where: includeDisabled ? {} : {disabled: false},
+        select: {id: true},
+      });
       for (const project of projects) {
-        await this.record(project.id, report);
+        await this.record(project.id, report, {alert});
       }
     } catch (lookupError) {
       signale.warn(`[ALERTS] Could not record ${report.sourceKey} in the projects:`, lookupError);
+    }
+  }
+
+  /**
+   * A condition that is over, in every project: its source is marked reviewed up to its last
+   * failure, so the banner drops it until it is recorded again. Never throws.
+   */
+  public static async resolveForAll(sourceKey: string): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+        UPDATE "plunk_lite_failures" SET "reviewedAt" = "lastAt"
+        WHERE "sourceKey" = ${sourceKey} AND ("reviewedAt" IS NULL OR "reviewedAt" < "lastAt")`;
+    } catch (resolveError) {
+      signale.warn(`[ALERTS] Could not resolve ${sourceKey} in the projects:`, resolveError);
     }
   }
 
