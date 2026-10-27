@@ -175,7 +175,8 @@ export class SourceBrakeService {
       where: {
         workflowId,
         status: {in: [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.WAITING]},
-        emails: {none: {sentAt: {not: null}}},
+        // Sent as the rates count it (RATED_EMAIL): SES took it, whether or not its send was marked
+        emails: {none: {OR: [{sentAt: {not: null}}, {messageId: {not: null}}]}},
       },
       data: {
         status: WorkflowExecutionStatus.CANCELLED,

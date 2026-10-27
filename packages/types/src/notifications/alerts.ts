@@ -15,7 +15,7 @@ export interface FailureAlert {
    * `workflow:<id>`, `campaign:<id>` or `transactional` for failures. For conditions (see
    * `isFailureNotice` in `@plunk/shared`): `project`, `project:reactivated`, `brake:campaign:<id>`,
    * `brake:workflow:<id>`, `security:warning`, `security:critical`, `security:check`,
-   * `domain:<id>`, `sns:<what>`, `ses:<what>` or `aws:alarm:<name>`
+   * `domain:<id>`, `sns:<what>`, `ses:<what>`, `aws:alarm:<name>` or `aws:alarm-subscription`
    */
   sourceKey: string;
   label: string;

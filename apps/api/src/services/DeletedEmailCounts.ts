@@ -9,24 +9,31 @@ import {utcTimestamp} from '../utils/database.js';
  * Deleting a contact deletes its emails, and AWS keeps counting their bounces and complaints. If
  * the rates lost them, deleting the contacts that bounced would put a project's own rates back in
  * the green while its AWS account is still in trouble. So each delete of emails adds the ones the
- * rates count to `plunk_lite_deleted_email_counts`, by the hour they were created in, and a
+ * rates count to `plunk_lite_deleted_email_counts`, by the minute they were created in, and a
  * project's rates add those up (ReputationPolicy.rates). The brakes of a campaign or a workflow do
  * not: a deleted email no longer says which one sent it.
+ *
+ * The column that holds the minute is still called "hour": counts were kept by the hour at first.
+ * Renaming it would break the image before this one, which is what a rollback deploys. Those rows
+ * read as the minute :00 of their hour, so a window that starts later in that hour leaves them out,
+ * though some of their emails were created inside it: it counts less, by at most that hour's
+ * deletes, and only until the rows kept by the hour are older than the window.
  */
 
 /**
- * The emails a rate counts, of `emails` as `e`: the ones given to SES, as only those count for
- * AWS, and not to its mailbox simulator, which AWS leaves out of its own rates. The one definition,
+ * The emails a rate counts, of `emails` as `e`: the ones SES took, as only those count for AWS --
+ * sent, or with the message id SES gave them, which a row the send then failed to mark still has --
+ * and not to its mailbox simulator, which AWS leaves out of its own rates. The one definition,
  * shared by the rates and the counts of deleted emails.
  */
-export const RATED_EMAIL = Prisma.sql`e."simulated" = false AND e."sentAt" IS NOT NULL`;
+export const RATED_EMAIL = Prisma.sql`e."simulated" = false AND (e."sentAt" IS NOT NULL OR e."messageId" IS NOT NULL)`;
 
 /** How many of them, how many bounced and how many were reported as spam: three int columns */
 export const RATE_COUNTS = Prisma.sql`count(*)::int,
   (count(*) FILTER (WHERE e."bouncedAt" IS NOT NULL))::int,
   (count(*) FILTER (WHERE e."complainedAt" IS NOT NULL))::int`;
 
-/** The deleted emails of a project counted in an hour, as `plunk_lite_deleted_email_counts` holds them */
+/** The deleted emails of a project counted in a minute, as `plunk_lite_deleted_email_counts` holds them */
 export interface DeletedCounts {
   sent: number;
   bounced: number;
@@ -46,10 +53,10 @@ export const DeletedEmailCounts = {
         DELETE FROM "emails"
         WHERE "projectId" = ${projectId}
           ${contactIds ? Prisma.sql`AND "contactId" = ANY(${contactIds}::text[])` : Prisma.empty}
-        RETURNING "projectId", "createdAt", "sentAt", "simulated", "bouncedAt", "complainedAt"
+        RETURNING "projectId", "createdAt", "sentAt", "messageId", "simulated", "bouncedAt", "complainedAt"
       )
       INSERT INTO "plunk_lite_deleted_email_counts" AS d ("projectId", "hour", "sent", "bounced", "complained")
-      SELECT e."projectId", date_trunc('hour', e."createdAt"), ${RATE_COUNTS}
+      SELECT e."projectId", date_trunc('minute', e."createdAt"), ${RATE_COUNTS}
       FROM e
       WHERE ${RATED_EMAIL}
       GROUP BY 1, 2
@@ -61,18 +68,18 @@ export const DeletedEmailCounts = {
 
   /**
    * The deleted emails of a project a rate adds, created since a date or ever, as a subquery of
-   * three int columns like RATE_COUNTS. They are counted by the hour, so the hour `since` falls in
-   * counts whole: up to an hour more than the window, never less.
+   * three int columns like RATE_COUNTS. They are counted by the minute, so the minute `since` falls
+   * in counts whole: up to a minute more than the window, never less.
    *
-   * `alreadyInFirstHour` takes out of that hour what it held when the window started, each column
-   * down to zero at most: for a window that starts at a reactivation, so that the bounces deleted
-   * before it in the same hour do not count again, and the ones deleted after it still do.
+   * `alreadyInFirstMinute` takes out of that minute what it held when the window started, each
+   * column down to zero at most: for a window that starts at a reactivation, so that the bounces
+   * deleted before it in the same minute do not count again, and the ones deleted after it still do.
    */
-  sums(projectId: string, since?: Date, alreadyInFirstHour?: DeletedCounts): Prisma.Sql {
-    const first = since ? Prisma.sql`date_trunc('hour', ${utcTimestamp(since)})` : undefined;
+  sums(projectId: string, since?: Date, alreadyInFirstMinute?: DeletedCounts): Prisma.Sql {
+    const first = since ? Prisma.sql`date_trunc('minute', ${utcTimestamp(since)})` : undefined;
     const column = (name: 'sent' | 'bounced' | 'complained') =>
-      first && alreadyInFirstHour
-        ? Prisma.sql`coalesce(sum(greatest(d.${Prisma.raw(`"${name}"`)} - CASE WHEN d."hour" = ${first} THEN ${alreadyInFirstHour[name]}::int ELSE 0 END, 0)), 0)::int`
+      first && alreadyInFirstMinute
+        ? Prisma.sql`coalesce(sum(greatest(d.${Prisma.raw(`"${name}"`)} - CASE WHEN d."hour" = ${first} THEN ${alreadyInFirstMinute[name]}::int ELSE 0 END, 0)), 0)::int`
         : Prisma.sql`coalesce(sum(d.${Prisma.raw(`"${name}"`)}), 0)::int`;
     return Prisma.sql`(
       SELECT ${column('sent')}, ${column('bounced')}, ${column('complained')}
@@ -82,12 +89,12 @@ export const DeletedEmailCounts = {
     )`;
   },
 
-  /** What the counts of a project hold for the hour a date falls in; zeros when nothing */
-  async inHour(projectId: string, date: Date): Promise<DeletedCounts> {
+  /** What the counts of a project hold for the minute a date falls in; zeros when nothing */
+  async inMinute(projectId: string, date: Date): Promise<DeletedCounts> {
     const [row] = await prisma.$queryRaw<DeletedCounts[]>`
       SELECT d."sent", d."bounced", d."complained"
       FROM "plunk_lite_deleted_email_counts" d
-      WHERE d."projectId" = ${projectId} AND d."hour" = date_trunc('hour', ${utcTimestamp(date)})`;
+      WHERE d."projectId" = ${projectId} AND d."hour" = date_trunc('minute', ${utcTimestamp(date)})`;
     return row ?? {sent: 0, bounced: 0, complained: 0};
   },
 };

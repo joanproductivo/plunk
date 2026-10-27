@@ -26,7 +26,7 @@ import type {SecurityMetric} from './SecurityService.js';
  *
  * A project disabled for its reputation can be reactivated from the dashboard. For the next 7 days
  * only the emails it sends from then on count towards disabling it again, or the bounces that
- * disabled it would do so at once -- deleted ones included, which are counted by the hour.
+ * disabled it would do so at once -- deleted ones included, which are counted by the minute.
  */
 
 export interface RateData {
@@ -42,7 +42,7 @@ export interface RateFilter {
   projectId: string;
   since?: Date;
   /**
-   * What the deleted counts held for the hour of `since` when the window started, left out of it
+   * What the deleted counts held for the minute of `since` when the window started, left out of it
    * (DeletedEmailCounts.sums): for a window that starts at a reactivation
    */
   deletedAtStart?: DeletedCounts;
@@ -62,14 +62,19 @@ const SEVEN_DAYS_MS = 7 * 86_400_000;
 /** A grace period after a reactivation, as stored */
 interface Grace {
   reactivatedAt: Date;
-  deletedInHour: DeletedCounts;
+  deletedInMinute: DeletedCounts;
 }
 
 /**
- * When the project was last reactivated, and what its deleted counts held for that hour then (a
+ * When the project was last reactivated, and what its deleted counts held for that minute then (a
  * Grace, as JSON), kept as long as its emails before then are in the 7 days
  */
 const REACTIVATED_KEY = (projectId: string) => `plunk-lite:reactivated:${projectId}`;
+
+/** The scheduled campaigns a disable for the reputation cancelled, which a reactivation drafts again */
+const DISABLE_CANCELLED_KEY = (projectId: string) => `plunk-lite:disable-cancelled:${projectId}`;
+// Longer than a project is likely to stay disabled; past it, they stay cancelled
+const DISABLE_CANCELLED_SECONDS = 30 * 86400;
 
 /**
  * Past these, in the last 7 days, the project is disabled (with AUTO_PROJECT_DISABLE). The minimum of
@@ -128,20 +133,24 @@ export class ReputationPolicy {
 
   /**
    * Whether the bounce or the complaint rate of the last 7 days -- or since the project was
-   * reactivated, if that is later -- is past disabling the project
+   * reactivated, if that is later -- is past disabling the project. `withoutRedis`, for a check that
+   * cannot wait for it, counts no grace period: the side that stops sending.
    */
-  public static async disableByMetric(projectId: string): Promise<DisableVerdict> {
-    const grace = await this.grace(projectId);
+  public static async disableByMetric(
+    projectId: string,
+    {withoutRedis = false}: {withoutRedis?: boolean} = {},
+  ): Promise<DisableVerdict> {
+    const grace = withoutRedis ? undefined : await this.grace(projectId);
     const weekAgo = new Date(Date.now() - SEVEN_DAYS_MS);
     const sinceReactivation = Boolean(grace && grace.reactivatedAt > weekAgo);
     const since = sinceReactivation ? grace!.reactivatedAt : weekAgo;
     const window = sinceReactivation ? 'Since reactivation,' : '7-day';
-    // The emails deleted are counted by the hour, so the hour of the reactivation holds the bounces
-    // deleted before it, which disabled the project: what it held then is left out
+    // The emails deleted are counted by the minute, so the minute of the reactivation may hold
+    // bounces deleted before it, which disabled the project: what it held then is left out
     const sevenDay = await this.rates({
       projectId,
       since,
-      ...(sinceReactivation && {deletedAtStart: grace!.deletedInHour}),
+      ...(sinceReactivation && {deletedAtStart: grace!.deletedInMinute}),
     });
     const bounce =
       sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS_FOR_BOUNCES &&
@@ -166,12 +175,35 @@ export class ReputationPolicy {
   }
 
   /**
+   * Notes the scheduled campaigns a disable for the reputation cancelled (QueueService.
+   * cancelAllProjectJobs), for its reactivation. Never throws: if they cannot be noted, they stay
+   * cancelled.
+   */
+  public static async noteDisableCancelled(projectId: string, campaignIds: string[]): Promise<void> {
+    if (campaignIds.length === 0) {
+      return;
+    }
+    try {
+      await redis
+        .multi()
+        .sadd(DISABLE_CANCELLED_KEY(projectId), ...campaignIds)
+        .expire(DISABLE_CANCELLED_KEY(projectId), DISABLE_CANCELLED_SECONDS)
+        .exec();
+    } catch (error) {
+      signale.warn(
+        `[SECURITY] Could not note the ${campaignIds.length} scheduled campaigns the disable of project ${projectId} cancelled:`,
+        error,
+      );
+    }
+  }
+
+  /**
    * Reactivates a project disabled for its sending reputation, for an admin of it (`by`). Other
    * reasons still take a database change, on purpose. The grace period is stored first: if it
    * cannot be, the project stays disabled rather than being disabled again by its next bounce.
    *
-   * The scheduled campaigns the disable cancelled, which never created an email, go back to drafts
-   * to be scheduled again. Returns how many.
+   * The scheduled campaigns the disable cancelled (noteDisableCancelled) that never created an
+   * email go back to drafts to be scheduled again; none that was cancelled otherwise. Returns how many.
    */
   public static async reactivate(projectId: string, by: string): Promise<{draftedCampaigns: number}> {
     const project = await prisma.project.findUnique({
@@ -183,7 +215,7 @@ export class ReputationPolicy {
     }
 
     const reactivatedAt = new Date();
-    const grace: Grace = {reactivatedAt, deletedInHour: await DeletedEmailCounts.inHour(projectId, reactivatedAt)};
+    const grace: Grace = {reactivatedAt, deletedInMinute: await DeletedEmailCounts.inMinute(projectId, reactivatedAt)};
     await redis.set(REACTIVATED_KEY(projectId), JSON.stringify(grace), 'EX', SEVEN_DAYS_MS / 1000);
     const reactivated = await prisma.project.updateMany({
       where: {id: projectId, disabled: true, disabledReason: 'EMAIL_REPUTATION'},
@@ -198,7 +230,12 @@ export class ReputationPolicy {
 
     let draftedCampaigns = 0;
     const cancelled = await prisma.campaign.findMany({
-      where: {projectId, status: CampaignStatus.CANCELLED, emails: {none: {}}},
+      where: {
+        id: {in: await this.disableCancelled(projectId)},
+        projectId,
+        status: CampaignStatus.CANCELLED,
+        emails: {none: {}},
+      },
       select: {id: true},
     });
     for (const {id} of cancelled) {
@@ -209,6 +246,9 @@ export class ReputationPolicy {
         signale.warn(`[SECURITY] Could not return campaign ${id} of project ${projectId} to the drafts:`, error);
       }
     }
+    await redis.del(DISABLE_CANCELLED_KEY(projectId)).catch((error: unknown) => {
+      signale.warn(`[SECURITY] Could not forget the campaigns the disable of project ${projectId} cancelled:`, error);
+    });
 
     signale.info(`[SECURITY] Project ${projectId} reactivated by ${by}`);
     await FailureAlertService.resolve('project', projectId);
@@ -220,14 +260,25 @@ export class ReputationPolicy {
     return {draftedCampaigns};
   }
 
+  /** The campaigns noted by noteDisableCancelled; none when Redis cannot say */
+  private static async disableCancelled(projectId: string): Promise<string[]> {
+    try {
+      return await redis.smembers(DISABLE_CANCELLED_KEY(projectId));
+    } catch (error) {
+      signale.warn(`[SECURITY] Could not read the campaigns the disable of project ${projectId} cancelled:`, error);
+      return [];
+    }
+  }
+
   /**
    * When the project was reactivated, within the last 7 days, and what its deleted counts held for
-   * that hour then; undefined when Redis cannot say. Without those counts (a grace period stored
-   * before they were, or one that cannot be read) the hour counts whole: the side that stops sending.
+   * that minute then; undefined when Redis cannot say. Without those counts (a grace period stored
+   * before they were kept, or before they were kept by the minute, or one that cannot be read) the
+   * minute counts whole.
    */
   private static async grace(
     projectId: string,
-  ): Promise<{reactivatedAt: Date; deletedInHour?: DeletedCounts} | undefined> {
+  ): Promise<{reactivatedAt: Date; deletedInMinute?: DeletedCounts} | undefined> {
     try {
       const value = await redis.get(REACTIVATED_KEY(projectId));
       if (!value) {
@@ -244,13 +295,13 @@ export class ReputationPolicy {
       if (Number.isNaN(date.getTime())) {
         return undefined;
       }
-      const counts = fields.deletedInHour as Record<string, unknown> | undefined;
+      const counts = fields.deletedInMinute as Record<string, unknown> | undefined;
       const valid = (name: string) => Number.isInteger(counts?.[name]) && (counts![name] as number) >= 0;
       return {
         reactivatedAt: date,
         ...(valid('sent') &&
           valid('bounced') &&
-          valid('complained') && {deletedInHour: counts as unknown as DeletedCounts}),
+          valid('complained') && {deletedInMinute: counts as unknown as DeletedCounts}),
       };
     } catch (error) {
       // Counted as if there were no grace period: the side that stops sending

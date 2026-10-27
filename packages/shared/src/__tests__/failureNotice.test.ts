@@ -10,6 +10,7 @@ describe('isFailureNotice', () => {
     'sns:unmatched',
     'sns:subscription',
     'aws:alarm:ses-rebotes-alto',
+    'aws:alarm-subscription',
     'project',
     'project:reactivated',
     'brake:campaign:abc',

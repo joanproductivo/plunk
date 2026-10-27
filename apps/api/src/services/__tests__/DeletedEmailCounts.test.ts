@@ -1,4 +1,6 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {randomUUID} from 'node:crypto';
+
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
@@ -22,12 +24,16 @@ describe('DeletedEmailCounts', () => {
     projectId = project.id;
   });
 
-  /** An email as the send path and the webhook leave it; sent unless `unsent` */
+  /**
+   * An email as the send path and the webhook leave it; sent unless `unsent`, or taken by SES with
+   * its message id but failed before it was marked sent (`failed`)
+   */
   const email = (
     contactId: string,
     options: {
       ago?: number;
       unsent?: boolean;
+      failed?: boolean;
       bounced?: boolean;
       complained?: boolean;
       simulated?: boolean;
@@ -46,8 +52,9 @@ describe('DeletedEmailCounts', () => {
         sourceType: options.campaignId ? 'CAMPAIGN' : options.workflowExecutionId ? 'WORKFLOW' : 'TRANSACTIONAL',
         campaignId: options.campaignId,
         workflowExecutionId: options.workflowExecutionId,
-        status: options.unsent ? EmailStatus.PENDING : EmailStatus.SENT,
-        sentAt: options.unsent ? null : createdAt,
+        status: options.unsent ? EmailStatus.PENDING : options.failed ? EmailStatus.FAILED : EmailStatus.SENT,
+        sentAt: options.unsent || options.failed ? null : createdAt,
+        messageId: options.failed ? `ses-${randomUUID()}` : null,
         bouncedAt: options.bounced ? createdAt : null,
         complainedAt: options.complained ? createdAt : null,
         simulated: options.simulated ?? false,
@@ -89,7 +96,24 @@ describe('DeletedEmailCounts', () => {
     expect(await projectRates()).toEqual(before);
   });
 
-  it('adds the deletes of the same hour together, per project', async () => {
+  it('counts an email SES took that the send failed to mark as sent, before and after it is deleted', async () => {
+    const contact = await factories.createContact({projectId});
+    await email(contact.id);
+    // SES took it and gave it its message id, then the send failed before stamping sentAt
+    await email(contact.id, {failed: true, bounced: true});
+    // Neither sent nor taken by SES: not counted
+    await email(contact.id, {unsent: true});
+
+    expect(await ReputationPolicy.rates({projectId})).toMatchObject({total: 2, bounces: 1});
+
+    await ContactService.delete(projectId, contact.id);
+
+    expect(await ReputationPolicy.rates({projectId})).toMatchObject({total: 2, bounces: 1});
+  });
+
+  it('adds the deletes of the same minute together, per project', async () => {
+    vi.useFakeTimers({toFake: ['Date']});
+    vi.setSystemTime(new Date('2026-10-20T10:40:05Z'));
     const other = await factories.createUserWithProject();
     const otherContact = await factories.createContact({projectId: other.project.id});
     await prisma.email.create({
@@ -116,7 +140,8 @@ describe('DeletedEmailCounts', () => {
 
     const rows = await prisma.plunkLiteDeletedEmailCount.findMany({where: {projectId}});
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({sent: 3, bounced: 1, complained: 1});
+    // The column is still called hour, and holds the minute
+    expect(rows[0]).toMatchObject({hour: new Date('2026-10-20T10:40:00Z'), sent: 3, bounced: 1, complained: 1});
     // The other project's contact was not this project's to delete
     expect(await prisma.contact.count({where: {id: otherContact.id}})).toBe(1);
     expect(await prisma.plunkLiteDeletedEmailCount.count({where: {projectId: other.project.id}})).toBe(0);
@@ -170,5 +195,20 @@ describe('DeletedEmailCounts', () => {
     const after = await ReputationPolicy.disableByMetric(projectId);
     expect(after.sevenDay).toEqual(before.sevenDay);
     expect(after.bounce).toBe(true);
+  });
+
+  it('adds up a week of counts kept by the minute at once', async () => {
+    // One row a minute for 7 days, each with one bounce in ten emails
+    await prisma.$executeRaw`
+      INSERT INTO "plunk_lite_deleted_email_counts" ("projectId", "hour", "sent", "bounced", "complained")
+      SELECT ${projectId}, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => n), 10, 1, 0
+      FROM generate_series(1, 10080) AS n`;
+
+    const started = Date.now();
+    const ever = await ReputationPolicy.rates({projectId});
+    const elapsed = Date.now() - started;
+
+    expect(ever).toMatchObject({total: 100_800, bounces: 10_080, complaints: 0});
+    expect(elapsed).toBeLessThan(2000);
   });
 });

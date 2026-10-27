@@ -57,12 +57,16 @@ describe('QueueService - cancelAllProjectJobs', () => {
     const scheduled = await factories.createScheduledCampaign(projectId, scheduledFor, {status: CampaignStatus.SCHEDULED});
     await QueueService.scheduleCampaign(scheduled.id, scheduledFor);
     const draft = await factories.createCampaign({projectId});
+    await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
     const elsewhere = await factories.createScheduledCampaign(otherProjectId, scheduledFor, {
       status: CampaignStatus.SCHEDULED,
     });
 
-    await QueueService.cancelAllProjectJobs(projectId);
+    const cancelled: string[][] = [];
+    await QueueService.cancelAllProjectJobs(projectId, async ids => void cancelled.push(ids));
 
+    // Only the ones it cancelled
+    expect(cancelled).toEqual([[scheduled.id]]);
     const statusOfCampaign = async (id: string) => (await prisma.campaign.findUniqueOrThrow({where: {id}})).status;
     expect(await statusOfCampaign(scheduled.id)).toBe(CampaignStatus.CANCELLED);
     expect(await scheduledQueue.getJob(`scheduled-campaign-${scheduled.id}`)).toBeUndefined();

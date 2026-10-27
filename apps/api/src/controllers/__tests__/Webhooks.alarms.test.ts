@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
+import {ALARMS_TOPIC_NAME} from '../../services/AwsAlarmService';
 import {FailureAlertService} from '../../services/FailureAlertService';
 import {getAwsAccountId, sendRawEmail} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
@@ -14,7 +15,7 @@ vi.mock('../../services/SESService', async importOriginal => ({
   sendRawEmail: vi.fn(async () => ({messageId: 'alert-message-id'})),
 }));
 
-const ALARMS_TOPIC = 'arn:aws:sns:eu-north-1:111111111111:plunk-alarmas';
+const ALARMS_TOPIC = `arn:aws:sns:eu-north-1:111111111111:${ALARMS_TOPIC_NAME}`;
 
 /**
  * The AWS account's CloudWatch alarms, delivered by their own topic to the SES webhook, shown on
@@ -139,5 +140,36 @@ describe('Webhooks - CloudWatch alarms', () => {
     expect(captured.status).toBe(200);
     expect(confirm).toHaveBeenCalledOnce();
     vi.unstubAllGlobals();
+  });
+
+  // Failures are Plunk Lite's own table, which the suite does not empty between tests
+  const failures = (sourceKey: string, projectIds = [projectId]) =>
+    prisma.plunkLiteFailure.findMany({where: {sourceKey, projectId: {in: projectIds}}});
+
+  it('only logs a message of the alarms topic that is not JSON', async () => {
+    const captured = await postSns({
+      Type: 'Notification',
+      TopicArn: ALARMS_TOPIC,
+      MessageId: randomUUID(),
+      Message: 'A plain-text message published to the topic by hand',
+    });
+
+    expect(captured.status).toBe(200);
+    expect(await failures('sns:invalid')).toEqual([]);
+  });
+
+  it('shows in every project, without emailing, that the alarms no longer reach the dashboard when its subscription is removed', async () => {
+    const {project: disabled} = await factories.createUserWithProject({}, {disabled: true});
+
+    const captured = await postSns({Type: 'UnsubscribeConfirmation', TopicArn: ALARMS_TOPIC});
+
+    expect(captured.status).toBe(200);
+    const recorded = await failures('aws:alarm-subscription', [projectId, disabled.id]);
+    expect(recorded.map(failure => failure.projectId).sort()).toEqual([projectId, disabled.id].sort());
+    expect(recorded[0]).toMatchObject({label: 'AWS alarms no longer reach the dashboard; their emails still do'});
+    expect(recorded[0]!.lastError).toContain(ALARMS_TOPIC);
+    expect(await failures('sns:subscription')).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(sendRawEmail).not.toHaveBeenCalled();
   });
 });

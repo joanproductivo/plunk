@@ -88,7 +88,7 @@ Conditions that need attention:
 - **The reputation check could not run**, so nothing would stop the project if its rates were too high.
 - **A domain that SES stops verifying**, for example because its DNS records were removed. Emails from it fail until they are back.
 - **SES events**: bounces or complaints that match no email (the address is still suppressed), notifications that cannot be read, the webhook's subscription to the events topic removed, events that stop arriving for the emails SES accepted, and configuration sets that do not publish them.
-- **The AWS account's CloudWatch alarms**, in every project, disabled ones included, until the alarm is back to OK. They show only in the banner: AWS emails them itself.
+- **The AWS account's CloudWatch alarms**, in every project, disabled ones included, until the alarm is back to OK. They show only in the banner: AWS emails them itself. If the webhook's subscription to the alarms topic is removed, the banner says the alarms no longer reach it.
 
 Marking a source reviewed closes what the banner showed. If it fails again, it shows up again, counting from one, and its alert email goes out again.
 

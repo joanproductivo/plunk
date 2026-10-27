@@ -4,6 +4,12 @@ import {REDIS_URL} from '../app/constants.js';
 
 export const redis = new Redis(REDIS_URL + '?family=0');
 
+/**
+ * Plunk Lite: whether Redis is connected. While it is not, every command waits for it to be back,
+ * so a path that must answer in time skips what it can do without Redis.
+ */
+export const redisReady = () => redis.status === 'ready';
+
 export const REDIS_ONE_MINUTE = 60;
 export const REDIS_DEFAULT_EXPIRY = REDIS_ONE_MINUTE;
 export const TEN_MINUTES_IN_SECONDS = 60 * 10;

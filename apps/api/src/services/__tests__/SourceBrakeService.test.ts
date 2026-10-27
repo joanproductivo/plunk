@@ -184,6 +184,23 @@ describe('SourceBrakeService', () => {
       expect(alert.lastError).toContain('1 of its runs that had not sent an email yet were cancelled');
     });
 
+    it('leaves a run whose email SES took though its send was not marked, as the rates count it', async () => {
+      const {workflow, done, notSentYet} = await workflowWithRuns();
+      await sent(60, {bounced: 10, workflowExecutionId: done.id});
+      const taken = await factories.createEmail({projectId, contactId, sourceType: EmailSourceType.WORKFLOW});
+      await prisma.email.update({
+        where: {id: taken.id},
+        data: {workflowExecutionId: notSentYet.id, status: EmailStatus.FAILED, sentAt: null, messageId: randomUUID()},
+      });
+
+      await SourceBrakeService.brake(projectId, [`workflow:${workflow.id}`]);
+
+      expect((await prisma.workflow.findUniqueOrThrow({where: {id: workflow.id}})).enabled).toBe(false);
+      expect((await prisma.workflowExecution.findUniqueOrThrow({where: {id: notSentYet.id}})).status).not.toBe(
+        WorkflowExecutionStatus.CANCELLED,
+      );
+    });
+
     it('fails the emails its cancelled runs queued, and leaves those of the runs that sent one', async () => {
       const {workflow, done, waitingAfterAnEmail, notSentYet} = await workflowWithRuns();
       await sent(59, {bounced: 10, workflowExecutionId: done.id});
