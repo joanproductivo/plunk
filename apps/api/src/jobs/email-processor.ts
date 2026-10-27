@@ -35,7 +35,7 @@ import {
   recipientAddress,
   withSourceEmail,
 } from '../services/EmailHeaderService.js';
-import {EmailService} from '../services/EmailService.js';
+import {EmailService, POSSIBLY_SENT_NOTE} from '../services/EmailService.js';
 import {EventService} from '../services/EventService.js';
 import {MeterService} from '../services/MeterService.js';
 import {ProjectFooterService} from '../services/ProjectFooterService.js';
@@ -284,9 +284,12 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
     return;
   }
 
-  // An email of an earlier send of this campaign -- created by a batch that was still running
-  // when that send was cancelled, and so outlived the cleanup -- must not go out with this one.
-  // Every email of the current send carries the id derived from it.
+  // An email of an earlier send of this campaign must not go out with this one. Every email of
+  // the current send carries the id derived from it. None should get here: `processBatch`
+  // creates each email under a lock that re-checks the send, and a cancelled campaign goes back
+  // to a draft only once it has no emails left. This stays as the last guard against mailing
+  // the audience twice; should one ever get here, it is still counted by finalization (FAILED)
+  // and by the last batch's total, which can close the current send early or never.
   if (
     email.campaign &&
     email.campaignId &&
@@ -542,7 +545,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
         where: {id: emailId},
         data: {
           status: EmailStatus.FAILED,
-          error: `No answer from SES could be read; the email may have been sent: ${message}`,
+          error: `No answer from SES could be read; the email ${POSSIBLY_SENT_NOTE}: ${message}`,
         },
       });
       await FailureAlertService.recordEmail(email, message);

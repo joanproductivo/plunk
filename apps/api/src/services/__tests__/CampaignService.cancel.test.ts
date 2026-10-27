@@ -187,7 +187,7 @@ describe('CampaignService - cancel', () => {
 });
 
 /**
- * The cleanup's raw SQL, tested on its own. Its two predicates are what stand between
+ * The cleanup's raw SQL, tested on its own. Its predicates are what stand between
  * clearing a queue and destroying delivery history, and neither is expressible in the
  * `deleteMany` the rest of the codebase would use -- Prisma has no LIMIT there, and an
  * unbounded delete is the thing this job exists to avoid.

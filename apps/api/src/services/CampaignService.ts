@@ -26,7 +26,7 @@ import {uuidv5} from '../utils/uuid.js';
 import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
 import {buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
-import {EmailService} from './EmailService.js';
+import {EmailService, POSSIBLY_SENT_NOTE} from './EmailService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
@@ -677,6 +677,25 @@ export class CampaignService {
   }
 
   /**
+   * Lock the campaign row for the rest of the transaction, and say whether it is still sending
+   * the send `generation` stands for.
+   *
+   * FOR SHARE, so batches do not wait on each other, while every UPDATE of the campaign (cancel,
+   * a new send, finalization) waits for the transaction to end. The row is read again after the
+   * lock rather than by the locking statement, so the comparison of `sentAt` is Prisma's, not a
+   * raw timestamp's.
+   */
+  private static async holdsCurrentSend(
+    tx: Prisma.TransactionClient,
+    campaignId: string,
+    generation: number,
+  ): Promise<boolean> {
+    await tx.$queryRaw`SELECT 1 FROM "campaigns" WHERE "id" = ${campaignId} FOR SHARE`;
+    const campaign = await tx.campaign.findUnique({where: {id: campaignId}, select: {status: true, sentAt: true}});
+    return campaign?.status === CampaignStatus.SENDING && campaign.sentAt?.getTime() === generation;
+  }
+
+  /**
    * Process a single batch of campaign emails
    * Now uses cursor-based pagination for better performance
    */
@@ -737,19 +756,34 @@ export class CampaignService {
         const renderedSubject = subjectTemplate.render(variables);
         const renderedBody = bodyTemplate.render(variables);
 
-        await EmailService.sendCampaignEmail({
-          id: this.emailIdFor(campaign.id, generation, contact.id),
-          projectId: campaign.projectId,
-          contactId: contact.id,
-          campaignId: campaign.id,
-          templateId: undefined,
-          subject: renderedSubject,
-          body: renderedBody,
-          from: campaign.from,
-          fromName: campaign.fromName || undefined,
-          replyTo: campaign.replyTo || undefined,
-          isTransactional: campaign.type === TemplateType.TRANSACTIONAL,
-        });
+        // The check at the top of the batch is long gone by now: the campaign may have been
+        // cancelled, or cancelled and sent again, since. Each email is created under a lock on the
+        // campaign row that re-checks the send, so once a cancel has changed the row no email of
+        // this send is created any more -- and every one created before it is there for the
+        // cancel and its cleanup to find. This is the only path that creates campaign emails.
+        const email = await EmailService.sendCampaignEmail(
+          {
+            id: this.emailIdFor(campaign.id, generation, contact.id),
+            projectId: campaign.projectId,
+            contactId: contact.id,
+            campaignId: campaign.id,
+            templateId: undefined,
+            subject: renderedSubject,
+            body: renderedBody,
+            from: campaign.from,
+            fromName: campaign.fromName || undefined,
+            replyTo: campaign.replyTo || undefined,
+            isTransactional: campaign.type === TemplateType.TRANSACTIONAL,
+          },
+          tx => this.holdsCurrentSend(tx, campaign.id, generation),
+        );
+
+        if (!email) {
+          signale.warn(
+            `[CAMPAIGN] Batch ${batchNumber} of campaign ${campaignId} belongs to another send, stopping it`,
+          );
+          return;
+        }
       } catch (error) {
         // A database or Redis outage would fail every contact after this one too, and they
         // would be skipped for good. BullMQ retries the batch instead, which finds the emails
@@ -1089,6 +1123,10 @@ export class CampaignService {
    * marks an email FAILED without clearing `sentAt`, so an email that SES accepted
    * before a later step threw is FAILED *and* sent. Testing status alone would read
    * that as never-sent and delete the only record of a message a recipient received.
+   * The same goes for a FAILED email SES may have accepted without the send learning
+   * so: one with the message id SES gave it, or whose error says it may have been
+   * sent. The cancel cleanup (`deleteUnsentCampaignEmails`) keeps exactly these rows,
+   * in SQL; the two must agree.
    */
   private static async hasDepartedEmail(campaignId: string): Promise<boolean> {
     const departed = await prisma.email.findFirst({
@@ -1096,7 +1134,10 @@ export class CampaignService {
         campaignId,
         OR: [
           {status: {in: this.DEPARTED_EMAIL_STATUSES}},
-          {status: EmailStatus.FAILED, sentAt: {not: null}},
+          {
+            status: EmailStatus.FAILED,
+            OR: [{sentAt: {not: null}}, {messageId: {not: null}}, {error: {contains: POSSIBLY_SENT_NOTE}}],
+          },
         ],
       },
       select: {id: true},
@@ -1198,6 +1239,12 @@ export class CampaignService {
    * campaign was cancelled can stamp an email in that window. If one did, the
    * campaign stays CANCELLED and keeps the rows that prove it.
    *
+   * Nor does it revert while any row is left. An email that was mid-send when the
+   * cleanup passed it and failed afterwards is neither departed nor deleted, and a
+   * draft holding it would have it counted by its next send -- in the total the last
+   * batch reconciles and in what finalization counts as processed. Throwing has the
+   * cleanup job run again, and that pass deletes it.
+   *
    * Returns the status the campaign ended on, for the worker to log.
    */
   public static async completeCancelRevert(projectId: string, campaignId: string): Promise<CampaignStatus> {
@@ -1221,6 +1268,10 @@ export class CampaignService {
         `[CAMPAIGN] Campaign ${campaignId} sent an email while its cancellation was being cleaned up, staying cancelled`,
       );
       return CampaignStatus.CANCELLED;
+    }
+
+    if (await prisma.email.findFirst({where: {campaignId}, select: {id: true}})) {
+      throw new Error(`Campaign ${campaignId} still has unsent emails after its cleanup`);
     }
 
     await this.finishRevertToDraft(projectId, campaignId);

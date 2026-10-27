@@ -50,6 +50,16 @@ interface SendEmailParams {
   isTransactional?: boolean; // Override source type to TRANSACTIONAL (e.g. for transactional campaigns)
 }
 
+/** Decides, inside the transaction that creates an email, whether it may still be created */
+type CreateGuard = (tx: Prisma.TransactionClient) => Promise<boolean>;
+
+/**
+ * Part of the error of a failed email that SES may still have accepted: the connection failed
+ * after the request went out, or the worker stopped mid-send. Such an email is treated as sent
+ * wherever a cancelled campaign decides whether anything reached a recipient.
+ */
+export const POSSIBLY_SENT_NOTE = 'may have been sent';
+
 /** A create that collided with an existing row's primary key */
 function isIdConflict(error: unknown): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
@@ -167,9 +177,14 @@ export class EmailService {
   }
 
   /**
-   * Send a campaign email
+   * Send a campaign email.
+   *
+   * With a guard, the email is created in a transaction that runs the guard first, and nothing is
+   * created, counted or queued when the guard says no (null is returned).
    */
-  public static async sendCampaignEmail(params: SendEmailParams): Promise<Email> {
+  public static sendCampaignEmail(params: SendEmailParams): Promise<Email>;
+  public static sendCampaignEmail(params: SendEmailParams, guard: CreateGuard): Promise<Email | null>;
+  public static async sendCampaignEmail(params: SendEmailParams, guard?: CreateGuard): Promise<Email | null> {
     // Check if campaign or template is transactional to determine source type
     let sourceType: EmailSourceType = EmailSourceType.CAMPAIGN;
 
@@ -203,26 +218,34 @@ export class EmailService {
       signale.warn(`[BILLING_LIMIT] ${limitCheck.message}`);
     }
 
-    let email: Email;
+    let email: Email | null;
     try {
-      email = await prisma.email.create({
-        data: {
-          id: params.id,
-          projectId: params.projectId,
-          contactId: params.contactId,
-          subject: params.subject,
-          body: params.body,
-          from: params.from,
-          fromName: params.fromName,
-          replyTo: params.replyTo,
-          headers: params.headers ? toPrismaJson(params.headers) : undefined,
-          attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
-          sourceType,
-          templateId: params.templateId,
-          campaignId: params.campaignId,
-          status: EmailStatus.PENDING,
-        },
-      });
+      const create = (client: Prisma.TransactionClient) =>
+        client.email.create({
+          data: {
+            id: params.id,
+            projectId: params.projectId,
+            contactId: params.contactId,
+            subject: params.subject,
+            body: params.body,
+            from: params.from,
+            fromName: params.fromName,
+            replyTo: params.replyTo,
+            headers: params.headers ? toPrismaJson(params.headers) : undefined,
+            attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
+            sourceType,
+            templateId: params.templateId,
+            campaignId: params.campaignId,
+            status: EmailStatus.PENDING,
+          },
+        });
+
+      // maxWait as long as a lone query may wait for a pooled connection (the pool_timeout a
+      // deployment sets on DATABASE_URL): Prisma's 2 s default would fail the batch on every
+      // short pool spike
+      email = guard
+        ? await prisma.$transaction(async tx => ((await guard(tx)) ? create(tx) : null), {maxWait: 20_000})
+        : await create(prisma);
     } catch (error) {
       const existing =
         params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
@@ -237,6 +260,10 @@ export class EmailService {
         await this.queueEmail(existing.id, existing.sourceType);
       }
       return existing;
+    }
+
+    if (!email) {
+      return null;
     }
 
     // Increment usage counter in cache

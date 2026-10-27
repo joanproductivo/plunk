@@ -24,6 +24,7 @@ import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {POSSIBLY_SENT_NOTE} from '../services/EmailService.js';
 import {FailureAlertService} from '../services/FailureAlertService.js';
 import {emailQueue, emailRecoverySweepQueue} from '../services/QueueService.js';
 
@@ -173,7 +174,7 @@ export async function sweepStuckEmails(now = new Date()): Promise<RecoverySweepR
       const accepted = state === 'failed' ? job?.data.accepted : undefined;
       const error = accepted
         ? 'Sent, but the send could not be recorded after every retry'
-        : 'Stopped while sending; may have been sent';
+        : `Stopped while sending; ${POSSIBLY_SENT_NOTE}`;
 
       if (await fail(email, EmailStatus.SENDING, error, true, accepted?.messageId)) {
         result.failed++;
