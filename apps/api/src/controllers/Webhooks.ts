@@ -25,12 +25,14 @@ import {CardVerificationService} from '../services/CardVerificationService.js';
 import {ContactService} from '../services/ContactService.js';
 import {recipientAddress} from '../services/EmailHeaderService.js';
 import {EventService} from '../services/EventService.js';
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {MeterService} from '../services/MeterService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {QueueService} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
+import {noteSnsRejection, parseSnsMessage, readSesNotification, reportUnreadable} from '../services/SesEventMatch.js';
 import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -149,6 +151,7 @@ export class Webhooks {
         // until someone notices that no engagement has been recorded for days. Every event
         // for every project drops here, and nothing else in the system counts the misses.
         signale.error('[WEBHOOK] SNS signature verification failed — request rejected. All SES events are being dropped.');
+        await noteSnsRejection('signature');
         return res.status(403).json({success: false, message: 'Invalid SNS signature'});
       }
 
@@ -162,6 +165,7 @@ export class Webhooks {
       }
       if (topicOrigin === 'foreign') {
         signale.warn(`[WEBHOOK] SNS message rejected — topic is not in this AWS account: ${String(req.body.TopicArn)}`);
+        await noteSnsRejection('topic');
         return res.status(403).json({success: false, message: 'Untrusted SNS topic'});
       }
 
@@ -219,6 +223,20 @@ export class Webhooks {
         }
       }
 
+      // Someone removed this endpoint's subscription from one of our topics: no SES event will
+      // arrive from it again, and nothing else would show it. Signed and from our own account, so
+      // it is not something an outsider can post.
+      if (req.body.Type === 'UnsubscribeConfirmation') {
+        const topic = String(req.body.TopicArn);
+        signale.error(`[WEBHOOK] SNS subscription to ${topic} was removed`);
+        await FailureAlertService.recordForAll({
+          sourceKey: 'sns:subscription',
+          label: 'SES events subscription removed',
+          error: `This server was unsubscribed from ${topic}: the events it published (bounces, complaints, deliveries) no longer arrive. Subscribe the webhook to it again.`,
+        });
+        return res.status(200).json({success: true});
+      }
+
       // Handle SNS notification messages - parse the Message field
       if (req.body.Type !== 'Notification') {
         signale.warn('[WEBHOOK] Unknown SNS message type:', req.body.Type);
@@ -226,10 +244,24 @@ export class Webhooks {
       }
 
       // Parse the nested SES event from the Message field
-      const body = JSON.parse(req.body.Message);
+      const body = parseSnsMessage(req.body.Message);
+      if (body === undefined) {
+        await reportUnreadable('the message is not JSON');
+        return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
+
+      const notification = readSesNotification(body);
+      if (notification.kind === 'other') {
+        signale.warn(`[WEBHOOK] Ignoring an SES notification of type ${String(notification.type)}`);
+        return res.status(200).json({success: true});
+      }
+      if (notification.kind === 'invalid') {
+        await reportUnreadable(notification.reason);
+        return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
 
       // Check if this is an inbound email notification (SES Receiving)
-      if (body.notificationType === 'Received') {
+      if (notification.eventType === 'Received') {
         signale.info('[WEBHOOK] Received inbound email notification from SES');
 
         try {
@@ -323,22 +355,25 @@ export class Webhooks {
                 continue; // Skip this project but continue processing for other projects
               }
 
-              // Find or create a contact for the sender in this project
-              let contact;
-              if (senderEmail) {
-                contact = await ContactService.upsert(
-                  domainRecord.projectId,
-                  senderEmail,
-                  undefined, // No additional data
-                  true, // Subscribe by default for inbound email senders
-                );
+              // An email row needs a contact, and the sender is the only one there could be
+              if (!senderEmail) {
+                signale.warn(`[WEBHOOK] Inbound email to ${recipientEmail} has no sender, skipping it`);
+                continue;
               }
+
+              // Find or create a contact for the sender in this project
+              const contact = await ContactService.upsert(
+                domainRecord.projectId,
+                senderEmail,
+                undefined, // No additional data
+                true, // Subscribe by default for inbound email senders
+              );
 
               // Create an Email record for tracking with parsed content
               const inboundEmail = await prisma.email.create({
                 data: {
                   projectId: domainRecord.projectId,
-                  contactId: contact!.id,
+                  contactId: contact.id,
                   subject: body.mail?.commonHeaders?.subject || '(No subject)',
                   body: htmlBody || '', // Store HTML body in the body field
                   from: recipientEmail, // The recipient address that received the email
@@ -386,7 +421,7 @@ export class Webhooks {
               await EventService.trackEvent(
                 domainRecord.projectId,
                 'email.received',
-                contact?.id,
+                contact.id,
                 inboundEmail.id, // Link the event to the inbound email record
                 eventData,
               );
@@ -406,13 +441,8 @@ export class Webhooks {
       }
 
       // Handle outbound email event notifications (existing logic)
-      const eventType = body.eventType as 'Bounce' | 'Delivery' | 'Open' | 'Complaint' | 'Click';
-      const messageId = body.mail?.messageId;
-
-      if (!messageId) {
-        signale.warn('[WEBHOOK] No messageId found in SNS notification');
-        return res.status(400).json({success: false, error: 'No messageId found'});
-      }
+      const {eventType} = notification;
+      const {messageId} = notification.mail;
 
       // Look up email by SES messageId
       const email = await prisma.email.findUnique({

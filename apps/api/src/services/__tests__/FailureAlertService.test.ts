@@ -350,6 +350,41 @@ describe('FailureAlertService', () => {
     });
   });
 
+  describe('the SES event pipeline', () => {
+    it('alerts on it as needing attention, with a link to the security settings, in the project language', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
+      await FailureAlertService.record(projectId, {
+        sourceKey: 'sns:unmatched',
+        label: 'SES events without an email',
+        error: 'A bounce matched no email',
+      });
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({sourceKey: 'sns:unmatched', reviewPath: '/settings?tab=security'});
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.subject).toMatch(/\] Requiere atención: Eventos de SES sin email$/);
+      expect(params.content.html).toContain('Detectado 1 vez');
+      expect(params.content.html).toContain('/settings?tab=security');
+    });
+
+    it('records it in every project that is not disabled', async () => {
+      const {project: other} = await factories.createUserWithProject();
+      const {project: disabled} = await factories.createUserWithProject({}, {disabled: true});
+
+      await FailureAlertService.recordForAll({
+        sourceKey: 'sns:subscription',
+        label: 'SES events subscription removed',
+        error: 'Unsubscribed',
+      });
+
+      const recorded = await prisma.plunkLiteFailure.findMany({
+        where: {sourceKey: 'sns:subscription', projectId: {in: [projectId, other.id, disabled.id]}},
+      });
+      expect(recorded.map(failure => failure.projectId).sort()).toEqual([projectId, other.id].sort());
+    });
+  });
+
   describe('sources', () => {
     it('records a project disabled for its content, without emailing from the disabled project', async () => {
       await SecurityService.disableProjectForPhishing(projectId, 'Subject', 99);

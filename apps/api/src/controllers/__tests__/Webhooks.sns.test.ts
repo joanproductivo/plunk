@@ -1,6 +1,5 @@
 import type {EventTrackingJobData} from '@plunk/types';
 import type {Job} from 'bullmq';
-import type {Request, Response} from 'express';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
@@ -17,7 +16,8 @@ import {SecurityService} from '../../services/SecurityService';
 import {getAwsAccountId} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
 import {processEventTracking} from '../../jobs/event-tracking-processor';
-import {affectedAddresses, Webhooks} from '../Webhooks';
+import {affectedAddresses} from '../Webhooks';
+import {FOREIGN_TOPIC, notification, OWN_TOPIC, post, postSns} from './snsWebhook';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 // The account the SES credentials belong to, normally looked up through STS
@@ -25,9 +25,6 @@ vi.mock('../../services/SESService', async importOriginal => ({
   ...(await importOriginal<typeof import('../../services/SESService')>()),
   getAwsAccountId: vi.fn(),
 }));
-
-const OWN_TOPIC = 'arn:aws:sns:eu-north-1:111111111111:plunk-ses-events';
-const FOREIGN_TOPIC = 'arn:aws:sns:eu-north-1:999999999999:plunk-ses-events';
 
 /**
  * The SES event webhook, which is the only path that records delivery, opens, clicks, bounces
@@ -65,58 +62,6 @@ describe('Webhooks - SES event notifications', () => {
     // One Redis key holds the dirty set for the whole worker, so an id left behind by an
     // earlier test would be swept by a later one and make its count wrong.
     await redis.del(Keys.Campaign.statsDirty());
-  });
-
-  /**
-   * Minimal Express response double.
-   *
-   * `sent` is the completion signal and tests must await it rather than the handler call: the
-   * `CatchAsync` decorator does not return the promise it creates, so awaiting a decorated
-   * method resolves before any of its async work has run.
-   */
-  function mockResponse() {
-    const captured = {status: 200, body: undefined as unknown};
-
-    let markSent: () => void;
-    const sent = new Promise<void>(resolve => {
-      markSent = resolve;
-    });
-
-    const res = {
-      status(code: number) {
-        captured.status = code;
-        return this;
-      },
-      json(body: unknown) {
-        captured.body = body;
-        markSent();
-        return this;
-      },
-    } as unknown as Response;
-
-    return {res, captured, sent};
-  }
-
-  /** Deliver one SNS message as posted to the webhook. */
-  async function postSns(body: Record<string, unknown>) {
-    const {res, captured, sent} = mockResponse();
-    const req = {body, get: () => undefined, headers: {}} as unknown as Request;
-
-    await new Webhooks().receiveSNSWebhook(req, res);
-    await sent;
-
-    return captured;
-  }
-
-  /** Deliver one SES event notification, shaped the way SNS posts it. */
-  async function post(event: Record<string, unknown>, topicArn = OWN_TOPIC) {
-    return postSns({Type: 'Notification', TopicArn: topicArn, Message: JSON.stringify(event)});
-  }
-
-  const notification = (eventType: string, messageId: string, extra: Record<string, unknown> = {}) => ({
-    eventType,
-    mail: {messageId, timestamp: new Date().toISOString()},
-    ...extra,
   });
 
   async function sentEmail(messageId: string, campaignId?: string) {

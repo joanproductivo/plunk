@@ -677,9 +677,13 @@ export const ALERT_RECIPIENTS_MAX = 10;
 /** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
 export const FAILURE_ALERTS_OPEN_MAX = 20;
 
-/** Alert sources that report a condition rather than a failure: sending reputation and domains (Plunk Lite) */
-export const isFailureNotice = (sourceKey: string) =>
-  sourceKey.startsWith('security:') || sourceKey.startsWith('domain:');
+const NOTICE_PREFIXES = ['security:', 'domain:', 'sns:'];
+
+/**
+ * Alert sources that report a condition rather than a failure: sending reputation, domains and the
+ * SES event pipeline (Plunk Lite)
+ */
+export const isFailureNotice = (sourceKey: string) => NOTICE_PREFIXES.some(prefix => sourceKey.startsWith(prefix));
 
 export const AlertSchemas = {
   // An empty list turns the alert emails off; the dashboard banner stays.

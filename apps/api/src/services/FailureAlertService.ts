@@ -15,7 +15,8 @@ import {failureSourceFor} from './failureSources.js';
 export interface FailureReport {
   /**
    * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
-   * `security:critical` or `domain:<id>` for conditions the project should hear about
+   * `security:critical`, `domain:<id>` or `sns:<what>` (the SES event pipeline) for conditions the
+   * project should hear about. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -48,20 +49,67 @@ const REPUTATION_REPEAT_SECONDS = 86400;
 
 type ReputationLevel = 'warning' | 'critical';
 
+const SECURITY_PATH = '/settings?tab=security';
+
+/** A kind of source: what an alert calls it and where the dashboard shows it */
+interface SourceKind {
+  name: {en: (label: string) => string; es: (label: string) => string};
+  /** From what follows the kind in the key: an id, an alarm's name */
+  path: (rest: string) => string;
+}
+
+/**
+ * The kinds of source, by the leading parts of their keys: `campaign:<id>`, `aws:alarm:<name>`. A key
+ * is read as the longest kind it starts with, so `security:critical` has its own name and
+ * `security:warning` is a `security` one.
+ */
+const SOURCE_KINDS: Record<string, SourceKind> = {
+  'workflow': {
+    name: {en: label => `Workflow "${label}"`, es: label => `Workflow «${label}»`},
+    path: id => `/workflows/${encodeURIComponent(id)}?tab=executions`,
+  },
+  'campaign': {
+    name: {en: label => `Campaign "${label}"`, es: label => `Campaña «${label}»`},
+    path: id => `/campaigns/${encodeURIComponent(id)}`,
+  },
+  'project': {name: {en: () => 'The project', es: () => 'El proyecto'}, path: () => '/settings'},
+  'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},
+  'security:critical': {
+    name: {en: label => label, es: () => 'Reputación de envío: crítico'},
+    path: () => SECURITY_PATH,
+  },
+  'domain': {
+    name: {en: label => `Domain "${label}"`, es: label => `Dominio «${label}»`},
+    path: () => '/settings?tab=domains',
+  },
+  // The SES event pipeline: SNS delivers every bounce, complaint and delivery to the webhook
+  'sns:unmatched': {name: {en: label => label, es: () => 'Eventos de SES sin email'}, path: () => SECURITY_PATH},
+  'sns:subscription': {
+    name: {en: label => label, es: () => 'Suscripción de eventos de SES eliminada'},
+    path: () => SECURITY_PATH,
+  },
+  'sns:invalid': {name: {en: label => label, es: () => 'Eventos de SES ilegibles'}, path: () => SECURITY_PATH},
+};
+
+const TRANSACTIONAL: SourceKind = {
+  name: {en: () => 'Transactional emails', es: () => 'Emails transaccionales'},
+  path: () => '/activity',
+};
+
+function sourceKind(sourceKey: string): {kind: SourceKind; rest: string} {
+  const parts = sourceKey.split(':');
+  for (let length = parts.length; length > 0; length--) {
+    const kind = SOURCE_KINDS[parts.slice(0, length).join(':')];
+    if (kind) {
+      return {kind, rest: parts.slice(length).join(':')};
+    }
+  }
+  return {kind: TRANSACTIONAL, rest: ''};
+}
+
 const COPY = {
   en: {
-    source: (sourceKey: string, label: string) =>
-      sourceKey.startsWith('workflow:')
-        ? `Workflow "${label}"`
-        : sourceKey.startsWith('campaign:')
-          ? `Campaign "${label}"`
-          : sourceKey.startsWith('security:')
-            ? label
-            : sourceKey.startsWith('domain:')
-              ? `Domain "${label}"`
-              : sourceKey === 'project'
-                ? 'The project'
-                : 'Transactional emails',
+    source: (sourceKey: string, label: string) => sourceKind(sourceKey).kind.name.en(label),
     subject: (project: string, source: string) => `[${project}] Failed: ${source}`,
     noticeSubject: (project: string, source: string) => `[${project}] Needs attention: ${source}`,
     times: (count: number, since: string) => `Failed ${count} ${count === 1 ? 'time' : 'times'} since ${since}.`,
@@ -74,20 +122,7 @@ const COPY = {
     test: 'This is a test alert: nothing has failed.',
   },
   es: {
-    source: (sourceKey: string, label: string) =>
-      sourceKey.startsWith('workflow:')
-        ? `Workflow «${label}»`
-        : sourceKey.startsWith('campaign:')
-          ? `Campaña «${label}»`
-          : sourceKey === 'security:critical'
-            ? 'Reputación de envío: crítico'
-            : sourceKey.startsWith('security:')
-              ? 'Reputación de envío: aviso'
-              : sourceKey.startsWith('domain:')
-                ? `Dominio «${label}»`
-                : sourceKey === 'project'
-                  ? 'El proyecto'
-                  : 'Emails transaccionales',
+    source: (sourceKey: string, label: string) => sourceKind(sourceKey).kind.name.es(label),
     subject: (project: string, source: string) => `[${project}] Ha fallado: ${source}`,
     noticeSubject: (project: string, source: string) => `[${project}] Requiere atención: ${source}`,
     times: (count: number, since: string) => `Ha fallado ${count} ${count === 1 ? 'vez' : 'veces'} desde ${since}.`,
@@ -176,6 +211,21 @@ export class FailureAlertService {
         `[ALERTS] Could not alert project ${projectId} about ${failure.sourceKey}:`,
         alertError instanceof Error ? alertError.message : alertError,
       );
+    }
+  }
+
+  /**
+   * A condition of the whole installation rather than of one project -- the SES event pipeline --
+   * recorded in every project that can act on it, each alerting as `record` does. Never throws.
+   */
+  public static async recordForAll(report: FailureReport): Promise<void> {
+    try {
+      const projects = await prisma.project.findMany({where: {disabled: false}, select: {id: true}});
+      for (const project of projects) {
+        await this.record(project.id, report);
+      }
+    } catch (lookupError) {
+      signale.warn(`[ALERTS] Could not record ${report.sourceKey} in the projects:`, lookupError);
     }
   }
 
@@ -513,20 +563,7 @@ export class FailureAlertService {
 
   /** Where the dashboard shows a source's failures, as a path of the dashboard */
   private static reviewPath(sourceKey: string): string {
-    const [kind, id] = sourceKey.split(':');
-    switch (kind) {
-      case 'workflow':
-        return `/workflows/${encodeURIComponent(id ?? '')}?tab=executions`;
-      case 'campaign':
-        return `/campaigns/${encodeURIComponent(id ?? '')}`;
-      case 'project':
-        return '/settings';
-      case 'security':
-        return '/settings?tab=security';
-      case 'domain':
-        return '/settings?tab=domains';
-      default:
-        return '/activity';
-    }
+    const {kind, rest} = sourceKind(sourceKey);
+    return kind.path(rest);
   }
 }
