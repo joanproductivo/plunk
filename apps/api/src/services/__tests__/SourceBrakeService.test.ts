@@ -6,8 +6,11 @@ import {CampaignStatus, EmailSourceType, EmailStatus, WorkflowExecutionStatus} f
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {HttpException} from '../../exceptions/index';
+import {redis} from '../../database/redis';
 import {CampaignService} from '../CampaignService';
+import {ReputationPolicy} from '../ReputationPolicy';
 import {SourceBrakeService} from '../SourceBrakeService';
+import {WorkflowService} from '../WorkflowService';
 
 /**
  * Plunk Lite: a campaign or workflow whose emails bounce or are reported as spam is stopped on its
@@ -22,6 +25,7 @@ describe('SourceBrakeService', () => {
     const {project} = await factories.createUserWithProject();
     projectId = project.id;
     contactId = (await factories.createContact({projectId})).id;
+    await redis.flushdb();
   });
 
   afterEach(() => {
@@ -119,16 +123,35 @@ describe('SourceBrakeService', () => {
       expect(cancel).not.toHaveBeenCalled();
     });
 
-    it('does nothing when the campaign can no longer be cancelled', async () => {
+    it('says nothing when the campaign was cancelled by someone else while its rates were counted', async () => {
       const campaign = await sendingCampaign();
       await sent(120, {bounced: 20, campaignId: campaign.id});
-      vi.spyOn(CampaignService, 'cancel').mockRejectedValue(
-        new HttpException(400, 'Can only cancel scheduled or sending campaigns'),
-      );
+      const rates = ReputationPolicy.rates.bind(ReputationPolicy);
+      vi.spyOn(ReputationPolicy, 'rates').mockImplementation(async filter => {
+        await prisma.campaign.update({where: {id: campaign.id}, data: {status: CampaignStatus.CANCELLED}});
+        return rates(filter);
+      });
+      const cancel = vi.spyOn(CampaignService, 'cancel');
 
       await SourceBrakeService.brake(projectId, [`campaign:${campaign.id}`]);
 
+      expect(cancel).not.toHaveBeenCalled();
       expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(0);
+    });
+
+    it('still says it stopped the campaign when tidying up after it fails', async () => {
+      const campaign = await sendingCampaign();
+      await sent(120, {bounced: 20, campaignId: campaign.id});
+      vi.spyOn(CampaignService, 'cancel').mockRejectedValue(new HttpException(500, 'database down'));
+
+      await expect(SourceBrakeService.brake(projectId, [`campaign:${campaign.id}`])).rejects.toThrow('database down');
+
+      expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(
+        CampaignStatus.CANCELLED,
+      );
+      expect(
+        await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: `brake:campaign:${campaign.id}`}}),
+      ).toBe(1);
     });
   });
 
@@ -159,6 +182,48 @@ describe('SourceBrakeService', () => {
       const alert = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId}});
       expect(alert).toMatchObject({sourceKey: `brake:workflow:${workflow.id}`, label: 'Welcome'});
       expect(alert.lastError).toContain('1 of its runs that had not sent an email yet were cancelled');
+    });
+
+    it('fails the emails its cancelled runs queued, and leaves those of the runs that sent one', async () => {
+      const {workflow, done, waitingAfterAnEmail, notSentYet} = await workflowWithRuns();
+      await sent(59, {bounced: 10, workflowExecutionId: done.id});
+      await sent(1, {workflowExecutionId: waitingAfterAnEmail.id});
+      const queued = await factories.createEmail({
+        projectId,
+        contactId,
+        status: EmailStatus.PENDING,
+        sourceType: EmailSourceType.WORKFLOW,
+      });
+      await prisma.email.update({where: {id: queued.id}, data: {workflowExecutionId: notSentYet.id}});
+      const next = await factories.createEmail({projectId, contactId, status: EmailStatus.PENDING});
+      await prisma.email.update({where: {id: next.id}, data: {workflowExecutionId: waitingAfterAnEmail.id}});
+
+      await SourceBrakeService.brake(projectId, [`workflow:${workflow.id}`]);
+
+      expect(await prisma.email.findUniqueOrThrow({where: {id: queued.id}})).toMatchObject({
+        status: EmailStatus.FAILED,
+        error: 'Workflow disabled for its bounces or complaints',
+      });
+      expect((await prisma.email.findUniqueOrThrow({where: {id: next.id}})).status).toBe(EmailStatus.PENDING);
+      expect((await prisma.workflowExecution.findUniqueOrThrow({where: {id: notSentYet.id}})).status).toBe(
+        WorkflowExecutionStatus.CANCELLED,
+      );
+    });
+
+    it('counts from when the workflow was enabled again, so the bounces that stopped it do not stop it again', async () => {
+      const {workflow, done} = await workflowWithRuns();
+      await sent(60, {bounced: 20, workflowExecutionId: done.id, createdAt: new Date(Date.now() - 60_000)});
+      await SourceBrakeService.brake(projectId, [`workflow:${workflow.id}`]);
+      expect((await prisma.workflow.findUniqueOrThrow({where: {id: workflow.id}})).enabled).toBe(false);
+
+      await WorkflowService.update(projectId, workflow.id, {enabled: true});
+      await SourceBrakeService.brake(projectId, [`workflow:${workflow.id}`]);
+      expect((await prisma.workflow.findUniqueOrThrow({where: {id: workflow.id}})).enabled).toBe(true);
+
+      // New bounces past the rates do stop it
+      await sent(60, {bounced: 20, workflowExecutionId: done.id, createdAt: new Date(Date.now() + 1000)});
+      await SourceBrakeService.brake(projectId, [`workflow:${workflow.id}`]);
+      expect((await prisma.workflow.findUniqueOrThrow({where: {id: workflow.id}})).enabled).toBe(false);
     });
 
     it('only counts the emails of the last day', async () => {

@@ -12,6 +12,7 @@ import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
 import {WORKFLOW_DELETE_TRANSACTION, WorkflowEmailLinks} from './WorkflowEmailLinks.js';
+import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
 import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
@@ -277,6 +278,11 @@ export class WorkflowService {
 
       return updatedWorkflow;
     });
+
+    // Plunk Lite: a workflow enabled again has its brake count from now on
+    if (data.enabled === true && !workflow.enabled) {
+      await WorkflowEnabledAt.note(workflowId);
+    }
 
     // Invalidate workflow cache if enabled status changed or workflow is enabled
     if (data.enabled !== undefined || updated.enabled) {

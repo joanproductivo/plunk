@@ -1,4 +1,4 @@
-import {CampaignStatus, WorkflowExecutionStatus} from '@plunk/db';
+import {CampaignStatus, EmailStatus, WorkflowExecutionStatus} from '@plunk/db';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
@@ -9,6 +9,7 @@ import {FailureAlertService} from './FailureAlertService.js';
 import type {RateData} from './ReputationPolicy.js';
 import {ReputationPolicy} from './ReputationPolicy.js';
 import {SECURITY_THRESHOLDS} from './SecurityService.js';
+import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
 import {WorkflowService} from './WorkflowService.js';
 
 /**
@@ -47,6 +48,8 @@ function brakeReason(rates: RateData, minSent: number): string | undefined {
   }
   return undefined;
 }
+
+const BRAKE_EXIT_REASON = 'Workflow disabled for its bounces or complaints';
 
 export class SourceBrakeService {
   /** The source of an email, as a brake knows it; undefined for a transactional one */
@@ -116,19 +119,26 @@ export class SourceBrakeService {
       return;
     }
 
-    // It may have finished or been cancelled while the rates were counted
-    const current = await prisma.campaign.findUnique({where: {id: campaignId}, select: {status: true}});
-    if (current?.status !== CampaignStatus.SENDING) {
+    // Stopped here only if it is still sending: it may have finished, or been cancelled by someone
+    // else, while the rates were counted, and then this brake did not stop it
+    const stopped = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: CampaignStatus.SENDING},
+      data: {status: CampaignStatus.CANCELLED},
+    });
+    if (stopped.count !== 1) {
       return;
     }
+
+    // The rest of a cancel -- what is left of the send, whether it can go back to the drafts -- as
+    // `cancel` repairs a cancelled campaign
+    let cancelError: unknown;
     try {
       await CampaignService.cancel(projectId, campaignId);
     } catch (error) {
-      // Gone, or no longer cancellable: nothing left to stop
-      if (error instanceof HttpException && (error.code === 400 || error.code === 404)) {
-        return;
+      // Deleted meanwhile: nothing left to tidy up
+      if (!(error instanceof HttpException && error.code === 404)) {
+        cancelError = error;
       }
-      throw error;
     }
 
     signale.warn(`[BRAKE] Campaign ${campaignId} of project ${projectId} cancelled: ${reason}`);
@@ -137,12 +147,19 @@ export class SourceBrakeService {
       label: campaign.name,
       error: `Stopped after ${reason}. Duplicate the campaign to send it again: it will go to its whole audience.`,
     });
+    if (cancelError) {
+      throw cancelError;
+    }
   }
 
   /**
    * Disables a workflow whose emails of the last day bounce or are reported too often, as the
-   * dashboard does, and cancels its executions that have not sent an email yet. The ones that have
-   * go on, as they do whenever a workflow is disabled.
+   * dashboard does, and cancels its executions that have not sent an email yet, with the emails
+   * they queued that have not gone out. The ones that have sent one go on, as they do whenever a
+   * workflow is disabled.
+   *
+   * The day counts from the last time the workflow was enabled, if that is later: the bounces that
+   * stopped it must not stop it again as soon as it is enabled.
    */
   private static async brakeWorkflow(projectId: string, workflowId: string): Promise<void> {
     const workflow = await prisma.workflow.findFirst({
@@ -153,7 +170,9 @@ export class SourceBrakeService {
       return;
     }
 
-    const since = new Date(Date.now() - WORKFLOW_WINDOW_MS);
+    const dayAgo = new Date(Date.now() - WORKFLOW_WINDOW_MS);
+    const enabledAt = await WorkflowEnabledAt.get(workflowId);
+    const since = enabledAt && enabledAt > dayAgo ? enabledAt : dayAgo;
     const reason = brakeReason(await ReputationPolicy.rates({projectId, workflowId, since}), WORKFLOW_MIN_SENT);
     if (!reason) {
       return;
@@ -164,13 +183,22 @@ export class SourceBrakeService {
       where: {
         workflowId,
         status: {in: [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.WAITING]},
-        emails: {none: {}},
+        emails: {none: {sentAt: {not: null}}},
       },
       data: {
         status: WorkflowExecutionStatus.CANCELLED,
         completedAt: new Date(),
-        exitReason: 'Workflow disabled for its bounces or complaints',
+        exitReason: BRAKE_EXIT_REASON,
       },
+    });
+    // Their emails still waiting in the queue: the email job sends only a PENDING one, and one
+    // already being sent goes out
+    await prisma.email.updateMany({
+      where: {
+        status: EmailStatus.PENDING,
+        workflowExecution: {workflowId, status: WorkflowExecutionStatus.CANCELLED, exitReason: BRAKE_EXIT_REASON},
+      },
+      data: {status: EmailStatus.FAILED, error: BRAKE_EXIT_REASON},
     });
 
     signale.warn(`[BRAKE] Workflow ${workflowId} of project ${projectId} disabled: ${reason}`);
