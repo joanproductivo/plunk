@@ -70,16 +70,29 @@ describe('LinkPopover', () => {
     );
   });
 
-  it("inserts the file's name, linked, when no text is selected", async () => {
+  it("inserts the file's name, linked and closed, apart from the word before it, when no text is selected", async () => {
     editor.commands.setTextSelection(15);
     await render();
 
     await click('Link');
     await click('File…');
     await click('Pick guide');
+    editor.commands.insertContent(' and more');
 
-    expect(editor.getText()).toBe('Read the guideguide.pdf');
-    expect(editor.getHTML()).toContain(`href="${FILE_URL}">guide.pdf</a>`);
+    expect(editor.getText()).toBe('Read the guide guide.pdf and more');
+    expect(editor.getHTML()).toContain(`href="${FILE_URL}">guide.pdf</a> and more`);
+  });
+
+  it('inserts no space at the start of a line or after one', async () => {
+    editor.commands.setContent('<p></p>');
+    editor.commands.setTextSelection(1);
+    await render();
+
+    await click('Link');
+    await click('File…');
+    await click('Pick guide');
+
+    expect(editor.getText()).toBe('guide.pdf');
   });
 
   it('offers files only when storage is configured', async () => {

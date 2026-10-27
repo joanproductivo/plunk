@@ -173,6 +173,23 @@ describe('S3Service', () => {
       );
     });
 
+    it('cuts a long name between characters, never through an emoji', async () => {
+      const S3Service = await loadS3Service('');
+      // The cut falls on the second half of the first emoji when counted in UTF-16 units
+      const filename = `${'a'.repeat(145)}😀😀😀😀😀😀.pdf`;
+
+      await S3Service.uploadFile({
+        file: Buffer.from('%PDF-1.7'),
+        filename,
+        contentType: 'application/pdf',
+        projectId: 'p',
+      });
+
+      const disposition = sentInput('PutObject')?.ContentDisposition;
+      expect(disposition).toContain(`filename="${'a'.repeat(145)}_.pdf"`);
+      expect(disposition).toContain(`filename*=UTF-8''${'a'.repeat(145)}%F0%9F%98%80.pdf`);
+    });
+
     it('opens images without naming them', async () => {
       const S3Service = await loadS3Service('');
 
@@ -311,6 +328,10 @@ describe('S3Service', () => {
       const S3Service = await loadS3Service('');
 
       expect(S3Service.hasContentsOf(Buffer.from('%PDF-1.7 …'), 'application/pdf')).toBe(true);
+      // Readers take a header after a few leading bytes (a BOM, a line), but not one deep in the file
+      expect(S3Service.hasContentsOf(Buffer.from('\ufeff\n%PDF-1.7 …'), 'application/pdf')).toBe(true);
+      expect(S3Service.hasContentsOf(Buffer.from(`${' '.repeat(2000)}%PDF-1.7`), 'application/pdf')).toBe(false);
+      expect(S3Service.hasContentsOf(Buffer.from('xx GIF89a'), 'image/gif')).toBe(false);
       expect(S3Service.hasContentsOf(Buffer.from('<html>'), 'application/pdf')).toBe(false);
       expect(S3Service.hasContentsOf(Buffer.from('GIF89a…'), 'image/gif')).toBe(true);
       expect(S3Service.hasContentsOf(Buffer.from('GIF89a…'), 'image/png')).toBe(false);

@@ -21,16 +21,23 @@ export function LinkPopover({editor, canUpload}: {editor: Editor; canUpload: boo
 
   /**
    * Links the selection to `href`. An existing link is updated whole; with nothing selected,
-   * `text` (a file's name) is inserted already linked, as there is nothing else to link.
+   * `text` (a file's name) is inserted already linked, as there is nothing else to link: apart
+   * from the word before it, and closed, so what is typed next is not part of the link.
    */
   const applyLink = (href: string, text?: string) => {
     if (editor.isActive('link')) {
       editor.chain().focus().extendMarkRange('link').setLink({href}).run();
     } else if (editor.state.selection.empty && text) {
+      const {$from} = editor.state.selection;
+      const before = $from.parent.textBetween(Math.max(0, $from.parentOffset - 1), $from.parentOffset);
       editor
         .chain()
         .focus()
-        .insertContent({type: 'text', text, marks: [{type: 'link', attrs: {href}}]})
+        .insertContent([
+          ...(before && !/\s/.test(before) ? [{type: 'text', text: ' '}] : []),
+          {type: 'text', text, marks: [{type: 'link', attrs: {href}}]},
+        ])
+        .unsetMark('link')
         .run();
     } else {
       editor.chain().focus().setLink({href}).run();
