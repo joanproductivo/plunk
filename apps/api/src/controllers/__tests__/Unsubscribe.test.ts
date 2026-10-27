@@ -2,6 +2,7 @@ import type {Request, Response} from 'express';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {API_URI, DASHBOARD_URI} from '../../app/constants';
+import {ContactService} from '../../services/ContactService';
 import {buildEmailHeaders} from '../../services/EmailHeaderService';
 import {Unsubscribe} from '../Unsubscribe';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -103,6 +104,30 @@ describe('Unsubscribe controller', () => {
 
       const events = await prisma.event.findMany({where: {name: 'contact.unsubscribed', projectId}});
       expect(events).toHaveLength(1);
+    });
+
+    it('makes a snoozed contact unsubscribe for good, so the snooze sweep leaves them out', async () => {
+      const contact = await factories.createContact({projectId, subscribed: false});
+      await prisma.contact.update({where: {id: contact.id}, data: {snoozedUntil: new Date(Date.now() - 1000)}});
+
+      await postOneClick(contact.id);
+
+      expect(await prisma.contact.findUniqueOrThrow({where: {id: contact.id}})).toMatchObject({
+        subscribed: false,
+        snoozedUntil: null,
+      });
+      expect(await prisma.event.count({where: {name: 'contact.unsubscribed', contactId: contact.id}})).toBe(1);
+      await ContactService.resumeExpiredSnoozes();
+      expect((await prisma.contact.findUniqueOrThrow({where: {id: contact.id}})).subscribed).toBe(false);
+    });
+
+    it('fires no event for a contact already unsubscribed without a snooze', async () => {
+      const contact = await factories.createContact({projectId, subscribed: false});
+
+      const captured = await postOneClick(contact.id);
+
+      expect(captured.status).toBe(200);
+      expect(await prisma.event.count({where: {name: 'contact.unsubscribed', contactId: contact.id}})).toBe(0);
     });
 
     it('reports success for an unknown contact id rather than 404 or 500', async () => {
