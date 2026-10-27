@@ -1,3 +1,4 @@
+import {Worker} from 'bullmq';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
 
@@ -128,15 +129,54 @@ describe('sweepStuckEmails', () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  /**
+   * A real email job that SES accepted and that failed every attempt to record the send, as
+   * BullMQ leaves it: taken by a worker and moved to failed
+   */
+  async function failedAcceptedJob(emailId: string, sweepRetries?: number) {
+    await emailQueue.add(
+      'send-email',
+      {emailId, accepted: {messageId: 'ses-1', subject: 'Hello'}, sweepRetries},
+      {jobId: `email-${emailId}`, attempts: 1},
+    );
+    const worker = new Worker(emailQueue.name, null, {connection: emailQueue.opts.connection, autorun: false});
+    try {
+      const job = await worker.getNextJob('test-token');
+      await job!.moveToFailed(new Error('database unreachable'), 'test-token');
+    } finally {
+      await worker.close();
+    }
+  }
+
   it('retries the job of an email SES accepted, so it is recorded rather than resent', async () => {
     const email = await stuckEmail(EmailStatus.SENDING, minutesAgo(30));
-    const job = jobInState('failed', {emailId: email.id, accepted: {messageId: 'ses-1', subject: 'Hello'}});
+    await failedAcceptedJob(email.id);
 
     const result = await sweepStuckEmails(now);
 
     expect(result.retried).toBe(1);
-    expect(job.retry).toHaveBeenCalledWith('failed');
+    const job = await emailQueue.getJob(`email-${email.id}`);
+    // Queued again with a fresh round of attempts, and the round counted
+    expect(['waiting', 'prioritized']).toContain(await job!.getState());
+    expect(job!.attemptsMade).toBe(0);
+    expect(job!.data.sweepRetries).toBe(1);
     expect((await prisma.email.findUnique({where: {id: email.id}}))?.status).toBe(EmailStatus.SENDING);
+  });
+
+  it('stops retrying an accepted email after its rounds, and alerts', async () => {
+    const email = await stuckEmail(EmailStatus.SENDING, minutesAgo(30));
+    await failedAcceptedJob(email.id, 3);
+    const alert = vi.spyOn(FailureAlertService, 'recordEmail').mockResolvedValue();
+
+    const result = await sweepStuckEmails(now);
+
+    expect(result.retried).toBe(0);
+    const row = await prisma.email.findUnique({where: {id: email.id}});
+    expect(row?.status).toBe(EmailStatus.FAILED);
+    expect(row?.error).toMatch(/could not be recorded/);
+    // With the id SES gave it, so its bounces and complaints still find the row
+    expect(row?.messageId).toBe('ses-1');
+    expect(alert).toHaveBeenCalledTimes(1);
   });
 
   it.each(['active', 'prioritized'])('leaves alone a sending email whose job is %s', async state => {

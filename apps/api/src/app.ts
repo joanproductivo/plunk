@@ -4,7 +4,7 @@ import {Server} from '@overnightjs/core';
 import cookies from 'cookie-parser';
 import cors from 'cors';
 import type {NextFunction, Request, Response} from 'express';
-import {json, raw} from 'express';
+import {raw} from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import signale from 'signale';
@@ -65,6 +65,7 @@ import {
 } from './services/QueueService.js';
 import * as S3Service from './services/S3Service.js';
 import {verifyConfigurationSets} from './services/SESService.js';
+import {useJsonBodyParsers} from './middleware/bodyParsers.js';
 import {requestIdMiddleware} from './middleware/requestId.js';
 import {databaseRequestLogger} from './middleware/requestLogger.js';
 import {logger, requestLogger} from './utils/logger.js';
@@ -85,7 +86,7 @@ const server = new (class extends Server {
     });
 
     // Parse the rest of our application as json
-    this.app.use(json({limit: '50mb'}));
+    useJsonBodyParsers(this.app);
     this.app.use(cookies());
     this.app.use(helmet());
 
@@ -251,6 +252,27 @@ server.app.use((error: Error, req: Request, res: Response, _next: NextFunction) 
         statusCode,
         requestId,
         suggestion: 'Ensure your request body is valid JSON and Content-Type header is set to "application/json".',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    return res.status(statusCode).json(response);
+  }
+
+  // A body over the parser's limit: the client's to fix, not a server error
+  if ((error as {type?: unknown}).type === 'entity.too.large') {
+    const statusCode = 413;
+
+    logger.warn('Request body too large', {endpoint: `${req.method} ${req.path}`}, res);
+
+    const response: ErrorResponse = {
+      success: false,
+      error: {
+        code: ErrorCode.INVALID_REQUEST_BODY,
+        message: 'Request body is too large',
+        statusCode,
+        requestId,
+        suggestion: 'Send a smaller body. Attachments to /v1/send can add up to about 7 MB.',
       },
       timestamp: new Date().toISOString(),
     };

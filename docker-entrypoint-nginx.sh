@@ -90,6 +90,10 @@ module.exports = {
       watch: false,
       // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
       kill_timeout: 30000,
+      // A heap ceiling, so a runaway process fails on its own instead of the kernel killing the
+      // container or a neighbour; pm2 restarts it cleanly, with a signal, before V8 reaches it
+      node_args: '--max-old-space-size=768',
+      max_memory_restart: '600M',
       env: {
         NODE_ENV: 'production',
         PORT: 8080,
@@ -109,6 +113,9 @@ module.exports = {
       watch: false,
       // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
       kill_timeout: 30000,
+      // As for the api, with more room for imports and campaign batches
+      node_args: '--max-old-space-size=1024',
+      max_memory_restart: '900M',
       env: {
         NODE_ENV: 'production',
         API_URI: '${API_URI}',

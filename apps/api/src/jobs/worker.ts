@@ -25,6 +25,7 @@ import {createDomainVerificationWorker} from './domain-verification-processor.js
 import {createEmailBodyCleanupWorker} from './email-body-cleanup-processor.js';
 import {createEmailRecoverySweepWorker} from './email-recovery-sweep-processor.js';
 import {createEmailWorker} from './email-processor.js';
+import {createEventTrackingWorker} from './event-tracking-processor.js';
 import {createImportWorker} from './import-processor.js';
 import {createMeterWorker} from './meter-processor.js';
 import {createScheduledCampaignWorker} from './scheduled-processor.js';
@@ -132,6 +133,11 @@ async function startWorkers() {
     const segmentMembershipEventsWorker = createSegmentMembershipEventsWorker();
     workers.push({name: 'segment-membership-events', worker: segmentMembershipEventsWorker});
     signale.success('[WORKER] Segment membership events worker started');
+
+    // Start event tracking worker
+    const eventTrackingWorker = createEventTrackingWorker();
+    workers.push({name: 'event-tracking', worker: eventTrackingWorker});
+    signale.success('[WORKER] Event tracking worker started');
 
     signale.success('[WORKER] All workers started successfully');
 

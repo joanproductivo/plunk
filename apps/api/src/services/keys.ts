@@ -21,6 +21,9 @@ export const Keys = {
     passwordChangeRateLimit(userId: string): string {
       return `auth:password_change_rate:${userId}`;
     },
+    loginRateLimit(email: string): string {
+      return `auth:login_rate:${email}`;
+    },
   },
   RateLimit: {
     /** Per-project token bucket for an API endpoint group. See middleware/rateLimit.ts. */

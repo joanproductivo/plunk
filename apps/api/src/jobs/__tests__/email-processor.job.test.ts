@@ -120,6 +120,29 @@ describe('processEmailJob', () => {
       expect(row?.status).toBe(EmailStatus.PENDING);
     });
 
+    it('puts it back to pending when the connection to SES was never made', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(
+        Object.assign(new Error('connect ECONNREFUSED'), {code: 'ECONNREFUSED', $metadata: {attempts: 1}}),
+      );
+
+      await expect(processEmailJob(makeJob(email.id, 0))).rejects.toThrow('ECONNREFUSED');
+
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.status).toBe(EmailStatus.PENDING);
+    });
+
+    it('does not resend an email SES answered 200 for, when the answer could not be read', async () => {
+      const email = await pendingEmail();
+      // The SDK reports a body it could not read or parse with the status SES answered
+      vi.mocked(sendRawEmail).mockRejectedValue(sesError('Deserialization error', 200));
+
+      await expect(processEmailJob(makeJob(email.id, 0))).rejects.toBeInstanceOf(UnrecoverableError);
+
+      const row = await prisma.email.findUnique({where: {id: email.id}});
+      expect(row?.status).toBe(EmailStatus.FAILED);
+      expect(row?.error).toMatch(/may have been sent/);
+    });
+
     it('sends it on the retry', async () => {
       const email = await pendingEmail();
       vi.mocked(sendRawEmail).mockRejectedValueOnce(sesError('Throttling'));

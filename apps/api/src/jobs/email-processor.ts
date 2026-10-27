@@ -41,7 +41,7 @@ import {MeterService} from '../services/MeterService.js';
 import {ProjectFooterService} from '../services/ProjectFooterService.js';
 import {emailQueue} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
-import {getSendingQuota, sendRawEmail} from '../services/SESService.js';
+import {getSendingQuota, safeToRetrySend, sendRawEmail} from '../services/SESService.js';
 
 /**
  * Determine the email sending rate limit (emails per second)
@@ -101,16 +101,6 @@ type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
 
 /** What `processEmailJob` uses of a BullMQ job, so tests can drive it without a queue */
 export type EmailJob = Pick<Job<SendEmailJobData>, 'data' | 'attemptsMade' | 'opts' | 'updateData'>;
-
-/**
- * Whether an error came back from SES itself -- a throttle, a rejection, a server error -- as
- * opposed to the connection failing. An AWS SDK service error carries the HTTP status SES
- * answered with; a reset or timeout carries none, and then SES may have accepted the email.
- */
-function answeredBySes(error: unknown): boolean {
-  const metadata = (error as {$metadata?: {httpStatusCode?: unknown}} | null)?.$metadata;
-  return typeof metadata?.httpStatusCode === 'number';
-}
 
 /**
  * Finalize a campaign whose email has just reached a terminal state, without letting a failure
@@ -524,15 +514,16 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       throw new UnrecoverableError(message);
     }
 
-    if (handedToSes && !answeredBySes(error)) {
-      // The connection failed after the request went out (a reset, a timeout): SES may have
-      // accepted the email without the answer reaching us. Sending it again could deliver it
-      // twice -- once per retry -- so it is marked failed, as possibly sent, and not retried.
+    if (handedToSes && !safeToRetrySend(error)) {
+      // SES neither refused the email nor was it never reached: the connection failed after the
+      // request went out, or an answer came back unreadable, and SES may have accepted the email.
+      // Sending it again could deliver it twice -- once per retry -- so it is marked failed, as
+      // possibly sent, and not retried.
       await prisma.email.update({
         where: {id: emailId},
         data: {
           status: EmailStatus.FAILED,
-          error: `Connection to SES lost; the email may have been sent: ${message}`,
+          error: `No answer from SES could be read; the email may have been sent: ${message}`,
         },
       });
       await FailureAlertService.recordEmail(email, message);

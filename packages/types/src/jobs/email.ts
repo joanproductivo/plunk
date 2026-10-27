@@ -13,6 +13,8 @@ export interface SendEmailJobData {
    * only records the send: SES already has the message, so it must not be given it again.
    */
   accepted?: AcceptedEmail;
+  /** How many times the recovery sweep has given an accepted email's failed job another round */
+  sweepRetries?: number;
 }
 
 /** What SES returned for an accepted email, and the subject it went out with */

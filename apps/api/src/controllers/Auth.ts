@@ -13,6 +13,8 @@ import {
   GITHUB_OAUTH_ENABLED,
   GOOGLE_OAUTH_ENABLED,
   LANDING_URI,
+  LOGIN_RATE_LIMIT,
+  LOGIN_RATE_WINDOW,
   PASSWORD_RESET_RATE_LIMIT,
   PLUNK_ENABLED,
   TOKEN_EXPIRY_SECONDS,
@@ -36,6 +38,20 @@ export class Auth {
   public async login(req: Request, res: Response, _next: NextFunction) {
     const {email, password} = AuthenticationSchemas.login.parse(req.body);
 
+    // Counted before anything is looked up, and for addresses without an account too, so the
+    // limit bounds password guesses without telling which accounts exist. INCR counts each
+    // request on its own, which a read-then-write would not when guesses arrive together; the
+    // expiry is set in the same transaction, so the count can never be left without one.
+    const rateLimitKey = Keys.User.loginRateLimit(email.toLowerCase());
+    const counted = await redis.multi().incr(rateLimitKey).expire(rateLimitKey, LOGIN_RATE_WINDOW, 'NX').exec();
+    const [incrError, attempts] = counted?.[0] ?? [new Error('Login attempt count failed')];
+    if (incrError) {
+      throw incrError;
+    }
+    if (Number(attempts) > LOGIN_RATE_LIMIT) {
+      throw new RateLimitError('Too many login attempts. Please try again later.');
+    }
+
     const user = await UserService.email(email);
 
     if (!user) {
@@ -52,6 +68,8 @@ export class Auth {
       return res.json({success: false, data: 'Incorrect email or password'});
     }
 
+    // A successful login starts the count again, so signing in often never locks anyone out
+    await redis.del(rateLimitKey);
     await redis.set(Keys.User.id(user.id), JSON.stringify(user), 'EX', REDIS_ONE_MINUTE * 60);
 
     const token = jwt.sign(user.id);

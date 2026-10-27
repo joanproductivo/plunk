@@ -16,6 +16,7 @@ import type {
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
   EmailRecoverySweepJobData,
+  EventTrackingJobData,
   IdempotencyKeyCleanupJobData,
   MeterEventJobData,
   ScheduledCampaignJobData,
@@ -319,6 +320,22 @@ export const segmentMembershipEventsQueue = new Queue<SegmentMembershipEventsJob
   },
 });
 
+/**
+ * SES events tracked outside the webhook request that received them. One attempt: tracking an
+ * event starts and resumes workflows, and a run repeated after it got part of the way could
+ * send their emails twice. A failed job stays in the queue, where it can be seen.
+ */
+export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-tracking', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 1,
+    // Kept up to a day (or the last 20,000), so a copy of the same notification that SNS
+    // delivers again -- within minutes, normally -- finds its job and is not tracked twice
+    removeOnComplete: {age: 86_400, count: 20_000},
+    removeOnFail: 5000,
+  },
+});
+
 function emailPriorityFor(sourceType: EmailSourceType): number {
   switch (sourceType) {
     case EmailSourceType.TRANSACTIONAL:
@@ -446,13 +463,21 @@ export class QueueService {
    */
   public static async scheduleCampaign(campaignId: string, scheduledFor: Date): Promise<Job<ScheduledCampaignJobData>> {
     const delay = scheduledFor.getTime() - Date.now();
+    const jobId = `scheduled-campaign-${campaignId}`;
+
+    // A finished or failed job under this id -- a campaign that could not start and was
+    // scheduled again -- would make BullMQ ignore the new one, and the campaign would never go out
+    const previous = await scheduledQueue.getJob(jobId);
+    if (previous && ['completed', 'failed'].includes(await previous.getState())) {
+      await previous.remove();
+    }
 
     return scheduledQueue.add(
       'send-scheduled-campaign',
       {campaignId},
       {
         delay: Math.max(0, delay),
-        jobId: `scheduled-campaign-${campaignId}`,
+        jobId,
       },
     );
   }
@@ -638,6 +663,19 @@ export class QueueService {
   }
 
   /**
+   * Queue an SES event to be tracked by the worker. The job ID is the SNS message's, so copies of
+   * one notification, which SNS delivers at least once, track the event once.
+   */
+  public static async queueEventTracking(
+    data: EventTrackingJobData,
+    snsMessageId: string | undefined,
+  ): Promise<Job<EventTrackingJobData>> {
+    return eventTrackingQueue.add('track-event', data, {
+      jobId: snsMessageId ? `sns-${snsMessageId}` : undefined,
+    });
+  }
+
+  /**
    * Get queue statistics
    */
   public static async getStats() {
@@ -654,6 +692,7 @@ export class QueueService {
       bulkContactCounts,
       meterCounts,
       segmentMembershipEventsCounts,
+      eventTrackingCounts,
     ] = await Promise.all([
       emailQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       campaignQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
@@ -667,6 +706,7 @@ export class QueueService {
       bulkContactQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       meterQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       segmentMembershipEventsQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      eventTrackingQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
     ]);
 
     return {
@@ -682,6 +722,7 @@ export class QueueService {
       bulkContact: bulkContactCounts,
       meter: meterCounts,
       segmentMembershipEvents: segmentMembershipEventsCounts,
+      eventTracking: eventTrackingCounts,
     };
   }
 
@@ -875,6 +916,7 @@ export class QueueService {
       bulkContactQueue.close(),
       meterQueue.close(),
       segmentMembershipEventsQueue.close(),
+      eventTrackingQueue.close(),
     ]);
   }
 }

@@ -67,11 +67,11 @@ The bundled Docker setup includes Minio with defaults that work out of the box. 
 
 ## Attachments
 
-Plunk supports attachments on transactional emails. AWS SES caps total message size at 40 MB; the defaults below leave headroom but can be tuned for your use case.
+Plunk supports attachments on transactional emails. AWS SES caps total message size at 40 MB, but a `/v1/send` request can be at most 10 MB, the limit of the image's nginx and of the API's body parser. Attachments travel base64-encoded, which adds a third, so in practice they can add up to about 7 MB. The defaults below can be tuned within that.
 
 | Variable                 | Required | Description                                                                                                              | Default |
 | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ | ------- |
-| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. Hard upper bound enforced by AWS SES is 40 MB.                     | `10`    |
+| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. Requests are capped at 10 MB, so ~7 MB.                           | `10`    |
 | `MAX_ATTACHMENTS_COUNT`  | No       | Maximum number of attachments per email.                                                                                 | `10`    |
 
 ## API Rate Limiting
