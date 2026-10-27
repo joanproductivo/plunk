@@ -240,5 +240,14 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     });
     expect(byId[second.executionId]!.status).toBe(WorkflowExecutionStatus.COMPLETED);
   });
+
+  it('resumes no wait for an event without a contact (Plunk Lite)', async () => {
+    const run = await createRun();
+
+    await WorkflowExecutionService.handleEvent(projectId, EVENT, undefined);
+
+    expect(await outcome(run)).toEqual({sends: 0, emails: 0});
+    expect((await run.waitExecution()).status).toBe(StepExecutionStatus.WAITING);
+  });
 });
 

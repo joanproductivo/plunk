@@ -492,6 +492,12 @@ export class WorkflowExecutionService {
     data?: Record<string, unknown>,
     emailId?: string,
   ): Promise<void> {
+    // Plunk Lite: a wait belongs to one contact, so an event without one resumes none (it used to
+    // resume every contact waiting for that name)
+    if (!contactId) {
+      return;
+    }
+
     // Find workflows waiting for this event (a cancelled execution keeps its wait step WAITING)
     const waitingExecutions = await prisma.workflowStepExecution.findMany({
       where: {
@@ -500,7 +506,7 @@ export class WorkflowExecutionService {
           workflow: {projectId},
           // Plunk Lite: a cancelled or failed run keeps its wait step WAITING, and never resumes
           status: {notIn: STOPPED_STATUSES},
-          ...(contactId ? {contactId} : {}),
+          contactId,
         },
         step: {
           type: 'WAIT_FOR_EVENT',

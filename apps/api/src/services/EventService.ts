@@ -6,6 +6,7 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {ValidationError} from '../exceptions/index.js';
 import {Keys} from './keys.js';
 
 import {WorkflowEntryService} from './WorkflowEntryService.js';
@@ -370,6 +371,26 @@ export class EventService {
     }
 
     return false;
+  }
+
+  /**
+   * Plunk Lite: refuse an event a caller may not track by hand, as the API's validation errors do
+   * @param field - The request field that holds the name (`event` on /v1/track, `name` on /events/track)
+   */
+  public static assertTrackable(eventName: string, field: string): void {
+    if (EventService.isReservedEvent(eventName)) {
+      throw new ValidationError(
+        [
+          {
+            field,
+            message: `Event name "${eventName}" is reserved for system use and cannot be manually tracked`,
+            code: 'reserved_event',
+            received: eventName,
+          },
+        ],
+        'Cannot track reserved system event',
+      );
+    }
   }
 
   /**

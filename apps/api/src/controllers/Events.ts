@@ -1,9 +1,11 @@
 import {Controller, Delete, Get, Middleware, Post} from '@overnightjs/core';
+import {EventSchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
 import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {NotFound} from '../exceptions/index.js';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
+import {trackRateLimit} from '../middleware/rateLimit.js';
 import {ContactService} from '../services/ContactService.js';
 import {EventService} from '../services/EventService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -13,24 +15,21 @@ export class Events {
   /**
    * POST /events/track
    * Track a custom event (can trigger workflows)
+   * Plunk Lite: for a contact (`contactId` is required), with the same limits on the name and the
+   * data as /v1/track and its rate limit, and never a reserved event
    */
   @Post('track')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, trackRateLimit])
   @CatchAsync
   public async track(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
-    const {name, contactId, emailId, data} = req.body;
-
-    if (!name) {
-      return res.status(400).json({error: 'Event name is required'});
-    }
+    const {name, contactId, emailId, data} = EventSchemas.track.parse(req.body);
+    EventService.assertTrackable(name, 'name');
 
     // Both IDs are client-supplied: they must belong to the authenticated project
     // before they are recorded or used to start workflows (cross-tenant IDOR)
-    if (contactId) {
-      // Throws a 404 when the contact belongs to another project
-      await ContactService.get(auth.projectId!, contactId);
-    }
+    // Throws a 404 when the contact belongs to another project
+    await ContactService.get(auth.projectId!, contactId);
 
     if (emailId) {
       const email = await prisma.email.findFirst({
@@ -43,7 +42,13 @@ export class Events {
       }
     }
 
-    const event = await EventService.trackEvent(auth.projectId!, name, contactId, emailId, data);
+    const event = await EventService.trackEvent(
+      auth.projectId!,
+      name,
+      contactId,
+      emailId,
+      data as Record<string, unknown> | undefined,
+    );
 
     return res.status(201).json(event);
   }
