@@ -2,19 +2,45 @@ import crypto from 'crypto';
 
 import signale from 'signale';
 
-const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
+// SNS in an AWS region (`sns.eu-north-1.amazonaws.com`, GovCloud, China): nothing else is fetched
+const SNS_CERT_HOST_RE = /^sns\.[a-z]{2}(-gov)?-[a-z]+-\d\.amazonaws\.com(\.cn)?$/;
 // The only shape AWS publishes its signing certificates under
 const SNS_CERT_PATH_RE = /^\/SimpleNotificationService-[A-Za-z0-9]+\.pem$/;
 // AWS rotates its signing certificate now and then, so a handful covers every region a
 // topic can live in; past this, the oldest one fetched goes first
 const CERT_CACHE_MAX = 20;
 const signingCertCache = new Map<string, string>();
+// URLs whose certificate does not exist (a 4xx, a host that is not there), not asked for again for a
+// while: a forged message can name any of them, once per path. Bounded like the certificates.
+const MISSING_CERT_MS = 5 * 60 * 1000;
+const MISSING_CERT_MAX = 200;
+const missingCertCache = new Map<string, number>();
 
 /** The outcome of checking an SNS message signature */
 export type SnsSignatureCheck = 'valid' | 'invalid' | 'unavailable';
 
 /** AWS's signing certificate could not be fetched: the network failed, or SNS answered with a 5xx */
 class SigningCertUnavailableError extends Error {}
+
+/** Whether a failed fetch says the host does not exist (DNS answered NXDOMAIN) */
+function isMissingHost(error: unknown): boolean {
+  for (let cause = error; cause && typeof cause === 'object'; cause = (cause as {cause?: unknown}).cause) {
+    if ((cause as {code?: unknown}).code === 'ENOTFOUND') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A certificate URL that answered it has no certificate: invalid, and remembered for a while */
+function missingCert(key: string, reason: string): Error {
+  missingCertCache.delete(key);
+  if (missingCertCache.size >= MISSING_CERT_MAX) {
+    missingCertCache.delete(missingCertCache.keys().next().value!);
+  }
+  missingCertCache.set(key, Date.now() + MISSING_CERT_MS);
+  return new Error(`Failed to fetch SNS signing cert: ${reason}`);
+}
 
 /**
  * The certificate URL as a cache key, or null when it is not one AWS would sign with: an https
@@ -45,21 +71,28 @@ function signingCertKey(certUrl: string): string | null {
 async function fetchSigningCert(key: string): Promise<string> {
   const cached = signingCertCache.get(key);
   if (cached) return cached;
+  const missingUntil = missingCertCache.get(key);
+  if (missingUntil !== undefined) {
+    if (missingUntil > Date.now()) throw new Error('SNS signing cert known to be missing');
+    missingCertCache.delete(key);
+  }
 
   // Anything that keeps an answer from arriving -- the network, the timeout (which runs from
   // the request to the last byte of the body), a 5xx -- is unavailable. A 4xx is an answer: the
-  // certificate does not exist, so the signature cannot be valid.
+  // certificate does not exist, so the signature cannot be valid. So is a host DNS says does not
+  // exist, a region that is not one.
   const signal = AbortSignal.timeout(5000);
   let response: Response;
   try {
     response = await fetch(key, {signal});
   } catch (error) {
+    if (isMissingHost(error)) throw missingCert(key, 'no such host');
     throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
   }
   if (response.status >= 500) {
     throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.status}`);
   }
-  if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
+  if (!response.ok) throw missingCert(key, `${response.status} ${response.statusText}`);
 
   let pem: string;
   try {

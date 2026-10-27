@@ -56,6 +56,41 @@ describe('SnsSignature.verify - fetching the signing certificate', () => {
 
     expect(await SnsSignature.verify(notification())).toBe('invalid');
   });
+
+  it('is invalid when the host does not exist', async () => {
+    const fetchSpy = vi.fn(() =>
+      Promise.reject(
+        new TypeError('fetch failed', {cause: Object.assign(new Error('getaddrinfo'), {code: 'ENOTFOUND'})}),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    expect(
+      await SnsSignature.verify(notification('https://sns.xx-fake-9.amazonaws.com/SimpleNotificationService-x.pem')),
+    ).toBe('invalid');
+  });
+
+  it('does not ask again for a while for a certificate that does not exist', async () => {
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response('not found', {status: 404, statusText: 'Not Found'})));
+    vi.stubGlobal('fetch', fetchSpy);
+    const certUrl = 'https://sns.eu-north-1.amazonaws.com/SimpleNotificationService-missing.pem';
+
+    expect(await SnsSignature.verify(notification(certUrl))).toBe('invalid');
+    expect(await SnsSignature.verify(notification(certUrl))).toBe('invalid');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again for a certificate that could not be fetched', async () => {
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response('busy', {status: 503})));
+    vi.stubGlobal('fetch', fetchSpy);
+    const certUrl = 'https://sns.eu-north-1.amazonaws.com/SimpleNotificationService-busy.pem';
+
+    expect(await SnsSignature.verify(notification(certUrl))).toBe('unavailable');
+    expect(await SnsSignature.verify(notification(certUrl))).toBe('unavailable');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**
@@ -64,6 +99,19 @@ describe('SnsSignature.verify - fetching the signing certificate', () => {
  */
 describe('SnsSignature.verify - which certificate URLs are fetched', () => {
   it.each([
+    'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-ok.pem',
+    'https://sns.us-gov-west-1.amazonaws.com/SimpleNotificationService-ok.pem',
+    'https://sns.cn-north-1.amazonaws.com.cn/SimpleNotificationService-ok.pem',
+  ])('fetches the certificate of a region, %s', async certUrl => {
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response('not a certificate')));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await SnsSignature.verify(notification(certUrl));
+
+    expect(fetchSpy).toHaveBeenCalledWith(certUrl, expect.anything());
+  });
+
+  it.each([
     ['a query', 'https://sns.eu-north-1.amazonaws.com/SimpleNotificationService-abc.pem?x=1'],
     ['a fragment', 'https://sns.eu-north-1.amazonaws.com/SimpleNotificationService-abc.pem#x'],
     ['credentials', 'https://user:pass@sns.eu-north-1.amazonaws.com/SimpleNotificationService-abc.pem'],
@@ -71,6 +119,8 @@ describe('SnsSignature.verify - which certificate URLs are fetched', () => {
     ['a path that is not an SNS .pem', 'https://sns.eu-north-1.amazonaws.com/other/file.pem'],
     ['a path under the .pem', 'https://sns.eu-north-1.amazonaws.com/SimpleNotificationService-abc.pem/x'],
     ['another host', 'https://example.com/SimpleNotificationService-abc.pem'],
+    ['an SNS host of no region', 'https://sns.attacker-controlled.amazonaws.com/SimpleNotificationService-abc.pem'],
+    ['a region of no shape AWS uses', 'https://sns.eu-north.amazonaws.com/SimpleNotificationService-abc.pem'],
     ['plain http', 'http://sns.eu-north-1.amazonaws.com/SimpleNotificationService-abc.pem'],
   ])('rejects a URL with %s without requesting it', async (_case, certUrl) => {
     const fetchSpy = vi.fn(() => Promise.resolve(new Response('pem')));
