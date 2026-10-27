@@ -404,6 +404,23 @@ describe('SecurityService', () => {
       expect(await isDisabled()).toBe(false);
     });
 
+    it('disables on 5 complaints however few emails went out', async () => {
+      // 5 complaints in 150 emails: no minimum of emails, as there is for bounces
+      await createEmails(150, {complainedCount: 5});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
+
+      expect(await isDisabled()).toBe(true);
+    });
+
+    it('does not disable on 4 complaints, however high the rate', async () => {
+      await createEmails(50, {complainedCount: 4});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
+
+      expect(await isDisabled()).toBe(false);
+    });
+
     it('only alerts on an all-time rate, however high', async () => {
       const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
       await createEmails(1000, {bouncedCount: 50, complainedCount: 6, createdAt: longAgo});

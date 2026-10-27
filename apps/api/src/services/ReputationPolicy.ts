@@ -60,9 +60,13 @@ const SEVEN_DAYS_MS = 7 * 86_400_000;
 /** When the project was last reactivated, kept as long as its emails before then are in the 7 days */
 const REACTIVATED_KEY = (projectId: string) => `plunk-lite:reactivated:${projectId}`;
 
-/** Past these, in the last 7 days, the project is disabled (with AUTO_PROJECT_DISABLE) */
-export const DISABLE_THRESHOLDS = {
-  MIN_EMAILS: 200,
+/**
+ * Past these, in the last 7 days, the project is disabled (with AUTO_PROJECT_DISABLE). The minimum of
+ * emails is for bounces only: a handful of complaints is already a warning from the mailbox
+ * providers, however few emails went out.
+ */
+const DISABLE_THRESHOLDS = {
+  MIN_EMAILS_FOR_BOUNCES: 200,
   BOUNCE_PERCENT: PLUNK_LITE_DISABLE_BOUNCE_PERCENT,
   MIN_BOUNCES: 25,
   COMPLAINT_PERCENT: PLUNK_LITE_DISABLE_COMPLAINT_PERCENT,
@@ -130,13 +134,11 @@ export class ReputationPolicy {
     // The emails deleted in the hour of the reactivation are counted by that hour, with the bounces
     // that disabled the project: they are left out with it
     const sevenDay = await this.rates({projectId, since, deletedFromNextHour: sinceReactivation});
-    const enough = sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS;
     const bounce =
-      enough &&
+      sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS_FOR_BOUNCES &&
       sevenDay.bounces >= DISABLE_THRESHOLDS.MIN_BOUNCES &&
       sevenDay.bounceRate >= DISABLE_THRESHOLDS.BOUNCE_PERCENT;
     const complaint =
-      enough &&
       sevenDay.complaints >= DISABLE_THRESHOLDS.MIN_COMPLAINTS &&
       sevenDay.complaintRate >= DISABLE_THRESHOLDS.COMPLAINT_PERCENT;
 
