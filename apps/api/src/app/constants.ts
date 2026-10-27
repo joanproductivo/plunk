@@ -187,6 +187,9 @@ export const EMAIL_VERIFICATION_RATE_WINDOW = 3600; // 1 hour in seconds
 // Authenticated password change: bounds guesses at the current password
 export const PASSWORD_CHANGE_RATE_LIMIT = 5; // Max 5 attempts per window
 export const PASSWORD_CHANGE_RATE_WINDOW = 900; // 15 minutes in seconds
+// Password login: bounds guesses at an account's password
+export const LOGIN_RATE_LIMIT = 10; // Max 10 attempts per window
+export const LOGIN_RATE_WINDOW = 900; // 15 minutes in seconds
 
 // Phishing Detection (optional)
 // OpenRouter API integration for content safety checks
