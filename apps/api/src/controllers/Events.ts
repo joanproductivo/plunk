@@ -58,7 +58,8 @@ export class Events {
   public async list(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
     const eventName = req.query.eventName as string | undefined;
-    const limit = parseInt(req.query.limit as string) || 100;
+    // Plunk Lite: between 1 and 100
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 100, 100));
 
     const events = await EventService.getProjectEvents(auth.projectId!, eventName, limit);
 
@@ -92,7 +93,8 @@ export class Events {
   public async getContactEvents(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
     const contactId = req.params.contactId;
-    const limit = parseInt(req.query.limit as string) || 50;
+    // Plunk Lite: between 1 and 100
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 100));
 
     if (!contactId) {
       return res.status(400).json({error: 'Contact ID is required'});
