@@ -41,6 +41,15 @@ describe('processScheduledCampaign', () => {
     expect(alert).toHaveBeenCalledWith(campaign.id, expect.stringContaining('Referenced segment not found'));
   });
 
+  it('leaves to its own job a campaign rescheduled for later', async () => {
+    const campaign = await factories.createScheduledCampaign(projectId, new Date(Date.now() + 24 * 60 * 60 * 1000));
+    const start = vi.spyOn(CampaignService, 'startSending');
+
+    await processScheduledCampaign(jobFor(campaign.id));
+
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('skips quietly a campaign that left SCHEDULED before it fired', async () => {
     const campaign = await factories.createScheduledCampaign(projectId, new Date());
     vi.spyOn(CampaignService, 'startSending').mockImplementation(async () => {

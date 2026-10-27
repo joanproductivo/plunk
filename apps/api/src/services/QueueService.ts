@@ -465,10 +465,11 @@ export class QueueService {
     const delay = scheduledFor.getTime() - Date.now();
     const jobId = `scheduled-campaign-${campaignId}`;
 
-    // A finished or failed job under this id -- a campaign that could not start and was
-    // scheduled again -- would make BullMQ ignore the new one, and the campaign would never go out
+    // Any job already under this id -- the campaign's earlier schedule, still waiting, or one that
+    // finished or could not start -- would make BullMQ ignore the new one: the campaign would go
+    // out at the old time, or never. Only a job already running is left alone.
     const previous = await scheduledQueue.getJob(jobId);
-    if (previous && ['completed', 'failed'].includes(await previous.getState())) {
+    if (previous && (await previous.getState()) !== 'active') {
       await previous.remove();
     }
 

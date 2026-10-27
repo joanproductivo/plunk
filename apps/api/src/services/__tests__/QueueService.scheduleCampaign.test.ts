@@ -12,6 +12,18 @@ describe('QueueService.scheduleCampaign', () => {
     await scheduledQueue.obliterate({force: true});
   });
 
+  it('replaces the waiting job of an earlier schedule', async () => {
+    const campaignId = 'campaign-moved';
+    await QueueService.scheduleCampaign(campaignId, new Date(Date.now() + 60 * 60 * 1000));
+
+    const later = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await QueueService.scheduleCampaign(campaignId, later);
+
+    const job = await scheduledQueue.getJob(`scheduled-campaign-${campaignId}`);
+    // Delayed until the new time, not the old one
+    expect(job!.opts.delay).toBeGreaterThan(6 * 24 * 60 * 60 * 1000);
+  });
+
   it('replaces the failed job of an earlier schedule', async () => {
     const campaignId = 'campaign-rescheduled';
     await QueueService.scheduleCampaign(campaignId, new Date());

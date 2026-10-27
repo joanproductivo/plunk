@@ -47,7 +47,9 @@ export const UtilitySchemas = {
 
 export const AuthenticationSchemas = {
   login: z.object({
-    email,
+    // The longest a deliverable address can be (RFC 5321): the login is public, and an address
+    // of any length was taken as is
+    email: email.max(254),
     password: z.string().min(6),
   }),
   signup: z.object({

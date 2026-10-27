@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto';
+
 export const Keys = {
   User: {
     id(id: string): string {
@@ -21,8 +23,9 @@ export const Keys = {
     passwordChangeRateLimit(userId: string): string {
       return `auth:password_change_rate:${userId}`;
     },
+    /** Hashed, so a key's size never depends on what a caller sends as the address */
     loginRateLimit(email: string): string {
-      return `auth:login_rate:${email}`;
+      return `auth:login_rate:${createHash('sha256').update(email.trim().toLowerCase()).digest('hex')}`;
     },
   },
   RateLimit: {

@@ -14,6 +14,9 @@ import {CampaignService} from '../services/CampaignService.js';
 import {FailureAlertService} from '../services/FailureAlertService.js';
 import {scheduledQueue} from '../services/QueueService.js';
 
+/** How early a scheduled job may fire for its campaign's time, delays being approximate */
+const RESCHEDULED_MARGIN_MS = 60_000;
+
 /**
  * Start a scheduled campaign whose time has come, unless it has been cancelled, rescheduled or its
  * project disabled since
@@ -54,6 +57,15 @@ export async function processScheduledCampaign(job: Job<ScheduledCampaignJobData
   if (campaign.status !== CampaignStatus.SCHEDULED) {
     signale.warn(
       `[SCHEDULED-PROCESSOR] Campaign ${campaignId} is not in SCHEDULED status (${campaign.status}), skipping`,
+    );
+    return;
+  }
+
+  // A job of an earlier schedule, if one outlived a reschedule: the campaign goes out at the time
+  // it is scheduled for now, by the job of that schedule
+  if (campaign.scheduledFor && campaign.scheduledFor.getTime() > Date.now() + RESCHEDULED_MARGIN_MS) {
+    signale.warn(
+      `[SCHEDULED-PROCESSOR] Campaign ${campaignId} is now scheduled for ${campaign.scheduledFor.toISOString()}, skipping an earlier schedule's job`,
     );
     return;
   }
