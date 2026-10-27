@@ -318,6 +318,12 @@ describe('Actions API Integration Tests', () => {
         expect(track({['k\ud800']: 1}).success).toBe(false);
         // A whole pair is fine: an emoji
         expect(track({name: 'hola \ud83d\ude00'}).success).toBe(true);
+        // Nor in the event name or a recipient's name, which are stored too
+        expect(track({}, 'sign\ud800up').success).toBe(false);
+        expect(
+          ActionSchemas.send.safeParse({to: [{name: 'Ana\ud800', email: 'a@example.com'}], subject: 'Hi', body: 'Hi'})
+            .success,
+        ).toBe(false);
       });
 
       it('takes at most 50 recipients in one send', () => {

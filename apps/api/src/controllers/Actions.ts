@@ -396,7 +396,12 @@ export class Actions {
     }
     // A 207 does not carry an unexpected error to the error handler, so it is logged here
     if (firstServerError) {
-      logger.error('Unexpected error sending to one recipient of /v1/send', firstServerError, {}, res);
+      logger.error(
+        'Unexpected error sending to one recipient of /v1/send',
+        firstServerError,
+        {code: describeError(firstServerError).code},
+        res,
+      );
     }
 
     // Plunk Lite: a partial send is 207, with the recipients that failed; still 2xx, so its

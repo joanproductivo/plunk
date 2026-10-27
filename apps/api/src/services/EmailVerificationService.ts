@@ -52,15 +52,18 @@ const domainOf = (email: string) => email.split('@')[1]?.toLowerCase() ?? '';
 // An MX that points nowhere: the null MX of RFC 7505 ('' or '.'), or this very machine
 const NO_MAIL_EXCHANGES = new Set(['', 'localhost', '127.0.0.1', '0.0.0.0']);
 
-// Real domains the spell checker takes for a large provider's, one letter away
-const NOT_SLIPS = new Set(['email.com', 'cloud.com']);
+// Real domains the spell checker takes for a large provider's, one letter away and with its first
+// letter (GRAIL, Proton's gail.com, Yazoo)
+const NOT_SLIPS = new Set(['email.com', 'cloud.com', 'grail.com', 'gail.com', 'yazoo.com']);
 
 /**
  * Plunk Lite: whether a domain is a slip of a large provider's that the spell checker suggests: the
- * same ending, and a first label one edit away (a letter added, dropped, changed or two swapped) from
- * a provider name of at least five letters. Measured over 330 real domains and every 2-3 letter
- * label: shorter names (me, msn, live) and wider distances caught real ones -- foxmail.com, uah.es,
- * msc.com, ge.com -- where this catches none and still catches gmial.com, hotmal.es or iclod.com.
+ * same ending, the same first letter, and a first label one edit away (a letter added, dropped,
+ * changed or two swapped) from a provider name of at least five letters. Measured over 330 real
+ * domains, every 2-3 letter label and every one-edit variant of the providers: shorter names (me,
+ * msn, live), other first letters and wider distances caught real ones -- foxmail.com, uah.es,
+ * msc.com, wahoo.com, dcloud.com -- and this still catches gmial.com, hotmal.es or iclod.com. A slip
+ * of the first letter (otmail.com) is left to DNS.
  */
 function isLargeProviderSlip(typed: string, suggested: string): boolean {
   if (typed === suggested || !NEVER_REFUSED_DOMAINS.has(suggested) || NOT_SLIPS.has(typed)) {
@@ -72,7 +75,7 @@ function isLargeProviderSlip(typed: string, suggested: string): boolean {
     return false;
   }
   const label = suggested.slice(0, suggestedDot);
-  return label.length >= 5 && editDistance(typed.slice(0, typedDot), label) <= 1;
+  return label.length >= 5 && typed[0] === label[0] && editDistance(typed.slice(0, typedDot), label) <= 1;
 }
 
 /** Edits between two strings, a swap of neighbours counting as one (optimal string alignment) */
@@ -224,14 +227,15 @@ export class EmailVerificationService {
     });
     try {
       const reason = await Promise.race([this.lookUpSignupDomain(resolver, domain), deadline]);
-      // At the cap, the oldest goes: a Map keeps insertion order, and the large providers never get here
+      // At the cap, the one written longest ago goes: a Map keeps insertion order, and the large
+      // providers never get here. A domain written again moves to the end.
+      this.signupDomains.delete(domain);
       if (this.signupDomains.size >= SIGNUP_DOMAIN_CACHE_MAX) {
         const oldest = this.signupDomains.keys().next().value;
         if (oldest !== undefined) {
           this.signupDomains.delete(oldest);
         }
       }
-      this.signupDomains.delete(domain);
       const keepFor = reason === undefined ? SIGNUP_DOMAIN_UNCERTAIN_MS : SIGNUP_DOMAIN_CACHE_MS;
       this.signupDomains.set(domain, {reason, expiresAt: Date.now() + keepFor});
       return reason;

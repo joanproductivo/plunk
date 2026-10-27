@@ -78,6 +78,10 @@ describe('EmailVerificationService.verifySignup', () => {
     'live.com.mx',
     'gmx.net',
     'hotmail.fr',
+    'grail.com',
+    'wahoo.com',
+    'dcloud.com',
+    'qmail.com',
   ])('accepts %s, a real domain the spell checker takes for a large provider or close to one', async domain => {
     expect((await EmailVerificationService.verifySignup(`ana@${domain}`)).valid).toBe(true);
   });
@@ -86,7 +90,10 @@ describe('EmailVerificationService.verifySignup', () => {
     resolveMx.mockRejectedValue(dnsError('ENODATA'));
 
     // The spell checker would say mail.es
-    expect(await EmailVerificationService.verifySignup('ana@gmail.es')).not.toHaveProperty('suggestedEmail');
+    expect(await EmailVerificationService.verifySignup('ana@gmail.es')).toEqual({
+      valid: false,
+      reasons: ['Domain cannot receive email (no MX or address records)'],
+    });
   });
 
   it.each(['', '.', 'localhost', 'localhost.', '127.0.0.1', '0.0.0.0'])(

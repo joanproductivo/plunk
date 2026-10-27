@@ -28,6 +28,9 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff]
 /** Plunk Lite: whether Postgres can store a text: no \u0000 and no lone surrogate */
 const storableText = (text: string) => !text.includes('\u0000') && !LONE_SURROGATE.test(text);
 
+/** Plunk Lite: a /v1/send recipient's name, saved in the contact's data, so one Postgres can store */
+const recipientName = z.string().refine(text => storableText(text), 'Name contains invalid characters');
+
 /**
  * Plunk Lite: a JSON value whose depth and size are checked before `jsonSchema` walks it. That
  * walk is recursive, so a payload nested thousands of levels deep would overflow the stack and
@@ -575,7 +578,8 @@ export const ActionSchemas = {
       .min(1)
       .max(EVENT_NAME_MAX)
       // No control characters: line breaks would split logs, and Postgres cannot store \u0000
-      .regex(/^[^\x00-\x1f\x7f]+$/, 'Event name contains invalid characters'),
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'Event name contains invalid characters')
+      .refine(text => storableText(text), 'Event name contains invalid characters'),
     email,
     subscribed: z.boolean().optional(),
     data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
@@ -586,7 +590,7 @@ export const ActionSchemas = {
         email, // Simple email string (backward compatible)
         z.object({
           // Object with name and email
-          name: z.string().optional(),
+          name: recipientName.optional(),
           email: email,
         }),
         z
@@ -595,7 +599,7 @@ export const ActionSchemas = {
               email, // Array of email strings
               z.object({
                 // Array of objects with name and email
-                name: z.string().optional(),
+                name: recipientName.optional(),
                 email: email,
               }),
             ]),
