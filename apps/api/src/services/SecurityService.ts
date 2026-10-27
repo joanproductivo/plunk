@@ -134,7 +134,7 @@ interface RateData {
 /**
  * The two things a reputation threshold can measure, and the two events that move them.
  */
-type SecurityMetric = 'bounce' | 'complaint';
+export type SecurityMetric = 'bounce' | 'complaint';
 
 interface SecurityStatus {
   projectId: string;
@@ -245,98 +245,84 @@ export class SecurityService {
   }
 
   /**
-   * Check security status after a new bounce or complaint, and auto-disable the project if
-   * that event pushed its own metric past a critical threshold.
+   * Check security status after new bounces or complaints, and auto-disable the project if one of
+   * them pushed its own metric past a critical threshold. `triggers` are the metrics the events
+   * since the last check moved (Plunk Lite: a check runs once for a burst of them).
    *
-   * Only violations of the `trigger` metric can disable. The complaint rate is complaints
+   * Only violations of a triggering metric can disable. The complaint rate is complaints
    * over total sent, so a bounce cannot raise it (and every send only lowers it); the same
    * holds the other way round. A critical violation of the other metric was therefore
    * already there when its own last event arrived, and was judged then. Acting on it again
    * here is what re-disabled projects on their next bounce after a manual re-enable.
+   *
+   * Plunk Lite: throws when the rates cannot be read or the project cannot be disabled, so the job
+   * running it tries again -- a check that failed has not found the project healthy.
    */
-  public static async checkAndEnforceSecurityLimits(projectId: string, trigger: SecurityMetric): Promise<void> {
-    try {
-      // Invalidate cache to get fresh data
-      await this.invalidateCache(projectId);
+  public static async checkAndEnforceSecurityLimits(projectId: string, triggers: SecurityMetric[]): Promise<void> {
+    const status = await this.calculateSecurityStatus(projectId);
+    // Fresh for the dashboard too
+    await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
+      signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
+    });
+    const shouldDisable = triggers.some(trigger => status.criticalByMetric[trigger]);
 
-      // Get current security status
-      const status = await this.getSecurityStatus(projectId);
-      const shouldDisable = status.criticalByMetric[trigger];
+    // If project should be disabled, disable it (only if auto-disable is enabled)
+    if (shouldDisable && AUTO_PROJECT_DISABLE) {
+      await this.disableProject(projectId, status);
+    } else if (shouldDisable && !AUTO_PROJECT_DISABLE) {
+      // Log critical violations but don't auto-disable (self-hosted mode)
+      const project = await prisma.project.findUnique({
+        where: {id: projectId},
+        select: {name: true},
+      });
 
-      // If project should be disabled, disable it (only if auto-disable is enabled)
-      if (shouldDisable && AUTO_PROJECT_DISABLE) {
-        await this.disableProject(projectId, status);
-      } else if (shouldDisable && !AUTO_PROJECT_DISABLE) {
-        // Log critical violations but don't auto-disable (self-hosted mode)
-        const project = await prisma.project.findUnique({
-          where: {id: projectId},
-          select: {name: true},
-        });
-
-        if (project) {
-          signale.error(
-            `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations but auto-disable is turned off:`,
-            status.violations,
-          );
-          signale.info(
-            `[SECURITY] 24-hour stats: ${status.twentyFourHour.bounces} bounces, ${status.twentyFourHour.complaints} complaints out of ${status.twentyFourHour.total} emails`,
-          );
-          signale.info(
-            `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
-          );
-          signale.info(
-            `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
-          );
-          if (status.isNewProject) {
-            signale.info(
-              `[SECURITY] Project is under ${SECURITY_THRESHOLDS.NEW_PROJECT_AGE_DAYS} days old — stricter ceilings apply`,
-            );
-          }
-
-          await FailureAlertService.recordReputation(projectId, 'critical', status.violations);
-
-          // Send notification about critical security violations
-          await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
-        }
-      } else if (status.shouldDisable) {
-        // Critical, but only on the metric this event did not move: already judged, not re-enforced.
-        signale.warn(
-          `[SECURITY] Project ${projectId} has critical violations unrelated to this ${trigger}; not enforcing:`,
+      if (project) {
+        signale.error(
+          `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations but auto-disable is turned off:`,
           status.violations,
         );
-      } else if (status.warnings.length > 0) {
-        // Log warnings for monitoring
-        signale.warn(`[SECURITY] Project ${projectId} has security warnings:`, status.warnings);
-
-        // Get project name for notification
-        const project = await prisma.project.findUnique({
-          where: {id: projectId},
-          select: {name: true},
-        });
-
-        if (project) {
-          await FailureAlertService.recordReputation(projectId, 'warning', status.warnings);
-
-          // Send notification about security warning
-          await NtfyService.notifySecurityWarning(project.name, projectId, status.warnings);
+        signale.info(
+          `[SECURITY] 24-hour stats: ${status.twentyFourHour.bounces} bounces, ${status.twentyFourHour.complaints} complaints out of ${status.twentyFourHour.total} emails`,
+        );
+        signale.info(
+          `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
+        );
+        signale.info(
+          `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
+        );
+        if (status.isNewProject) {
+          signale.info(
+            `[SECURITY] Project is under ${SECURITY_THRESHOLDS.NEW_PROJECT_AGE_DAYS} days old — stricter ceilings apply`,
+          );
         }
-      }
-    } catch (error) {
-      // Log error but don't throw - we don't want security checks to break the webhook
-      signale.error(`[SECURITY] Failed to check security limits for project ${projectId}:`, error);
-    }
-  }
 
-  /**
-   * Invalidate cached security data for a project
-   * Should be called after bounce/complaint events
-   */
-  public static async invalidateCache(projectId: string): Promise<void> {
-    try {
-      const cacheKey = Keys.Security.rates(projectId);
-      await redis.del(cacheKey);
-    } catch (error) {
-      signale.error(`[SECURITY] Failed to invalidate cache for project ${projectId}:`, error);
+        await FailureAlertService.recordReputation(projectId, 'critical', status.violations);
+
+        // Send notification about critical security violations
+        await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
+      }
+    } else if (status.shouldDisable) {
+      // Critical, but only on a metric these events did not move: already judged, not re-enforced.
+      signale.warn(
+        `[SECURITY] Project ${projectId} has critical violations unrelated to this ${triggers.join(' and ')}; not enforcing:`,
+        status.violations,
+      );
+    } else if (status.warnings.length > 0) {
+      // Log warnings for monitoring
+      signale.warn(`[SECURITY] Project ${projectId} has security warnings:`, status.warnings);
+
+      // Get project name for notification
+      const project = await prisma.project.findUnique({
+        where: {id: projectId},
+        select: {name: true},
+      });
+
+      if (project) {
+        await FailureAlertService.recordReputation(projectId, 'warning', status.warnings);
+
+        // Send notification about security warning
+        await NtfyService.notifySecurityWarning(project.name, projectId, status.warnings);
+      }
     }
   }
 
@@ -673,94 +659,89 @@ export class SecurityService {
   }
 
   /**
-   * Disable a project due to security violations
+   * Disable a project due to security violations. Throws if the project cannot be read or
+   * disabled (Plunk Lite), so its check runs again; what follows the disable never throws.
    */
   private static async disableProject(projectId: string, status: SecurityStatus): Promise<void> {
-    try {
-      // Check if already disabled to avoid duplicate logs
-      const project = await prisma.project.findUnique({
-        where: {id: projectId},
-        select: {id: true, disabled: true, name: true},
-      });
+    // Check if already disabled to avoid duplicate logs
+    const project = await prisma.project.findUnique({
+      where: {id: projectId},
+      select: {id: true, disabled: true, name: true},
+    });
 
-      if (!project) {
-        signale.error(`[SECURITY] Project ${projectId} not found`);
-        return;
-      }
+    if (!project) {
+      signale.error(`[SECURITY] Project ${projectId} not found`);
+      return;
+    }
 
-      if (project.disabled) {
-        // Already disabled, just log the current violations
-        signale.warn(
-          `[SECURITY] Project ${projectId} (${project.name}) already disabled. Current violations:`,
-          status.violations,
-        );
-        return;
-      }
-
-      // Disable the project
-      await prisma.project.update({
-        where: {id: projectId},
-        data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
-      });
-
-      // Log critical security event
-      signale.error(
-        `[SECURITY] Project ${projectId} (${project.name}) has been automatically disabled due to security violations:`,
+    if (project.disabled) {
+      // Already disabled, just log the current violations
+      signale.warn(
+        `[SECURITY] Project ${projectId} (${project.name}) already disabled. Current violations:`,
         status.violations,
       );
-      signale.info(
-        `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
-      );
-      signale.info(
-        `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
-      );
+      return;
+    }
 
-      // Cancel all pending jobs for this project
-      try {
-        await QueueService.cancelAllProjectJobs(projectId);
-        signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
-      } catch (error) {
-        signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
-      }
+    // Disable the project
+    await prisma.project.update({
+      where: {id: projectId},
+      data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
+    });
 
-      await FailureAlertService.record(projectId, {
-        sourceKey: 'project',
-        label: 'Project disabled',
-        error: status.violations.join('; '),
-      });
+    // Log critical security event
+    signale.error(
+      `[SECURITY] Project ${projectId} (${project.name}) has been automatically disabled due to security violations:`,
+      status.violations,
+    );
+    signale.info(
+      `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
+    );
+    signale.info(
+      `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
+    );
 
-      // Send urgent notification about project suspension
-      await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, status.violations);
-
-      // Send email notification to project members
-      try {
-        const members = await MembershipService.getMembers(projectId);
-        const emails = members.map(m => m.email);
-        if (emails.length > 0) {
-          const metrics = (Object.keys(status.criticalByMetric) as SecurityMetric[]).filter(
-            m => status.criticalByMetric[m],
-          );
-          // Bounce/complaint rates are visible in the dashboard, so the email names them.
-          // Thresholds and the new-project 24h window stay internal.
-          const template = React.createElement(ProjectDisabledEmail, {
-            projectName: project.name,
-            projectId,
-            reason: 'reputation',
-            metrics: metrics.length > 0 ? metrics : ['bounce', 'complaint'],
-            sevenDay: status.sevenDay,
-            allTime: status.allTime,
-            dashboardUrl: DASHBOARD_URI,
-            landingUrl: LANDING_URI,
-          });
-          await Promise.all(
-            emails.map(email => sendPlatformEmail(email, 'Project Disabled', template)),
-          );
-        }
-      } catch (emailError) {
-        signale.error(`[SECURITY] Failed to send project disabled email:`, emailError);
-      }
+    // Cancel all pending jobs for this project
+    try {
+      await QueueService.cancelAllProjectJobs(projectId);
+      signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
     } catch (error) {
-      signale.error(`[SECURITY] Failed to disable project ${projectId}:`, error);
+      signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
+    }
+
+    await FailureAlertService.record(projectId, {
+      sourceKey: 'project',
+      label: 'Project disabled',
+      error: status.violations.join('; '),
+    });
+
+    // Send urgent notification about project suspension
+    await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, status.violations);
+
+    // Send email notification to project members
+    try {
+      const members = await MembershipService.getMembers(projectId);
+      const emails = members.map(m => m.email);
+      if (emails.length > 0) {
+        const metrics = (Object.keys(status.criticalByMetric) as SecurityMetric[]).filter(
+          m => status.criticalByMetric[m],
+        );
+        // Bounce/complaint rates are visible in the dashboard, so the email names them.
+        // Thresholds and the new-project 24h window stay internal.
+        const template = React.createElement(ProjectDisabledEmail, {
+          projectName: project.name,
+          projectId,
+          reason: 'reputation',
+          metrics: metrics.length > 0 ? metrics : ['bounce', 'complaint'],
+          sevenDay: status.sevenDay,
+          allTime: status.allTime,
+          dashboardUrl: DASHBOARD_URI,
+          landingUrl: LANDING_URI,
+        });
+        await Promise.all(emails.map(email => sendPlatformEmail(email, 'Project Disabled', template)));
+      }
+    } catch (emailError) {
+      signale.error(`[SECURITY] Failed to send project disabled email:`, emailError);
     }
   }
 

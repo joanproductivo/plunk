@@ -33,6 +33,7 @@ import {MeterService} from '../services/MeterService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {QueueService} from '../services/QueueService.js';
+import {ReputationCheck} from '../services/ReputationCheck.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {
   affectedAddresses,
@@ -747,14 +748,11 @@ export class Webhooks {
       // Check security limits only for a suppression the project has not been charged for
       // yet. Re-running enforcement on a copy could only re-disable a project over history it
       // has already been judged against -- which is what happened to projects that were
-      // manually re-enabled. The check logs its own failures rather than throwing.
+      // manually re-enabled. The check is queued, once for a burst, and never throws here.
       if (suppression?.enforces && !isSimulated) {
         // Only one metric moved, so only that metric's thresholds may disable the project.
         // One notification is one event type, so it can never be both.
-        await SecurityService.checkAndEnforceSecurityLimits(
-          email.projectId,
-          eventType === 'Complaint' ? 'complaint' : 'bounce',
-        );
+        await ReputationCheck.afterEvent(email, eventType === 'Complaint' ? 'complaint' : 'bounce');
       }
 
       // Operator notification for a new suppression, naming the address it is about, sent

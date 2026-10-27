@@ -63,3 +63,20 @@ export interface EmailRecoverySweepJobData {
 export interface SnoozeSweepJobData {
   // Empty - sweeps every contact whose snoozedUntil has passed
 }
+
+/**
+ * Job data for the reputation check after a bounce or complaint (Plunk Lite). One job per project
+ * is pending at a time; the events that arrive while it waits are collected in Redis, and this is
+ * the one that queued it.
+ * Used by: plunkLiteChecksQueue worker, job `security-check`
+ */
+export interface SecurityCheckJobData {
+  projectId: string;
+  trigger: 'bounce' | 'complaint';
+}
+
+/**
+ * Job data of Plunk Lite's own checks
+ * Used by: plunkLiteChecksQueue worker
+ */
+export type PlunkLiteChecksJobData = SecurityCheckJobData;

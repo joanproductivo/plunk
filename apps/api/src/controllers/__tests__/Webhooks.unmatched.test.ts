@@ -4,7 +4,7 @@ import {EmailStatus} from '@plunk/db';
 
 import {prisma as appPrisma} from '../../database/prisma';
 import {QueueService} from '../../services/QueueService';
-import {SecurityService} from '../../services/SecurityService';
+import {ReputationCheck} from '../../services/ReputationCheck';
 import {getAwsAccountId} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
 import {post} from './snsWebhook';
@@ -37,7 +37,7 @@ describe('Webhooks - events without a stored messageId', () => {
     vi.spyOn(SnsSignature, 'verify').mockResolvedValue('valid');
     vi.mocked(getAwsAccountId).mockResolvedValue('111111111111');
     vi.spyOn(QueueService, 'queueEventTracking').mockResolvedValue({} as never);
-    vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+    vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
   });
 
   afterEach(() => {

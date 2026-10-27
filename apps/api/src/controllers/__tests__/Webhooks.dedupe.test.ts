@@ -7,6 +7,7 @@ import {EmailStatus} from '@plunk/db';
 import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {QueueService} from '../../services/QueueService';
+import {ReputationCheck} from '../../services/ReputationCheck';
 import {SecurityService} from '../../services/SecurityService';
 import {getAwsAccountId} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
@@ -120,7 +121,7 @@ describe('Webhooks - duplicate SNS deliveries of an event', () => {
   });
 
   it('leaves bounces to the claim on the email row, without remembering their message', async () => {
-    vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+    vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
     await sentEmail('ses-bounce-row-claim');
     const messageId = randomUUID();
 

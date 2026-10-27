@@ -225,7 +225,7 @@ describe('SecurityService', () => {
       // New project, 20K emails with 30 bounces — exceeds new project 24h critical ceiling
       await createEmails(20000, {bouncedCount: 30});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
@@ -247,7 +247,7 @@ describe('SecurityService', () => {
       });
       await createEmails(20000, {bouncedCount: 30});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
       await new Promise(resolve => setTimeout(resolve, 100));
 
       expect(sendRawEmail).toHaveBeenCalledWith(
@@ -265,7 +265,7 @@ describe('SecurityService', () => {
       // Critical 7-day bounce rate
       await createEmails(100, {bouncedCount: 11});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({where: {id: projectId}, select: {disabled: true}});
       expect(project?.disabled).toBe(false);
@@ -286,7 +286,7 @@ describe('SecurityService', () => {
       });
       await createEmails(400, {bouncedCount: 12});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
@@ -329,7 +329,7 @@ describe('SecurityService', () => {
       expect(status.shouldDisable).toBe(true);
       expect(status.violations.some(v => v.includes('All-time complaint rate'))).toBe(true);
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       expect(await isDisabled()).toBe(false);
     });
@@ -337,7 +337,7 @@ describe('SecurityService', () => {
     it('disables on a complaint when the complaint rate is critical', async () => {
       await createReportedScenario();
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
 
       expect(await isDisabled()).toBe(true);
     });
@@ -346,7 +346,7 @@ describe('SecurityService', () => {
       // Critical 7-day bounce rate
       await createEmails(100, {bouncedCount: 11});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       expect(await isDisabled()).toBe(true);
     });
@@ -354,7 +354,7 @@ describe('SecurityService', () => {
     it('does not disable on a complaint when only the bounce rate is critical', async () => {
       await createEmails(100, {bouncedCount: 11});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
 
       expect(await isDisabled()).toBe(false);
     });
@@ -364,10 +364,10 @@ describe('SecurityService', () => {
       // Trips the 24-hour new-project bounce ceiling while the bounce rate stays healthy.
       await createEmails(20000, {bouncedCount: 30});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
       expect(await isDisabled()).toBe(false);
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
       expect(await isDisabled()).toBe(true);
     });
   });

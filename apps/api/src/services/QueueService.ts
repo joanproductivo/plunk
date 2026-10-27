@@ -19,7 +19,9 @@ import type {
   EventTrackingJobData,
   IdempotencyKeyCleanupJobData,
   MeterEventJobData,
+  PlunkLiteChecksJobData,
   ScheduledCampaignJobData,
+  SecurityCheckJobData,
   SegmentCountJobData,
   SegmentMembershipEventsJobData,
   SendEmailJobData,
@@ -335,6 +337,21 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
     removeOnFail: 5000,
   },
 });
+
+/**
+ * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
+ * for a burst of them. Each job says how it is retried.
+ */
+export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    removeOnComplete: 100,
+    removeOnFail: 500,
+  },
+});
+
+/** How long a reputation check waits for the rest of a burst of bounces and complaints */
+const SECURITY_CHECK_DELAY_MS = 10_000;
 
 function emailPriorityFor(sourceType: EmailSourceType): number {
   switch (sourceType) {
@@ -700,6 +717,23 @@ export class QueueService {
   }
 
   /**
+   * Queue the reputation check of a project, unless one is already waiting: the bounces and
+   * complaints of a burst are judged together, ten seconds after the first. One that arrives while
+   * the check runs queues another after it, so none is judged on rates read before it. Retried
+   * while the database cannot answer, since a check that cannot read the rates has not found the
+   * project healthy.
+   */
+  public static async queueSecurityCheck(data: SecurityCheckJobData): Promise<void> {
+    await plunkLiteChecksQueue.add('security-check', data, {
+      // BullMQ ignores a ttl with keepLastIfActive; a job id would stop the one queued behind a run
+      deduplication: {id: `security-check-${data.projectId}`, keepLastIfActive: true},
+      delay: SECURITY_CHECK_DELAY_MS,
+      attempts: 5,
+      backoff: {type: 'exponential', delay: 5000},
+    });
+  }
+
+  /**
    * Get queue statistics
    */
   public static async getStats() {
@@ -941,6 +975,7 @@ export class QueueService {
       meterQueue.close(),
       segmentMembershipEventsQueue.close(),
       eventTrackingQueue.close(),
+      plunkLiteChecksQueue.close(),
     ]);
   }
 }

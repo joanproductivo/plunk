@@ -14,9 +14,10 @@ import {failureSourceFor} from './failureSources.js';
 /** One failure, as the place it happened knows it */
 export interface FailureReport {
   /**
-   * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
-   * `security:critical`, `domain:<id>`, `sns:<what>` (the SES event pipeline) or `aws:alarm:<name>`
-   * for conditions the project should hear about. Each kind is in SOURCE_KINDS.
+   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures; `project` (disabled),
+   * `security:warning`, `security:critical`, `security:check`, `domain:<id>`, `sns:<what>` (the SES
+   * event pipeline) or `aws:alarm:<name>` for conditions the project should hear about. Each kind
+   * is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -76,6 +77,11 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
   'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},
   'security:critical': {
     name: {en: label => label, es: () => 'Reputación de envío: crítico'},
+    path: () => SECURITY_PATH,
+  },
+  // The check after bounces and complaints could not run: nothing would stop the project
+  'security:check': {
+    name: {en: label => label, es: () => 'Comprobación de la reputación de envío'},
     path: () => SECURITY_PATH,
   },
   'domain': {

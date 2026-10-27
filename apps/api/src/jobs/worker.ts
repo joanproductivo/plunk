@@ -28,6 +28,7 @@ import {createEmailWorker} from './email-processor.js';
 import {createEventTrackingWorker} from './event-tracking-processor.js';
 import {createImportWorker} from './import-processor.js';
 import {createMeterWorker} from './meter-processor.js';
+import {createPlunkLiteChecksWorker} from './plunk-lite-checks-processor.js';
 import {createScheduledCampaignWorker} from './scheduled-processor.js';
 import {createSegmentCountWorker} from './segment-count-processor.js';
 import {createSegmentMembershipEventsWorker} from './segment-membership-events-processor.js';
@@ -138,6 +139,11 @@ async function startWorkers() {
     const eventTrackingWorker = createEventTrackingWorker();
     workers.push({name: 'event-tracking', worker: eventTrackingWorker});
     signale.success('[WORKER] Event tracking worker started');
+
+    // Start Plunk Lite's checks worker
+    const plunkLiteChecksWorker = createPlunkLiteChecksWorker();
+    workers.push({name: 'plunk-lite-checks', worker: plunkLiteChecksWorker});
+    signale.success('[WORKER] Plunk Lite checks worker started');
 
     signale.success('[WORKER] All workers started successfully');
 
