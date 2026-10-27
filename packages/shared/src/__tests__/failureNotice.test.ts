@@ -11,6 +11,7 @@ describe('isFailureNotice', () => {
     'sns:subscription',
     'aws:alarm:ses-rebotes-alto',
     'project',
+    'project:reactivated',
     'brake:campaign:abc',
     'brake:workflow:abc',
     'security:check',

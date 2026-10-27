@@ -23,6 +23,7 @@ import {VERIFICATION_AMOUNT} from '../services/CardVerificationService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
+import {ReputationPolicy} from '../services/ReputationPolicy.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {UserService} from '../services/UserService.js';
 import {Keys} from '../services/keys.js';
@@ -747,6 +748,23 @@ export class Users {
     const metrics = await SecurityService.getProjectSecurityMetrics(id);
 
     return res.status(200).json(metrics);
+  }
+
+  /**
+   * Plunk Lite: reactivates a project disabled for its sending reputation, for its owners and admins.
+   * 409 when it is not disabled, or disabled for another reason.
+   */
+  @Post('@me/projects/:id/reactivate')
+  @Middleware([isAuthenticated, requireEmailVerified])
+  @CatchAsync
+  public async reactivateProject(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    await MembershipService.requireAdminAccess(auth.userId!, id);
+    const user = await UserService.id(auth.userId!);
+
+    return res.status(200).json(await ReputationPolicy.reactivate(id, user?.email ?? auth.userId!));
   }
 
   @Post('@me/projects/:id/reset')

@@ -88,7 +88,7 @@ export class AwsAlarmService {
       );
     } else {
       signale.info(`[ALARMS] ${alarm.AlarmName} is back to OK`);
-      await FailureAlertService.resolveForAll(sourceKey);
+      await FailureAlertService.resolve(sourceKey);
     }
 
     if (Number.isFinite(changedAt)) {

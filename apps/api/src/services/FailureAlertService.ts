@@ -1,3 +1,4 @@
+import {Prisma} from '@plunk/db';
 import {escapeHtml, FAILURE_ALERTS_OPEN_MAX, isFailureNotice} from '@plunk/shared';
 import type {AlertSettings, FailureAlert} from '@plunk/types';
 import signale from 'signale';
@@ -14,7 +15,8 @@ import {failureSourceFor} from './failureSources.js';
 /** One failure, as the place it happened knows it */
 export interface FailureReport {
   /**
-   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures; `project` (disabled),
+   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures; `project` (disabled) and
+   * `project:reactivated`,
    * `brake:campaign:<id>` and `brake:workflow:<id>` (stopped for their bounces), `security:warning`,
    * `security:critical`, `security:check`, `domain:<id>`, `sns:<what>` (the SES event pipeline) or
    * `aws:alarm:<name>` for conditions the project should hear about. Each kind is in SOURCE_KINDS.
@@ -83,6 +85,10 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     path: id => `/workflows/${encodeURIComponent(id)}`,
   },
   'project': {name: {en: () => 'Project disabled', es: () => 'Proyecto desactivado'}, path: () => SECURITY_PATH},
+  'project:reactivated': {
+    name: {en: () => 'Project reactivated', es: () => 'Proyecto reactivado'},
+    path: () => SECURITY_PATH,
+  },
   'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},
   'security:critical': {
     name: {en: label => label, es: () => 'Reputación de envío: crítico'},
@@ -273,16 +279,17 @@ export class FailureAlertService {
   }
 
   /**
-   * A condition that is over, in every project: its source is marked reviewed up to its last
-   * failure, so the banner drops it until it is recorded again. Never throws.
+   * A condition that is over, in one project or in every one: its source is marked reviewed up to
+   * its last failure, so the banner drops it until it is recorded again. Never throws.
    */
-  public static async resolveForAll(sourceKey: string): Promise<void> {
+  public static async resolve(sourceKey: string, projectId?: string): Promise<void> {
     try {
       await prisma.$executeRaw`
         UPDATE "plunk_lite_failures" SET "reviewedAt" = "lastAt"
-        WHERE "sourceKey" = ${sourceKey} AND ("reviewedAt" IS NULL OR "reviewedAt" < "lastAt")`;
+        WHERE "sourceKey" = ${sourceKey} AND ("reviewedAt" IS NULL OR "reviewedAt" < "lastAt")
+          ${projectId ? Prisma.sql`AND "projectId" = ${projectId}` : Prisma.empty}`;
     } catch (resolveError) {
-      signale.warn(`[ALERTS] Could not resolve ${sourceKey} in the projects:`, resolveError);
+      signale.warn(`[ALERTS] Could not resolve ${sourceKey} in ${projectId ?? 'the projects'}:`, resolveError);
     }
   }
 
