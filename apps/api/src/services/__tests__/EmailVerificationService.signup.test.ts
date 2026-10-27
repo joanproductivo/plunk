@@ -43,21 +43,60 @@ describe('EmailVerificationService.verifySignup', () => {
     expect(await EmailVerificationService.verifySignup('ana@shop.org')).toEqual({valid: true, reasons: []});
   });
 
-  it('refuses a domain that does not exist, suggesting the likely address', async () => {
+  it('refuses a domain that does not exist', async () => {
     resolveMx.mockRejectedValue(dnsError('ENOTFOUND'));
 
-    const verdict = await EmailVerificationService.verifySignup('ana@gmial.com');
+    const verdict = await EmailVerificationService.verifySignup('ana@shop-that-does-not-exist.test');
 
-    expect(verdict.valid).toBe(false);
-    expect(verdict.reasons).toEqual(['Domain does not exist']);
-    expect(verdict.suggestedEmail).toBe('ana@gmail.com');
+    expect(verdict).toEqual({valid: false, reasons: ['Domain does not exist']});
   });
 
-  it('refuses a domain that declares it takes no email (null MX)', async () => {
-    resolveMx.mockResolvedValue([{exchange: '', priority: 0}]);
+  it.each(['gmial.com', 'gamil.com', 'gmai.com', 'hotmial.com', 'hotmal.es', 'outlok.com', 'iclod.com', 'yaho.es'])(
+    'refuses %s, a slip of a large provider, with the correction and without asking DNS',
+    async domain => {
+      const verdict = await EmailVerificationService.verifySignup(`ana@${domain}`);
 
-    expect((await EmailVerificationService.verifySignup('ana@example.com')).valid).toBe(false);
+      expect(verdict.valid).toBe(false);
+      expect(verdict.reasons[0]).toMatch(/^Looks like a typo of /);
+      expect(verdict.suggestedEmail).toMatch(/^ana@(gmail|hotmail|outlook|icloud|yahoo)\./);
+      expect(resolveMx).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'foxmail.com',
+    'hotmart.com',
+    'uah.es',
+    'msc.com',
+    'ms.com',
+    'ge.com',
+    'cloud.com',
+    'email.com',
+    'usa.com',
+    'protonmail.ch',
+    'yahoo.com.mx',
+    'live.com.mx',
+    'gmx.net',
+    'hotmail.fr',
+  ])('accepts %s, a real domain the spell checker takes for a large provider or close to one', async domain => {
+    expect((await EmailVerificationService.verifySignup(`ana@${domain}`)).valid).toBe(true);
   });
+
+  it('suggests a correction only towards a large provider', async () => {
+    resolveMx.mockRejectedValue(dnsError('ENODATA'));
+
+    // The spell checker would say mail.es
+    expect(await EmailVerificationService.verifySignup('ana@gmail.es')).not.toHaveProperty('suggestedEmail');
+  });
+
+  it.each(['', '.', 'localhost', 'localhost.', '127.0.0.1', '0.0.0.0'])(
+    'refuses a domain whose MX points nowhere (%s)',
+    async exchange => {
+      resolveMx.mockResolvedValue([{exchange, priority: 0}]);
+
+      expect((await EmailVerificationService.verifySignup('ana@shop.org')).valid).toBe(false);
+    },
+  );
 
   it('accepts a domain without MX records that has an address record', async () => {
     resolveMx.mockRejectedValue(dnsError('ENODATA'));
@@ -108,10 +147,19 @@ describe('EmailVerificationService.verifySignup', () => {
     expect(verdict.reasons).toContain('Disposable email addresses are not accepted');
   });
 
-  it('accepts the address on an unexpected error', async () => {
+  it('accepts the address when a DNS lookup throws', async () => {
     resolveMx.mockImplementation(() => {
       throw new TypeError('boom');
     });
+
+    expect((await EmailVerificationService.verifySignup('ana@shop.org')).valid).toBe(true);
+  });
+
+  it('accepts the address on an unexpected error outside DNS', async () => {
+    vi.spyOn(
+      EmailVerificationService as unknown as {isDisposableDomain: () => Promise<boolean>},
+      'isDisposableDomain',
+    ).mockRejectedValue(new Error('boom'));
 
     expect((await EmailVerificationService.verifySignup('ana@shop.org')).valid).toBe(true);
   });
@@ -139,8 +187,8 @@ describe('EmailVerificationService.verifySignup', () => {
     expect(resolveMx).not.toHaveBeenCalled();
   });
 
-  it('looks up the domains of several addresses at once, once each', async () => {
-    await EmailVerificationService.prefetchSignupDomains(['a@shop.org', 'b@shop.org', 'c@other.org']);
+  it('looks up the domains of several addresses at once, once each, and not the slips', async () => {
+    await EmailVerificationService.prefetchSignupDomains(['a@shop.org', 'b@shop.org', 'c@other.org', 'e@gmial.com']);
     await EmailVerificationService.verifySignup('d@other.org');
 
     expect(resolveMx).toHaveBeenCalledTimes(2);
@@ -170,14 +218,24 @@ describe('ContactService.upsert with verifySignup', () => {
 
   it('refuses a new contact whose domain does not exist, with the reasons, and creates nothing', async () => {
     await expect(
-      ContactService.upsert(projectId, 'ana@gmial.com', undefined, undefined, true, {verifySignup: true}),
-    ).rejects.toMatchObject({
-      code: 422,
-      errorCode: 'INVALID_EMAIL',
-      details: {reasons: ['Domain does not exist'], suggestedEmail: 'ana@gmail.com'},
-    });
+      ContactService.upsert(projectId, 'ana@shop-that-does-not-exist.test', undefined, undefined, true, {
+        verifySignup: true,
+      }),
+    ).rejects.toMatchObject({code: 422, errorCode: 'INVALID_EMAIL', details: {reasons: ['Domain does not exist']}});
 
     expect(await prisma.contact.count({where: {projectId}})).toBe(0);
+  });
+
+  it('refuses a slip of a large provider with the correction in the details, not in the message', async () => {
+    const refusal = ContactService.upsert(projectId, 'ana@gmial.com', undefined, undefined, true, {
+      verifySignup: true,
+    });
+
+    await expect(refusal).rejects.toMatchObject({
+      code: 422,
+      details: {reasons: ['Looks like a typo of gmail.com'], suggestedEmail: 'ana@gmail.com'},
+    });
+    await expect(refusal).rejects.toSatisfy((error: Error) => !error.message.includes('@'));
   });
 
   it('never verifies a contact that already exists', async () => {

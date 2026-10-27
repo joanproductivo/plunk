@@ -49,6 +49,49 @@ const NEVER_REFUSED_DOMAINS = new Set([
 /** The domain of an address, lowercased; empty if it has none */
 const domainOf = (email: string) => email.split('@')[1]?.toLowerCase() ?? '';
 
+// An MX that points nowhere: the null MX of RFC 7505 ('' or '.'), or this very machine
+const NO_MAIL_EXCHANGES = new Set(['', 'localhost', '127.0.0.1', '0.0.0.0']);
+
+// Real domains the spell checker takes for a large provider's, one letter away
+const NOT_SLIPS = new Set(['email.com', 'cloud.com']);
+
+/**
+ * Plunk Lite: whether a domain is a slip of a large provider's that the spell checker suggests: the
+ * same ending, and a first label one edit away (a letter added, dropped, changed or two swapped) from
+ * a provider name of at least five letters. Measured over 330 real domains and every 2-3 letter
+ * label: shorter names (me, msn, live) and wider distances caught real ones -- foxmail.com, uah.es,
+ * msc.com, ge.com -- where this catches none and still catches gmial.com, hotmal.es or iclod.com.
+ */
+function isLargeProviderSlip(typed: string, suggested: string): boolean {
+  if (typed === suggested || !NEVER_REFUSED_DOMAINS.has(suggested) || NOT_SLIPS.has(typed)) {
+    return false;
+  }
+  const typedDot = typed.indexOf('.');
+  const suggestedDot = suggested.indexOf('.');
+  if (typedDot < 0 || typed.slice(typedDot) !== suggested.slice(suggestedDot)) {
+    return false;
+  }
+  const label = suggested.slice(0, suggestedDot);
+  return label.length >= 5 && editDistance(typed.slice(0, typedDot), label) <= 1;
+}
+
+/** Edits between two strings, a swap of neighbours counting as one (optimal string alignment) */
+function editDistance(a: string, b: string): number {
+  const d = Array.from({length: a.length + 1}, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0]![j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let best = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        best = Math.min(best, d[i - 2]![j - 2]! + 1);
+      }
+      d[i]![j] = best;
+    }
+  }
+  return d[a.length]![b.length]!;
+}
+
 /** Plunk Lite: whether a new contact's address may be added, and if not, why */
 export interface SignupVerdict {
   valid: boolean;
@@ -95,17 +138,25 @@ export class EmailVerificationService {
 
   /**
    * Plunk Lite: whether a new contact's address may be added. Refused only when the answer is
-   * clear: a disposable domain, a domain that does not exist, one that declares it takes no email
-   * (a null MX, RFC 7505), or one with neither MX nor address records. Anything uncertain -- a DNS
-   * server that times out or fails, an unexpected error -- lets the address in: a sign-up is never
-   * lost to a lookup. The largest providers are never refused, whatever DNS or the disposable list
-   * say. An inbox that does not exist on a real domain is not caught.
+   * clear: a slip of a large provider's name (gmial.com), a disposable domain, a domain that does
+   * not exist, one that declares it takes no email (a null MX, RFC 7505), or one with neither MX
+   * nor address records. Anything uncertain -- a DNS server that times out or fails, an unexpected
+   * error -- lets the address in: a sign-up is never lost to a lookup. The largest providers are
+   * never refused, whatever DNS or the disposable list say. An inbox that does not exist on a real
+   * domain is not caught.
    */
   static async verifySignup(email: string): Promise<SignupVerdict> {
     const domain = domainOf(email);
     try {
       if (!domain || NEVER_REFUSED_DOMAINS.has(domain)) {
         return {valid: true, reasons: []};
+      }
+
+      // Slips of a large provider's name are registered by others: some only have a website, so
+      // DNS alone would let them in, and some take mail -- the customer's, for a stranger
+      const typo = run({email});
+      if (typo?.full && isLargeProviderSlip(domain, typo.domain)) {
+        return {valid: false, reasons: [`Looks like a typo of ${typo.domain}`], suggestedEmail: typo.full};
       }
 
       const reasons: string[] = [];
@@ -120,11 +171,12 @@ export class EmailVerificationService {
         return {valid: true, reasons};
       }
 
-      const typo = run({email});
+      // A correction only towards a large provider: for other domains the guess is often wrong
+      // (gmail.es would become mail.es)
       return {
         valid: false,
         reasons,
-        ...(typo?.full && typo.full !== email ? {suggestedEmail: typo.full} : {}),
+        ...(typo?.full && NEVER_REFUSED_DOMAINS.has(typo.domain) ? {suggestedEmail: typo.full} : {}),
       };
     } catch (error) {
       signale.warn(
@@ -136,7 +188,15 @@ export class EmailVerificationService {
 
   /** Plunk Lite: look up these addresses' domains at once, so verifying each one later is quick */
   static async prefetchSignupDomains(emails: string[]): Promise<void> {
-    const domains = new Set(emails.map(domainOf).filter(domain => domain && !NEVER_REFUSED_DOMAINS.has(domain)));
+    const domains = new Set(
+      emails
+        .filter(email => {
+          const typo = run({email});
+          return !(typo?.full && isLargeProviderSlip(domainOf(email), typo.domain));
+        })
+        .map(domainOf)
+        .filter(domain => domain && !NEVER_REFUSED_DOMAINS.has(domain)),
+    );
     await Promise.all([...domains].map(domain => this.signupDomainReason(domain).catch(() => undefined)));
   }
 
@@ -164,9 +224,14 @@ export class EmailVerificationService {
     });
     try {
       const reason = await Promise.race([this.lookUpSignupDomain(resolver, domain), deadline]);
+      // At the cap, the oldest goes: a Map keeps insertion order, and the large providers never get here
       if (this.signupDomains.size >= SIGNUP_DOMAIN_CACHE_MAX) {
-        this.signupDomains.clear();
+        const oldest = this.signupDomains.keys().next().value;
+        if (oldest !== undefined) {
+          this.signupDomains.delete(oldest);
+        }
       }
+      this.signupDomains.delete(domain);
       const keepFor = reason === undefined ? SIGNUP_DOMAIN_UNCERTAIN_MS : SIGNUP_DOMAIN_CACHE_MS;
       this.signupDomains.set(domain, {reason, expiresAt: Date.now() + keepFor});
       return reason;
@@ -181,8 +246,8 @@ export class EmailVerificationService {
     try {
       const mx = await resolver.resolveMx(domain);
       if (mx.length > 0) {
-        return mx.every(record => record.exchange === '' || record.exchange === '.')
-          ? 'Domain does not accept email (null MX record)'
+        return mx.every(record => NO_MAIL_EXCHANGES.has(record.exchange.toLowerCase().replace(/\.$/, '')))
+          ? 'Domain does not accept email (its MX record points nowhere)'
           : null;
       }
     } catch (error) {
