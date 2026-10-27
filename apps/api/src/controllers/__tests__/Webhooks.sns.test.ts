@@ -899,6 +899,67 @@ describe('Webhooks - SES event notifications', () => {
   });
 
   /**
+   * A permanent bounce or a complaint of the contact's address puts it on the project's own
+   * suppression list, so nothing that resubscribes the contact in passing mails it again
+   */
+  describe('suppression list', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const suppressionOf = async () => {
+      const contact = await prisma.contact.findUniqueOrThrow({where: {id: contactId}});
+      return prisma.plunkLiteSuppression.findUnique({where: {projectId_email: {projectId, email: contact.email}}});
+    };
+
+    it('records a permanent bounce, and then a complaint over it', async () => {
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      await sentEmail('ses-suppress-bounce');
+      await sentEmail('ses-suppress-complaint');
+
+      await post(notification('Bounce', 'ses-suppress-bounce', {bounce: {bounceType: 'Permanent'}}));
+      expect((await suppressionOf())?.reason).toBe('BOUNCE');
+
+      await post(notification('Complaint', 'ses-suppress-complaint', {complaint: {}}));
+      expect((await suppressionOf())?.reason).toBe('COMPLAINT');
+    });
+
+    it('records an address SES already had on its account suppression list', async () => {
+      await sentEmail('ses-suppress-account');
+
+      await post(
+        notification('Bounce', 'ses-suppress-account', {
+          bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'},
+        }),
+      );
+
+      expect((await suppressionOf())?.reason).toBe('BOUNCE');
+    });
+
+    it('does not record a transient bounce, a simulated one or a custom recipient', async () => {
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      await sentEmail('ses-suppress-transient');
+      const simulated = await sentEmail('ses-suppress-simulated');
+      await prisma.email.update({where: {id: simulated.id}, data: {simulated: true}});
+      const custom = await sentEmail('ses-suppress-custom');
+      await prisma.email.update({
+        where: {id: custom.id},
+        data: {headers: {'X-Plunk-Recipient-Override': 'team@else.test'}},
+      });
+
+      await post(notification('Bounce', 'ses-suppress-transient', {bounce: {bounceType: 'Transient'}}));
+      await post(notification('Bounce', 'ses-suppress-simulated', {bounce: {bounceType: 'Permanent'}}));
+      await post(
+        notification('Bounce', 'ses-suppress-custom', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'team@else.test'}]},
+        }),
+      );
+
+      expect(await prisma.plunkLiteSuppression.count({where: {projectId}})).toBe(0);
+    });
+  });
+
+  /**
    * The event goes to the worker in a job named after the SNS message, so the copies SNS
    * delivers of one notification track it once
    */

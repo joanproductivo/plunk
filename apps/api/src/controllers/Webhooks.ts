@@ -31,6 +31,7 @@ import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {QueueService} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
+import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 /**
@@ -660,6 +661,19 @@ export class Webhooks {
                 where: {id: email.contactId},
                 data: {subscribed: false, snoozedUntil: null},
               });
+
+              // And kept off every later send, whatever resubscribes the contact in passing. Only
+              // the contact's own address: a workflow's custom recipient is rarely a contact, and
+              // the account's suppression list at SES already keeps it from being mailed.
+              if (!isSimulated) {
+                await SuppressionService.record(
+                  tx,
+                  email.projectId,
+                  [email.contact.email],
+                  eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE',
+                  email.id,
+                );
+              }
             }
 
             await tx.email.update({where: {id: email.id}, data: {...updateData, status}});

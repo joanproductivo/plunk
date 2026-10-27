@@ -13,6 +13,7 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+import {normalizeEmail} from '../utils/emailAddress.js';
 import {EventService} from './EventService.js';
 
 export class ContactService {
@@ -28,7 +29,7 @@ export class ContactService {
    * model, which already lowercases on write.
    */
   public static normalizeEmail(email: string): string {
-    return email.trim().toLowerCase();
+    return normalizeEmail(email);
   }
 
   /**

@@ -21,6 +21,7 @@ const TRUNCATE_TABLES = [
   'memberships',
   'projects',
   'users',
+  'plunk_lite_suppressions',
 ];
 
 /**
