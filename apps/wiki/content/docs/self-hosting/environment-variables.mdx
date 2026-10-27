@@ -173,6 +173,12 @@ Plunk bundles a self-hosted [ntfy](https://ntfy.sh) server for internal system n
 | `DISABLE_SIGNUPS`        | No       | When `true`, the signup endpoint rejects new registrations. Useful for private instances.                                   | `false` |
 | `VERIFY_EMAIL_ON_SIGNUP` | No       | When `true`, validates emails on signup — checks for disposable domains, plus-addressing, domain existence, and MX records. | `false` |
 
+## Contact Sign-ups (Plunk Lite)
+
+| Variable                    | Required | Description                                                                                                                                                                                                                         | Default |
+| --------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `PLUNK_LITE_VERIFY_SIGNUPS` | No       | A new contact from `/v1/track`, `/v1/send` or `POST /contacts` is refused with `422 INVALID_EMAIL` (with `reasons` and any `suggestedEmail`) when its domain does not exist, takes no email or is disposable. Uncertain DNS answers let it in. | `true`  |
+
 ## Interface
 
 | Variable       | Required | Description                                                                                                                                                      | Default |

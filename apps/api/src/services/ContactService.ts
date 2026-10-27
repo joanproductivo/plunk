@@ -11,11 +11,13 @@ import type {
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
+import {verifySignupsEnabled} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
 import {LONG_TRANSACTION} from '../utils/database.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
 import {DeletedEmailCounts} from './DeletedEmailCounts.js';
+import {EmailVerificationService} from './EmailVerificationService.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -392,6 +394,7 @@ export class ContactService {
    * existing contact keeps its own.
    * A suppressed address (Plunk Lite) is never subscribed: it stays unsubscribed, or with
    * `options.explicit` -- the dashboard's add-contact form -- the request is refused.
+   * `options.verifySignup` (Plunk Lite) refuses a new contact whose address takes no email (422).
    */
   public static async upsert(
     projectId: string,
@@ -399,7 +402,7 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
-    options: {createdAt?: Date; explicit?: boolean; retried?: boolean} = {},
+    options: {createdAt?: Date; explicit?: boolean; verifySignup?: boolean; retried?: boolean} = {},
   ): Promise<Contact> {
     const normalizedEmail = ContactService.normalizeEmail(email);
     // What the caller asked for, before a suppression turns it down: a retry asks the same
@@ -412,6 +415,12 @@ export class ContactService {
         email: normalizedEmail,
       },
     });
+
+    // Plunk Lite: a new contact from the API (`options.verifySignup`) needs an address that can
+    // receive email, so a form's typo or a made-up address is turned away while it can be fixed
+    if (!existing && options.verifySignup && verifySignupsEnabled()) {
+      await ContactService.requireValidSignup(normalizedEmail);
+    }
 
     // A suppressed address is never subscribed here. Most callers subscribe in passing -- an
     // event, a send, an import, an inbound email -- and the contact simply stays unsubscribed;
@@ -483,6 +492,21 @@ export class ContactService {
         );
       }
     }
+  }
+
+  /** Plunk Lite: refuse, with the reasons and any likely correction, an address that takes no email */
+  private static async requireValidSignup(email: string): Promise<void> {
+    const verdict = await EmailVerificationService.verifySignup(email);
+    if (verdict.valid) {
+      return;
+    }
+    const suggestion = verdict.suggestedEmail ? ` Did you mean ${verdict.suggestedEmail}?` : '';
+    throw new HttpException(
+      422,
+      `${email} cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,
+      ErrorCode.INVALID_EMAIL,
+      {reasons: verdict.reasons, ...(verdict.suggestedEmail ? {suggestedEmail: verdict.suggestedEmail} : {})},
+    );
   }
 
   /**

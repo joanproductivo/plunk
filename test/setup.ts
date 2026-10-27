@@ -64,6 +64,10 @@ process.env.RATE_LIMIT_ENABLED = 'true';
 // turn the suite's expectations about them upside down.
 process.env.IGNORE_AUTOMATIC_OPENS = 'true';
 
+// Plunk Lite: new contacts from the API have their domain looked up in DNS, which the suite must not
+// depend on (example.com takes no email). The tests of that check switch it on with a fake resolver.
+process.env.PLUNK_LITE_VERIFY_SIGNUPS = 'false';
+
 // Static import is safe: database.ts only reads env in initialize(), which runs
 // in beforeAll — well after the env mutations above.
 import {testDatabase} from './helpers/database';

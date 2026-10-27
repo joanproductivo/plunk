@@ -209,7 +209,8 @@ export class Contacts {
    * POST /contacts
    * Create or update a contact (upsert). A suppressed address is never subscribed: from a dashboard
    * session the request is refused (409), from an API key the contact stays unsubscribed and
-   * `_meta.suppressed` says why.
+   * `_meta.suppressed` says why. A new contact whose address takes no email is refused (422,
+   * Plunk Lite).
    */
   @Post('')
   @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
@@ -231,6 +232,7 @@ export class Contacts {
     // says why
     const contact = await ContactService.upsert(auth.projectId!, email, data, subscribed, true, {
       explicit: auth.type === 'jwt' && subscribed !== false,
+      verifySignup: true,
     });
     const suppressed =
       subscribed !== false && !contact.subscribed

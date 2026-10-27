@@ -26,6 +26,7 @@ import {
   SMTP_ENABLED,
   STRIPE_ENABLED,
   TRACKING_TOGGLE_ENABLED,
+  verifySignupsEnabled,
 } from './app/constants.js';
 import {allowedOrigins, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
@@ -63,6 +64,7 @@ import {
   snoozeSweepQueue,
   plunkLiteChecksQueue,
 } from './services/QueueService.js';
+import {EmailVerificationService} from './services/EmailVerificationService.js';
 import * as S3Service from './services/S3Service.js';
 import {checkConfigurationSets} from './services/SesEventMatch.js';
 import {useJsonBodyParsers} from './middleware/bodyParsers.js';
@@ -474,6 +476,11 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 void prisma.$connect().then(async () => {
   httpServer = server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
+
+  // Plunk Lite: the disposable domains list, fetched before the first sign-up needs it
+  if (verifySignupsEnabled()) {
+    void EmailVerificationService.warmUp();
+  }
 
   // Feature matrix
   const features = [

@@ -160,6 +160,10 @@ export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string)
 export const PLUNK_LITE_DISABLE_BOUNCE_PERCENT = parsePercent('PLUNK_LITE_DISABLE_BOUNCE_PERCENT', '8');
 export const PLUNK_LITE_DISABLE_COMPLAINT_PERCENT = parsePercent('PLUNK_LITE_DISABLE_COMPLAINT_PERCENT', '0.4');
 
+// Plunk Lite: a new contact from /v1/track, /v1/send or POST /contacts needs an address whose domain
+// takes email and is not disposable (default: true). Read on each use, so the suite can switch it.
+export const verifySignupsEnabled = () => process.env.PLUNK_LITE_VERIFY_SIGNUPS !== 'false';
+
 // Self-hosting Configuration (optional)
 // Controls whether new user signups are allowed (default: false)
 export const DISABLE_SIGNUPS = process.env.DISABLE_SIGNUPS === 'true';

@@ -80,11 +80,15 @@ export class Actions {
     // ContactService.upsert will filter out non-persistent fields
     // Event tracking should subscribe new contacts by default (subscribed=true in ContactService)
     // but preserve existing subscription state for existing contacts
+    // Plunk Lite: a new contact whose address takes no email is refused (422) and the event is not
+    // stored, so the form can ask for the address again
     const contact = await ContactService.upsert(
       auth.projectId,
       email,
       data as Record<string, unknown> | undefined,
       subscribed,
+      true,
+      {verifySignup: true},
     );
 
     // Track the event with ALL data (persistent + non-persistent)
