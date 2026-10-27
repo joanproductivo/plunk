@@ -153,11 +153,25 @@ interface SecurityStatus {
 const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
 const snsSigningCertCache = new Map<string, string>();
 
+/** The outcome of checking an SNS message signature */
+export type SnsSignatureCheck = 'valid' | 'invalid' | 'unavailable';
+
+/** AWS's signing certificate could not be fetched: the network failed, or SNS answered with a 5xx */
+class SigningCertUnavailableError extends Error {}
+
 async function fetchSigningCert(certUrl: string): Promise<string> {
   const cached = snsSigningCertCache.get(certUrl);
   if (cached) return cached;
 
-  const response = await fetch(certUrl);
+  let response: Response;
+  try {
+    response = await fetch(certUrl, {signal: AbortSignal.timeout(5000)});
+  } catch (error) {
+    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
+  }
+  if (response.status >= 500) {
+    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.statusText}`);
+  }
   if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
 
   const pem = await response.text();
@@ -215,17 +229,17 @@ export class SecurityService {
   }
 
   /**
-   * Verify an AWS SNS message signature. Returns false if the cert URL is
-   * untrusted, or the signature doesn't match.
+   * Verify an AWS SNS message signature: 'invalid' if the cert URL is untrusted or the
+   * signature doesn't match, 'unavailable' if AWS's certificate could not be fetched.
    */
-  public static async verifySnsSignature(body: Record<string, string>): Promise<boolean> {
+  public static async verifySnsSignature(body: Record<string, string>): Promise<SnsSignatureCheck> {
     try {
       const certUrl = body['SigningCertURL'];
       const signature = body['Signature'];
 
       if (!certUrl || !signature) {
         signale.warn('[SNS] Missing SigningCertURL or Signature');
-        return false;
+        return 'invalid';
       }
 
       let parsedUrl: URL;
@@ -233,12 +247,12 @@ export class SecurityService {
         parsedUrl = new URL(certUrl);
       } catch {
         signale.warn('[SNS] Unparseable SigningCertURL');
-        return false;
+        return 'invalid';
       }
 
       if (parsedUrl.protocol !== 'https:' || !SNS_CERT_HOST_RE.test(parsedUrl.hostname)) {
         signale.warn(`[SNS] Untrusted SigningCertURL host: ${parsedUrl.hostname}`);
-        return false;
+        return 'invalid';
       }
 
       const pem = await fetchSigningCert(certUrl);
@@ -247,10 +261,10 @@ export class SecurityService {
 
       const verifier = crypto.createVerify(algorithm);
       verifier.update(stringToSign, 'utf8');
-      return verifier.verify(pem, signature, 'base64');
+      return verifier.verify(pem, signature, 'base64') ? 'valid' : 'invalid';
     } catch (err) {
       signale.error('[SNS] Signature verification error:', err);
-      return false;
+      return err instanceof SigningCertUnavailableError ? 'unavailable' : 'invalid';
     }
   }
 

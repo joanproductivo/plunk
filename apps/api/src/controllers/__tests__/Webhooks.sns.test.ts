@@ -47,7 +47,7 @@ describe('Webhooks - SES event notifications', () => {
 
     // The signature is AWS's to produce; every test here is about what happens after it checks
     // out. The rejection path is covered separately below.
-    vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue(true);
+    vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue('valid');
     vi.mocked(getAwsAccountId).mockResolvedValue('111111111111');
 
     // One Redis key holds the dirty set for the whole worker, so an id left behind by an
@@ -425,7 +425,7 @@ describe('Webhooks - SES event notifications', () => {
 
   describe('rejected and unmatched events', () => {
     it('rejects a notification whose signature does not verify', async () => {
-      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue(false);
+      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue('invalid');
       const email = await sentEmail('ses-unsigned-1');
 
       const captured = await post(notification('Delivery', 'ses-unsigned-1'));
@@ -436,9 +436,27 @@ describe('Webhooks - SES event notifications', () => {
     });
 
     it('404s an event for a messageId it does not know', async () => {
-      const captured = await post(notification('Delivery', 'ses-never-sent'));
+      const event = notification('Delivery', 'ses-never-sent');
+      // Sent long enough ago that the send path has had every chance to store the messageId
+      event.mail.timestamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+      const captured = await post(event);
 
       expect(captured.status).toBe(404);
+    });
+
+    it('asks SNS to retry an event for an email sent moments ago whose messageId is not stored yet', async () => {
+      const captured = await post(notification('Bounce', 'ses-not-stamped-yet', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(captured.status).toBe(503);
+    });
+
+    it("asks SNS to retry when AWS's signing certificate cannot be fetched", async () => {
+      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValueOnce('unavailable');
+
+      const captured = await post(notification('Delivery', 'ses-cert-down'));
+
+      expect(captured.status).toBe(503);
     });
   });
   /**
@@ -693,7 +711,7 @@ describe('Webhooks - SES event notifications', () => {
 
     it('asks SNS to deliver again when the suppression could not be recorded', async () => {
       await sentEmail('ses-fail-before');
-      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
+      vi.spyOn(appPrisma, '$transaction').mockRejectedValueOnce(new Error('database down'));
 
       const response = await post(notification('Bounce', 'ses-fail-before', {bounce: {bounceType: 'Permanent'}}));
 
@@ -732,7 +750,7 @@ describe('Webhooks - SES event notifications', () => {
     it('records the suppression and enforces on the redelivery after a 500', async () => {
       const email = await sentEmail('ses-fail-redeliver');
       const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
-      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
+      vi.spyOn(appPrisma, '$transaction').mockRejectedValueOnce(new Error('database down'));
 
       const first = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
       const second = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
@@ -741,8 +759,90 @@ describe('Webhooks - SES event notifications', () => {
       expect(second.status).toBe(200);
       const updated = await prisma.email.findUnique({where: {id: email.id}});
       expect(updated?.bouncedAt).not.toBeNull();
-      // Nothing was recorded by the failed attempt, so the redelivery is the new suppression
+      // Nothing was recorded by the failed attempt, so the redelivery is the new suppression,
+      // with its tracked event
       expect(enforce).toHaveBeenCalledTimes(1);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+
+    it('records one suppression when copies of the same bounce arrive together', async () => {
+      const email = await sentEmail('ses-bounce-copies');
+      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const bounce = notification('Bounce', 'ses-bounce-copies', {bounce: {bounceType: 'Permanent'}});
+
+      const responses = await Promise.all([post(bounce), post(bounce), post(bounce)]);
+
+      expect(responses.map(response => response.status)).toEqual([200, 200, 200]);
+      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+  });
+
+  /**
+   * A bounce or complaint is about an address. The contact is only taken off the list when
+   * that address is theirs, and an address the account's suppression list already held is not
+   * a new bounce for the rate: SES never attempted it, and leaves it out of its own rate.
+   */
+  describe('which address bounced', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('does not unsubscribe the contact when a workflow email to a custom recipient bounces', async () => {
+      const email = await sentEmail('ses-override-bounce');
+      await prisma.email.update({
+        where: {id: email.id},
+        data: {headers: {'X-Plunk-Recipient-Override': 'someone@else.test'}},
+      });
+
+      await post(
+        notification('Bounce', 'ses-override-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'someone@else.test'}]},
+        }),
+      );
+
+      const contact = await prisma.contact.findUnique({where: {id: contactId}});
+      expect(contact?.subscribed).toBe(true);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.status).toBe(EmailStatus.BOUNCED);
+    });
+
+    it('unsubscribes the contact when the bounced address listed by SES is theirs', async () => {
+      await sentEmail('ses-listed-bounce');
+      const contact = await prisma.contact.findUniqueOrThrow({where: {id: contactId}});
+
+      await post(
+        notification('Bounce', 'ses-listed-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: contact.email.toUpperCase()}]},
+        }),
+      );
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+    });
+
+    it.each([
+      ['Bounce', {bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'}}],
+      ['Complaint', {complaint: {complaintSubType: 'OnAccountSuppressionList'}}],
+    ])('leaves a %s for an address already on the suppression list out of the rate', async (eventType, extra) => {
+      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const email = await sentEmail(`ses-suppressed-${eventType}`);
+
+      await post(notification(eventType, `ses-suppressed-${eventType}`, extra));
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).toBeNull();
+      expect(updated?.complainedAt).toBeNull();
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(enforce).not.toHaveBeenCalled();
+    });
+
+    it('counts opens that arrive together', async () => {
+      const email = await sentEmail('ses-opens-together');
+      const open = notification('Open', 'ses-opens-together', {open: {}});
+
+      await Promise.all([post(open), post(open), post(open)]);
+
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.opens).toBe(3);
     });
   });
 });
