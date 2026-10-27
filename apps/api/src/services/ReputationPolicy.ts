@@ -7,6 +7,7 @@ import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 
 import {CampaignService} from './CampaignService.js';
+import type {DeletedCounts} from './DeletedEmailCounts.js';
 import {DeletedEmailCounts, RATE_COUNTS, RATED_EMAIL, utcTimestamp} from './DeletedEmailCounts.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {ProjectService} from './ProjectService.js';
@@ -40,10 +41,10 @@ export interface RateFilter {
   projectId: string;
   since?: Date;
   /**
-   * The deleted emails count only from the hour after `since` (DeletedEmailCounts.sums): for a
-   * window that starts at a reactivation
+   * What the deleted counts held for the hour of `since` when the window started, left out of it
+   * (DeletedEmailCounts.sums): for a window that starts at a reactivation
    */
-  deletedFromNextHour?: boolean;
+  deletedAtStart?: DeletedCounts;
   campaignId?: string;
   workflowId?: string;
 }
@@ -57,7 +58,16 @@ export interface DisableVerdict extends Record<SecurityMetric, boolean> {
 
 const SEVEN_DAYS_MS = 7 * 86_400_000;
 
-/** When the project was last reactivated, kept as long as its emails before then are in the 7 days */
+/** A grace period after a reactivation, as stored */
+interface Grace {
+  reactivatedAt: Date;
+  deletedInHour: DeletedCounts;
+}
+
+/**
+ * When the project was last reactivated, and what its deleted counts held for that hour then (a
+ * Grace, as JSON), kept as long as its emails before then are in the 7 days
+ */
 const REACTIVATED_KEY = (projectId: string) => `plunk-lite:reactivated:${projectId}`;
 
 /**
@@ -87,13 +97,7 @@ export class ReputationPolicy {
    * A project's rates also count its deleted emails (DeletedEmailCounts), as AWS still does; the
    * rates of one campaign or workflow, for its brake, only count the emails it still has.
    */
-  public static async rates({
-    projectId,
-    since,
-    deletedFromNextHour,
-    campaignId,
-    workflowId,
-  }: RateFilter): Promise<RateData> {
+  public static async rates({projectId, since, deletedAtStart, campaignId, workflowId}: RateFilter): Promise<RateData> {
     const projectWide = !campaignId && !workflowId;
     const [row] = await prisma.$queryRaw<{total: number; bounces: number; complaints: number}[]>`
       SELECT live."total" + gone."total" AS "total",
@@ -109,7 +113,7 @@ export class ReputationPolicy {
           ${campaignId ? Prisma.sql`AND e."campaignId" = ${campaignId}` : Prisma.empty}
           ${workflowId ? Prisma.sql`AND we."workflowId" = ${workflowId}` : Prisma.empty}
       ) AS live("total", "bounces", "complaints"),
-      ${projectWide ? DeletedEmailCounts.sums(projectId, since, {fromNextHour: deletedFromNextHour}) : Prisma.sql`(SELECT 0, 0, 0)`} AS gone("total", "bounces", "complaints")`;
+      ${projectWide ? DeletedEmailCounts.sums(projectId, since, deletedAtStart) : Prisma.sql`(SELECT 0, 0, 0)`} AS gone("total", "bounces", "complaints")`;
 
     const {total, bounces, complaints} = row ?? {total: 0, bounces: 0, complaints: 0};
     return {
@@ -126,14 +130,18 @@ export class ReputationPolicy {
    * reactivated, if that is later -- is past disabling the project
    */
   public static async disableByMetric(projectId: string): Promise<DisableVerdict> {
-    const reactivatedAt = await this.reactivatedAt(projectId);
+    const grace = await this.grace(projectId);
     const weekAgo = new Date(Date.now() - SEVEN_DAYS_MS);
-    const since = reactivatedAt && reactivatedAt > weekAgo ? reactivatedAt : weekAgo;
-    const sinceReactivation = since !== weekAgo;
+    const sinceReactivation = Boolean(grace && grace.reactivatedAt > weekAgo);
+    const since = sinceReactivation ? grace!.reactivatedAt : weekAgo;
     const window = sinceReactivation ? 'Since reactivation,' : '7-day';
-    // The emails deleted in the hour of the reactivation are counted by that hour, with the bounces
-    // that disabled the project: they are left out with it
-    const sevenDay = await this.rates({projectId, since, deletedFromNextHour: sinceReactivation});
+    // The emails deleted are counted by the hour, so the hour of the reactivation holds the bounces
+    // deleted before it, which disabled the project: what it held then is left out
+    const sevenDay = await this.rates({
+      projectId,
+      since,
+      ...(sinceReactivation && {deletedAtStart: grace!.deletedInHour}),
+    });
     const bounce =
       sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS_FOR_BOUNCES &&
       sevenDay.bounces >= DISABLE_THRESHOLDS.MIN_BOUNCES &&
@@ -174,7 +182,8 @@ export class ReputationPolicy {
     }
 
     const reactivatedAt = new Date();
-    await redis.set(REACTIVATED_KEY(projectId), reactivatedAt.toISOString(), 'EX', SEVEN_DAYS_MS / 1000);
+    const grace: Grace = {reactivatedAt, deletedInHour: await DeletedEmailCounts.inHour(projectId, reactivatedAt)};
+    await redis.set(REACTIVATED_KEY(projectId), JSON.stringify(grace), 'EX', SEVEN_DAYS_MS / 1000);
     const reactivated = await prisma.project.updateMany({
       where: {id: projectId, disabled: true, disabledReason: 'EMAIL_REPUTATION'},
       data: {disabled: false, disabledReason: null},
@@ -210,12 +219,38 @@ export class ReputationPolicy {
     return {draftedCampaigns};
   }
 
-  /** When the project was reactivated, within the last 7 days; undefined when Redis cannot say */
-  private static async reactivatedAt(projectId: string): Promise<Date | undefined> {
+  /**
+   * When the project was reactivated, within the last 7 days, and what its deleted counts held for
+   * that hour then; undefined when Redis cannot say. Without those counts (a grace period stored
+   * before they were, or one that cannot be read) the hour counts whole: the side that stops sending.
+   */
+  private static async grace(
+    projectId: string,
+  ): Promise<{reactivatedAt: Date; deletedInHour?: DeletedCounts} | undefined> {
     try {
       const value = await redis.get(REACTIVATED_KEY(projectId));
-      const date = value ? new Date(value) : undefined;
-      return date && !Number.isNaN(date.getTime()) ? date : undefined;
+      if (!value) {
+        return undefined;
+      }
+      let stored: unknown = value;
+      try {
+        stored = JSON.parse(value);
+      } catch {
+        // A bare date, as the grace period was first stored
+      }
+      const fields = stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : {at: stored};
+      const date = new Date(String(fields.reactivatedAt ?? fields.at));
+      if (Number.isNaN(date.getTime())) {
+        return undefined;
+      }
+      const counts = fields.deletedInHour as Record<string, unknown> | undefined;
+      const valid = (name: string) => Number.isInteger(counts?.[name]) && (counts![name] as number) >= 0;
+      return {
+        reactivatedAt: date,
+        ...(valid('sent') &&
+          valid('bounced') &&
+          valid('complained') && {deletedInHour: counts as unknown as DeletedCounts}),
+      };
     } catch (error) {
       // Counted as if there were no grace period: the side that stops sending
       signale.warn(`[SECURITY] Could not read when project ${projectId} was reactivated:`, error);

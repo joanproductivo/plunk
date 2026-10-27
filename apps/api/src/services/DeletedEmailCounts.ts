@@ -1,5 +1,7 @@
 import {Prisma} from '@plunk/db';
 
+import {prisma} from '../database/prisma.js';
+
 /**
  * Plunk Lite: what a project's reputation rates count, including the emails that are gone.
  *
@@ -25,6 +27,13 @@ export const RATE_COUNTS = Prisma.sql`count(*)::int,
 
 /** A date as the UTC timestamps without time zone the tables hold */
 export const utcTimestamp = (date: Date) => Prisma.sql`(${date.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;
+
+/** The deleted emails of a project counted in an hour, as `plunk_lite_deleted_email_counts` holds them */
+export interface DeletedCounts {
+  sent: number;
+  bounced: number;
+  complained: number;
+}
 
 /** Deleting every email of many contacts can outlast Prisma's 5 s default */
 export const EMAIL_DELETE_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
@@ -60,21 +69,30 @@ export const DeletedEmailCounts = {
    * three int columns like RATE_COUNTS. They are counted by the hour, so the hour `since` falls in
    * counts whole: up to an hour more than the window, never less.
    *
-   * With `fromNextHour`, that hour is left out instead, and with it any email from before `since`:
-   * up to an hour less than the window, never more. For a window that starts at a reactivation,
-   * whose bounces deleted in the same hour must not count again.
+   * `alreadyInFirstHour` takes out of that hour what it held when the window started, each column
+   * down to zero at most: for a window that starts at a reactivation, so that the bounces deleted
+   * before it in the same hour do not count again, and the ones deleted after it still do.
    */
-  sums(projectId: string, since?: Date, {fromNextHour = false}: {fromNextHour?: boolean} = {}): Prisma.Sql {
-    const from = since
-      ? fromNextHour
-        ? Prisma.sql`AND d."hour" >= date_trunc('hour', ${utcTimestamp(since)}) + interval '1 hour'`
-        : Prisma.sql`AND d."hour" >= date_trunc('hour', ${utcTimestamp(since)})`
-      : Prisma.empty;
+  sums(projectId: string, since?: Date, alreadyInFirstHour?: DeletedCounts): Prisma.Sql {
+    const first = since ? Prisma.sql`date_trunc('hour', ${utcTimestamp(since)})` : undefined;
+    const column = (name: 'sent' | 'bounced' | 'complained') =>
+      first && alreadyInFirstHour
+        ? Prisma.sql`coalesce(sum(greatest(d.${Prisma.raw(`"${name}"`)} - CASE WHEN d."hour" = ${first} THEN ${alreadyInFirstHour[name]}::int ELSE 0 END, 0)), 0)::int`
+        : Prisma.sql`coalesce(sum(d.${Prisma.raw(`"${name}"`)}), 0)::int`;
     return Prisma.sql`(
-      SELECT coalesce(sum(d."sent"), 0)::int, coalesce(sum(d."bounced"), 0)::int, coalesce(sum(d."complained"), 0)::int
+      SELECT ${column('sent')}, ${column('bounced')}, ${column('complained')}
       FROM "plunk_lite_deleted_email_counts" d
       WHERE d."projectId" = ${projectId}
-        ${from}
+        ${first ? Prisma.sql`AND d."hour" >= ${first}` : Prisma.empty}
     )`;
+  },
+
+  /** What the counts of a project hold for the hour a date falls in; zeros when nothing */
+  async inHour(projectId: string, date: Date): Promise<DeletedCounts> {
+    const [row] = await prisma.$queryRaw<DeletedCounts[]>`
+      SELECT d."sent", d."bounced", d."complained"
+      FROM "plunk_lite_deleted_email_counts" d
+      WHERE d."projectId" = ${projectId} AND d."hour" = date_trunc('hour', ${utcTimestamp(date)})`;
+    return row ?? {sent: 0, bounced: 0, complained: 0};
   },
 };
