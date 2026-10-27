@@ -10,9 +10,9 @@ import {DomainService} from '../services/DomainService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EmailVerificationService} from '../services/EmailVerificationService.js';
 import {EventService} from '../services/EventService.js';
-import {NotFound, ValidationError} from '../exceptions/index.js';
+import {describeError, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
-import {DASHBOARD_URI} from '../app/constants.js';
+import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
 
 /**
  * Public API Actions Controller
@@ -142,6 +142,8 @@ export class Actions {
    * Response:
    * - success: boolean
    * - data: object with emails array and timestamp
+   *   - failed (Plunk Lite): recipients that could not be sent, as {email, code, message}, when
+   *     some were; the status is then 207. A request that sent nothing answers with the error.
    *
    * Examples:
    *
@@ -281,79 +283,119 @@ export class Actions {
 
     const timestamp = new Date();
     const emailResults = [];
+    // Plunk Lite: one recipient's failure no longer drops the ones after it
+    const failed: {email: string; code: string; message: string}[] = [];
+    let firstClientError: unknown;
+    let firstServerError: unknown;
 
-    // Process each recipient
-    for (const recipient of recipients) {
-      // Merge recipient name with data if provided
-      const recipientData = recipient.name
-        ? {...(data as Record<string, unknown> | undefined), name: recipient.name}
-        : (data as Record<string, unknown> | undefined);
-
-      // Create or update contact with metadata
-      // Transactional emails should not subscribe contacts by default
-      // New contacts default to unsubscribed unless explicitly opted in
-      // Existing contacts preserve their subscription state unless explicitly changed
-      const contact = await ContactService.upsert(auth.projectId, recipient.email, recipientData, subscribed, false);
-
-      // Get merged data including non-persistent fields for template rendering
-      const mergedData = ContactService.getMergedData(contact, data as Record<string, unknown> | undefined);
-
-      // Add system variables (email, unsubscribe URLs, etc.) to merged data
-      // These are always available for template rendering
-      const dataWithSystemVars = {
-        ...mergedData,
-        id: contact.id,
-        email: contact.email,
-        data: mergedData, // Also available as nested data for {{data.fieldName}} syntax
-        unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
-        subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
-        manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
-      };
-
-      // Render template placeholders against the contact/request data.
-      //
-      // This bakes in any non-persistent request data before the email is stored; the
-      // worker renders a second pass against the contact's persistent data at send time.
-      //
-      // SECURITY: variable names here originate from contact/event `data`, which on the
-      // public /v1/track endpoint is attacker-controlled free text. The shared renderer
-      // treats names as data (scope lookups) and never compiles them into a RegExp, so a
-      // hostile key such as `(` can no longer throw a SyntaxError (persistent 500 on every
-      // send to that contact) and `(.+)+$` can no longer drive catastrophic backtracking
-      // (event-loop DoS). It also never throws, and matches the worker's render pass.
-      const {subject: renderedSubject, body: renderedBody} = EmailService.format({
-        subject: emailSubject!,
-        body: emailBody!,
-        data: dataWithSystemVars,
-      });
-
-      const email = await EmailService.sendTransactionalEmail({
-        projectId: auth.projectId,
-        contactId: contact.id,
-        subject: renderedSubject,
-        body: renderedBody,
-        from: emailFrom,
-        fromName: emailFromName,
-        toName: recipient.name,
-        replyTo: replyToEmail,
-        headers: headers || undefined,
-        attachments: attachments || undefined,
-        templateId: templateId,
-      });
-
-      emailResults.push({
-        contact: {
-          id: contact.id,
-          email: contact.email,
-        },
-        email: email.id,
-      });
+    // Plunk Lite: new recipients' domains are checked as they become contacts; look them up at once
+    if (recipients.length > 1 && verifySignupsEnabled()) {
+      await EmailVerificationService.prefetchSignupDomains(recipients.map(recipient => recipient.email));
     }
 
-    return res.status(200).json({
+    // Process each recipient
+    for (const [index, recipient] of recipients.entries()) {
+      try {
+        // Merge recipient name with data if provided
+        const recipientData = recipient.name
+          ? {...(data as Record<string, unknown> | undefined), name: recipient.name}
+          : (data as Record<string, unknown> | undefined);
+
+        // Create or update contact with metadata
+        // Transactional emails should not subscribe contacts by default
+        // New contacts default to unsubscribed unless explicitly opted in
+        // Existing contacts preserve their subscription state unless explicitly changed
+        // Plunk Lite: a new recipient whose address takes no email fails with 422 INVALID_EMAIL
+        const contact = await ContactService.upsert(auth.projectId, recipient.email, recipientData, subscribed, false, {
+          verifySignup: true,
+        });
+
+        // Get merged data including non-persistent fields for template rendering
+        const mergedData = ContactService.getMergedData(contact, data as Record<string, unknown> | undefined);
+
+        // Add system variables (email, unsubscribe URLs, etc.) to merged data
+        // These are always available for template rendering
+        const dataWithSystemVars = {
+          ...mergedData,
+          id: contact.id,
+          email: contact.email,
+          data: mergedData, // Also available as nested data for {{data.fieldName}} syntax
+          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
+          subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
+          manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
+        };
+
+        // Render template placeholders against the contact/request data.
+        //
+        // This bakes in any non-persistent request data before the email is stored; the
+        // worker renders a second pass against the contact's persistent data at send time.
+        //
+        // SECURITY: variable names here originate from contact/event `data`, which on the
+        // public /v1/track endpoint is attacker-controlled free text. The shared renderer
+        // treats names as data (scope lookups) and never compiles them into a RegExp, so a
+        // hostile key such as `(` can no longer throw a SyntaxError (persistent 500 on every
+        // send to that contact) and `(.+)+$` can no longer drive catastrophic backtracking
+        // (event-loop DoS). It also never throws, and matches the worker's render pass.
+        const {subject: renderedSubject, body: renderedBody} = EmailService.format({
+          subject: emailSubject!,
+          body: emailBody!,
+          data: dataWithSystemVars,
+        });
+
+        const email = await EmailService.sendTransactionalEmail({
+          projectId: auth.projectId,
+          contactId: contact.id,
+          subject: renderedSubject,
+          body: renderedBody,
+          from: emailFrom,
+          fromName: emailFromName,
+          toName: recipient.name,
+          replyTo: replyToEmail,
+          headers: headers || undefined,
+          attachments: attachments || undefined,
+          templateId: templateId,
+        });
+
+        emailResults.push({
+          contact: {
+            id: contact.id,
+            email: contact.email,
+          },
+          email: email.id,
+        });
+      } catch (error) {
+        const {status, code, message} = describeError(error);
+        failed.push({email: recipient.email, code, message});
+        if (status < 500) {
+          firstClientError ??= error;
+          continue;
+        }
+        // Without a known client error the rest would hit the same fault (a database outage) one by one
+        firstServerError = error;
+        for (const skipped of recipients.slice(index + 1)) {
+          failed.push({
+            email: skipped.email,
+            code: 'NOT_ATTEMPTED',
+            message: 'Not attempted after an unexpected error with an earlier recipient',
+          });
+        }
+        break;
+      }
+    }
+
+    // Nothing sent: the same answer as one recipient would give. An unexpected error wins over a
+    // client error, so the idempotency key stays claimed when an email may already be queued.
+    if (emailResults.length === 0 && (firstServerError || firstClientError)) {
+      throw firstServerError ?? firstClientError;
+    }
+
+    // Plunk Lite: a partial send is 207, with the recipients that failed; still 2xx, so its
+    // idempotency key stays claimed and a blind retry cannot send the others twice
+    return res.status(failed.length > 0 ? 207 : 200).json({
       success: true,
       data: {
         emails: emailResults,
+        ...(failed.length > 0 ? {failed} : {}),
         timestamp: timestamp.toISOString(),
       },
     });
