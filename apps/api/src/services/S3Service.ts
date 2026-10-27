@@ -124,7 +124,12 @@ interface UploadType {
   extension: string;
   /** How its contents start: a file is taken only if it starts with one of these. */
   signatures: Buffer[];
+  /** How far into the file the signature may start, for types whose readers skip leading bytes. */
+  signatureWithin?: number;
 }
+
+// PDF readers look for the header within the first 1024 bytes; some writers put a line or a BOM before it
+const PDF_HEADER_WITHIN = 1024;
 
 const ZIP = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 
@@ -140,7 +145,12 @@ function linkedFileTypes(): Record<string, UploadType> {
   return Object.fromEntries(
     (Object.entries(LINKED_FILE_TYPES) as [LinkedFileExtension, string][]).map(([extension, contentType]) => [
       contentType,
-      {kind: 'file', extension, signatures: FILE_SIGNATURES[extension]},
+      {
+        kind: 'file',
+        extension,
+        signatures: FILE_SIGNATURES[extension],
+        ...(extension === 'pdf' ? {signatureWithin: PDF_HEADER_WITHIN} : {}),
+      },
     ]),
   );
 }
@@ -183,7 +193,11 @@ export function linkedFileType(filename: string, sentType: string): string | nul
 /** Whether a file's contents are what its content type says. */
 export function hasContentsOf(file: Buffer, contentType: string): boolean {
   const type = uploadType(contentType);
-  if (!type?.signatures.some(signature => file.subarray(0, signature.length).equals(signature))) {
+  const startsAsItShould = (signature: Buffer) =>
+    type?.signatureWithin
+      ? file.subarray(0, type.signatureWithin).includes(signature)
+      : file.subarray(0, signature.length).equals(signature);
+  if (!type?.signatures.some(startsAsItShould)) {
     return false;
   }
   // Office documents are ZIP files. A document lists its parts in [Content_Types].xml; a
@@ -208,11 +222,15 @@ const MAX_SAVED_NAME = 150;
  * (RFC 6266): `filename` for old clients, ASCII only, and `filename*` in UTF-8.
  */
 function inlineDisposition(uploaded: string): string {
-  // Long names are cut, keeping their extension, so the header stays well within storage's limits
+  // Long names are cut, keeping their extension, so the header stays well within storage's limits.
+  // Cut by characters: a cut through an emoji's surrogate pair would make encodeURIComponent throw.
+  const characters = Array.from(uploaded);
   const extension = /\.[^.]{1,10}$/.exec(uploaded)?.[0] ?? '';
   const filename =
-    uploaded.length > MAX_SAVED_NAME ? uploaded.slice(0, MAX_SAVED_NAME - extension.length) + extension : uploaded;
-  const ascii = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    characters.length > MAX_SAVED_NAME
+      ? characters.slice(0, MAX_SAVED_NAME - Array.from(extension).length).join('') + extension
+      : uploaded;
+  const ascii = filename.replace(/[^\x20-\x7e]|["\\]/gu, '_');
   const encoded = encodeURIComponent(filename).replace(
     /['()*]/g,
     character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
