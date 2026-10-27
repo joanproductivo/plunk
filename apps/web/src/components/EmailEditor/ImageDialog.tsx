@@ -3,7 +3,7 @@ import {Images, Upload, X} from 'lucide-react';
 import {useRef, useState} from 'react';
 
 import {ImageGallery} from './ImageGallery';
-import {useImageUpload} from './useImageUpload';
+import {useUpload} from './useUpload';
 
 interface ImageDialogProps {
   open: boolean;
@@ -55,7 +55,7 @@ function ImageForm({
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [showGallery, setShowGallery] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const upload = useImageUpload();
+  const upload = useUpload('image');
 
   const handleImageUpload = async () => {
     if (!imageFile && !imageUrl) return;
@@ -68,7 +68,7 @@ function ImageForm({
         onInsert(await upload(imageFile));
       } catch (error) {
         console.error('Failed to upload image:', error);
-        alert('Couldn’t upload the image. Try again.');
+        alert(error instanceof Error ? error.message : 'Couldn’t upload the image. Try again.');
       }
     }
   };

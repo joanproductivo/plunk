@@ -166,10 +166,10 @@ export function EmailEditor({
     selectedContactId === 'none' ? undefined : (contacts.find(c => c.id === selectedContactId) ?? contacts[0]);
 
   const {data: config} = useConfig();
-  const canUploadImages = Boolean(config?.features.storage.s3Enabled);
+  const canUpload = Boolean(config?.features.storage.s3Enabled);
   // Read by the slash menu as it updates, so it follows the config once loaded
-  const canUploadImagesRef = useRef(canUploadImages);
-  canUploadImagesRef.current = canUploadImages;
+  const canUploadRef = useRef(canUpload);
+  canUploadRef.current = canUpload;
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -200,7 +200,7 @@ export function EmailEditor({
       Variable,
       VariableMention,
       LogicMention,
-      SlashCommand.configure({canInsertImages: () => canUploadImagesRef.current}),
+      SlashCommand.configure({canInsertImages: () => canUploadRef.current}),
       Placeholder.configure({
         // On the empty line the cursor is in, where the slash menu would open
         placeholder: ({editor, node}) =>
@@ -518,7 +518,7 @@ export function EmailEditor({
               onSpacer={spacer.onToolbar}
               onVideo={video.onToolbar}
               onBox={box.onToolbar}
-              canUploadImages={canUploadImages}
+              canUpload={canUpload}
             />
             <div
               className={cn(
@@ -788,7 +788,7 @@ export function EmailEditor({
         variant="destructive"
       />
 
-      <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} />
+      <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} canUpload={canUpload} />
       <DividerDialog {...divider.dialogProps} />
       <SpacerDialog {...spacer.dialogProps} />
       <VideoDialog {...video.dialogProps} />
@@ -800,7 +800,7 @@ export function EmailEditor({
       <ImageDialog
         open={showImageDialog}
         onOpenChange={setShowImageDialog}
-        canUpload={canUploadImages}
+        canUpload={canUpload}
         onInsert={src => (editor?.chain().focus() as any).setImage({src}).run()}
       />
 
