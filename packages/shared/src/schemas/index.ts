@@ -677,13 +677,14 @@ export const ALERT_RECIPIENTS_MAX = 10;
 /** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
 export const FAILURE_ALERTS_OPEN_MAX = 20;
 
-const NOTICE_PREFIXES = ['security:', 'domain:', 'sns:', 'aws:'];
+const NOTICE_KINDS = ['project', 'security', 'domain', 'sns', 'aws'];
 
 /**
- * Alert sources that report a condition rather than a failure: sending reputation, domains, the
- * SES event pipeline and the AWS account's alarms (Plunk Lite)
+ * Alert sources that report a condition rather than a failure, by the kind their key starts with:
+ * the project disabled, sending reputation, domains, the SES event pipeline and the AWS account's
+ * alarms (Plunk Lite)
  */
-export const isFailureNotice = (sourceKey: string) => NOTICE_PREFIXES.some(prefix => sourceKey.startsWith(prefix));
+export const isFailureNotice = (sourceKey: string) => NOTICE_KINDS.includes(sourceKey.split(':')[0]!);
 
 export const AlertSchemas = {
   // An empty list turns the alert emails off; the dashboard banner stays.

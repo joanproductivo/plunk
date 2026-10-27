@@ -210,6 +210,7 @@ describe('FailureAlertService', () => {
       });
       await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
       await fail('x', 'transactional');
+      await fail('x', 'campaign:22222222-2222-4222-8222-222222222222');
       await settle();
       expect(sendRawEmail).not.toHaveBeenCalled();
 
@@ -218,7 +219,31 @@ describe('FailureAlertService', () => {
       await fail('x', 'project');
       await settle();
       expect(sendRawEmail).not.toHaveBeenCalled();
-      expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(3);
+      expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(4);
+    });
+
+    it('tells a disabled project about its suspension and its reputation, from its own SES account', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {disabled: true, language: 'es'}});
+
+      await fail('7-day bounce rate too high', 'project');
+      await fail('7-day bounce rate', 'security:critical');
+      await fail('No events', 'sns:events');
+      await settle();
+
+      const subjects = vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.content.subject);
+      expect(subjects.filter(subject => subject.endsWith('Requiere atención: Proyecto desactivado'))).toHaveLength(2);
+      expect(subjects.filter(subject => subject.includes('Reputación de envío: crítico'))).toHaveLength(2);
+      expect(subjects).toHaveLength(6);
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.html).toContain('El proyecto no envía nada hasta que se reactive');
+      expect(params.content.html).toContain('/settings?tab=security');
+    });
+
+    it('sends no test alert from a disabled project', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
+
+      await expect(FailureAlertService.sendTest(projectId)).rejects.toThrow('A disabled project cannot send alerts');
+      expect(sendRawEmail).not.toHaveBeenCalled();
     });
   });
 
@@ -387,14 +412,15 @@ describe('FailureAlertService', () => {
   });
 
   describe('sources', () => {
-    it('records a project disabled for its content, without emailing from the disabled project', async () => {
+    it('records a project disabled for its content, and emails the alert addresses about it', async () => {
       await SecurityService.disableProjectForPhishing(projectId, 'Subject', 99);
       await settle();
 
       expect(await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'project'}})).toMatchObject({
         label: 'Project disabled',
       });
-      expect(sendRawEmail).not.toHaveBeenCalled();
+      expect(sendRawEmail).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].content.subject).toMatch(/Needs attention: Project disabled$/);
     });
 
     it('records a campaign batch that ran out of attempts under the campaign', async () => {

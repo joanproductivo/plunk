@@ -10,11 +10,12 @@ describe('isFailureNotice', () => {
     'sns:unmatched',
     'sns:subscription',
     'aws:alarm:ses-rebotes-alto',
+    'project',
   ])('reads %s as a condition that needs attention', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });
 
-  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'project', 'snsx'])('reads %s as a failure', sourceKey => {
+  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx'])('reads %s as a failure', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(false);
   });
 });

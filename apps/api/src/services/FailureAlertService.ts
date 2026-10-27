@@ -72,7 +72,7 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     name: {en: label => `Campaign "${label}"`, es: label => `Campaña «${label}»`},
     path: id => `/campaigns/${encodeURIComponent(id)}`,
   },
-  'project': {name: {en: () => 'The project', es: () => 'El proyecto'}, path: () => '/settings'},
+  'project': {name: {en: () => 'Project disabled', es: () => 'Proyecto desactivado'}, path: () => SECURITY_PATH},
   'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},
   'security:critical': {
     name: {en: label => label, es: () => 'Reputación de envío: crítico'},
@@ -101,6 +101,13 @@ const TRANSACTIONAL: SourceKind = {
   path: () => '/activity',
 };
 
+/**
+ * The kinds of source alerted on even while the project is disabled: its own suspension, and the
+ * reputation and SES conditions that led to it or came after. The SES account keeps working, since
+ * `disabled` is Plunk's own mark, and in a self-hosted installation it is the owner's account.
+ */
+const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'brake'];
+
 function sourceKind(sourceKey: string): {kind: SourceKind; rest: string} {
   const parts = sourceKey.split(':');
   for (let length = parts.length; length > 0; length--) {
@@ -125,6 +132,7 @@ const COPY = {
     review: 'Review it in Plunk',
     footer: 'You get at most one alert per source an hour. Change who gets these in Settings → Alerts.',
     test: 'This is a test alert: nothing has failed.',
+    disabled: 'Nothing is sent from the project until it is reactivated, in Settings → Security.',
   },
   es: {
     source: (sourceKey: string, label: string) => sourceKind(sourceKey).kind.name.es(label),
@@ -138,6 +146,7 @@ const COPY = {
     review: 'Revisarlo en Plunk',
     footer: 'Recibes como mucho un aviso por origen cada hora. Elige quién los recibe en Settings → Alerts.',
     test: 'Este es un aviso de prueba: no ha fallado nada.',
+    disabled: 'El proyecto no envía nada hasta que se reactive, en Settings → Security.',
   },
 } as const;
 
@@ -479,7 +488,8 @@ export class FailureAlertService {
 
   /**
    * Emails the project's alert addresses about a source; false when there is no one to tell. A
-   * disabled project sends nothing: its account must not be used to report its own suspension.
+   * disabled project only sends the alerts in ALERTED_WHILE_DISABLED, its suspension among them,
+   * and never a test.
    *
    * Sent with `sendRawEmail` from the project's own domain, like a campaign's test send: Plunk's
    * platform emails (`sendPlatformEmail`) need PLUNK_API_KEY, which these installations do not set.
@@ -497,7 +507,8 @@ export class FailureAlertService {
       this.getSettings(projectId),
       prisma.project.findUnique({where: {id: projectId}, select: {name: true, disabled: true, language: true}}),
     ]);
-    if (!settings || !project || project.disabled) {
+    const alertedWhileDisabled = !test && ALERTED_WHILE_DISABLED.includes(failure.sourceKey.split(':')[0]!);
+    if (!settings || !project || (project.disabled && !alertedWhileDisabled)) {
       return false;
     }
 
@@ -587,6 +598,9 @@ export class FailureAlertService {
     ];
     if (failure.lastContactEmail) {
       lines.push(`<p>${escapeHtml(copy.contact)}: ${escapeHtml(failure.lastContactEmail)}</p>`);
+    }
+    if (failure.sourceKey === 'project') {
+      lines.push(`<p>${escapeHtml(copy.disabled)}</p>`);
     }
     lines.push(
       `<p><a href="${escapeHtml(DASHBOARD_URI + this.reviewPath(failure.sourceKey))}">${escapeHtml(copy.review)}</a></p>`,

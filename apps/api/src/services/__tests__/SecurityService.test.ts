@@ -3,6 +3,7 @@ import {EmailStatus, EmailSourceType} from '@plunk/db';
 import {SecurityService} from '../SecurityService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {redis} from '../../database/redis';
+import {sendRawEmail} from '../SESService';
 
 const flags = vi.hoisted(() => ({autoProjectDisable: true}));
 
@@ -23,6 +24,12 @@ vi.mock('../NtfyService.js', () => ({
     notifySecurityWarning: vi.fn(),
     notifyProjectDisabledForSecurity: vi.fn(),
   },
+}));
+
+// The alerts to the project's addresses (Plunk Lite) go out through SES
+vi.mock('../SESService.js', async () => ({
+  ...(await vi.importActual('../SESService.js')),
+  sendRawEmail: vi.fn(async () => ({messageId: 'mock-message-id'})),
 }));
 
 // Mock email sending for project disabled notifications
@@ -231,6 +238,24 @@ describe('SecurityService', () => {
       });
       // The disabled project is the alert; no reputation alert besides it
       expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: 'security:critical'}})).toBe(0);
+    });
+
+    it('emails the alert addresses when it disables the project', async () => {
+      await factories.createDomain({projectId, domain: 'example.com'});
+      await prisma.plunkLiteAlertSettings.create({
+        data: {projectId, recipients: ['ops@example.org'], fromEmail: 'alerts@example.com'},
+      });
+      await createEmails(20000, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(sendRawEmail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: ['ops@example.org'],
+          content: expect.objectContaining({subject: expect.stringMatching(/Needs attention: Project disabled$/)}),
+        }),
+      );
     });
 
     it('records a critical rate as a reputation alert when auto-disable is off', async () => {
