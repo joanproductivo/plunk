@@ -1171,7 +1171,8 @@ export class CampaignService {
    * mid-send owns up to a row per recipient, far too many to delete in a request, so
    * it comes back CANCELLED with `revertPending` set and is promoted by the cleanup
    * worker. Re-running cancel on a campaign already CANCELLED is the repair path for
-   * a cleanup that died: it re-queues the job rather than erroring.
+   * a cleanup that died: it queues the job again rather than erroring (and re-uses one
+   * still pending or running).
    */
   public static async cancel(
     projectId: string,

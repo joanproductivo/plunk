@@ -255,6 +255,35 @@ describe('deleteUnsentCampaignEmails', () => {
     expect(await prisma.email.findUnique({where: {id: sending.id}})).not.toBeNull();
   });
 
+  it('never deletes a row a worker claims while the delete waits for it', async () => {
+    const claimed = await makeEmail();
+    let deleting: Promise<number> | undefined;
+
+    // A worker that read the campaign as sending before the cancel claims its email; the cleanup
+    // picks the row while it is still PENDING and waits for the claim to commit
+    await prisma.$transaction(async tx => {
+      await tx.email.updateMany({
+        where: {id: claimed.id, status: EmailStatus.PENDING},
+        data: {status: EmailStatus.SENDING},
+      });
+      deleting = deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
+      // Commit only once the delete is waiting on the claimed row: earlier, it would read the
+      // row as SENDING and skip it with or without the re-check
+      for (let waited = 0; ; waited += 20) {
+        const [{blocked}] = await prisma.$queryRaw<{blocked: bigint}[]>`
+          SELECT count(*) AS blocked FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%DELETE FROM "emails"%'
+        `;
+        if (blocked > 0n) break;
+        if (waited > 4000) throw new Error('The cleanup never waited on the claimed row');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    });
+
+    expect(await deleting).toBe(0);
+    expect((await prisma.email.findUnique({where: {id: claimed.id}}))?.status).toBe(EmailStatus.SENDING);
+  });
+
   it('leaves rows created after the cancellation alone', async () => {
     // The campaign went back to draft and was sent again while this cleanup was still
     // draining. Those rows belong to the new send and deleting them would gut it.
