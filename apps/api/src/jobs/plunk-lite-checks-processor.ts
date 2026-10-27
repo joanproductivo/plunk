@@ -1,6 +1,6 @@
 /**
  * Plunk Lite's checks worker: the reputation check after bounces and complaints, and every 15
- * minutes the check that SES events reach the webhook
+ * minutes the check that SES events reach the webhook and the one of Redis's memory
  */
 
 import type {PlunkLiteChecksJobData, SecurityCheckJobData} from '@plunk/types';
@@ -8,6 +8,7 @@ import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {plunkLiteChecksQueue} from '../services/QueueService.js';
+import {checkRedisMemory} from '../services/RedisMemoryCheck.js';
 import {ReputationCheck} from '../services/ReputationCheck.js';
 import {checkEventPipeline} from '../services/SesEventMatch.js';
 
@@ -17,6 +18,8 @@ export async function processPlunkLiteCheck(job: Job<PlunkLiteChecksJobData>): P
       return ReputationCheck.run(job.data as SecurityCheckJobData);
     case 'sns-health':
       return checkEventPipeline();
+    case 'redis-memory':
+      return checkRedisMemory();
     default:
       throw new Error(`Unknown Plunk Lite check: ${job.name}`);
   }

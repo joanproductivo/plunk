@@ -87,6 +87,9 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
+      // A process that keeps crashing at startup (the database or Redis down) is restarted after a
+      // growing pause, up to 15 seconds, instead of at once in a tight loop
+      exp_backoff_restart_delay: 1000,
       watch: false,
       // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
       kill_timeout: 30000,
@@ -110,6 +113,9 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
+      // A process that keeps crashing at startup (the database or Redis down) is restarted after a
+      // growing pause, up to 15 seconds, instead of at once in a tight loop
+      exp_backoff_restart_delay: 1000,
       watch: false,
       // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
       kill_timeout: 30000,

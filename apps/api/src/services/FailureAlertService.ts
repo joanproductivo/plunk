@@ -19,8 +19,8 @@ export interface FailureReport {
    * should hear about: `project` (disabled), `project:reactivated`, `brake:campaign:<id>` and
    * `brake:workflow:<id>` (stopped for their bounces), `security:warning`, `security:critical`,
    * `security:check` (the reputation not being checked), `domain:<id>`, `sns:<what>` (the SES event
-   * pipeline), `ses:<what>` (the SES account: its quota, a pause), `aws:alarm:<name>` and
-   * `aws:alarm-subscription`. Each kind is in SOURCE_KINDS.
+   * pipeline), `ses:<what>` (the SES account: its quota, a pause), `aws:alarm:<name>`,
+   * `aws:alarm-subscription` and `redis:memory`. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -129,6 +129,8 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     name: {en: label => label, es: () => 'Las alarmas de AWS ya no llegan al panel; sus emails sí'},
     path: () => SECURITY_PATH,
   },
+  // The installation's Redis close to its maxmemory (RedisMemoryCheck)
+  'redis': {name: {en: label => label, es: () => 'Redis se está quedando sin memoria'}, path: () => '/activity'},
 };
 
 const TRANSACTIONAL: SourceKind = {
@@ -141,7 +143,7 @@ const TRANSACTIONAL: SourceKind = {
  * reputation and SES conditions that led to it or came after. The SES account keeps working, since
  * `disabled` is Plunk's own mark, and in a self-hosted installation it is the owner's account.
  */
-const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'brake'];
+const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'brake', 'redis'];
 
 function sourceKind(sourceKey: string): {kind: SourceKind; rest: string} {
   const parts = sourceKey.split(':');

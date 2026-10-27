@@ -20,11 +20,12 @@ describe('isFailureNotice', () => {
     'sns:config',
     'ses:paused',
     'ses:daily-quota',
+    'redis:memory',
   ])('reads %s as a condition that needs attention', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });
 
-  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx', 'sesx'])('reads %s as a failure', sourceKey => {
+  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx', 'sesx', 'redisx'])('reads %s as a failure', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(false);
   });
 });
