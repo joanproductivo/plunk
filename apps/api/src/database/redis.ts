@@ -15,6 +15,12 @@ export const REDIS_ONE_MINUTE = 60;
 export const REDIS_DEFAULT_EXPIRY = REDIS_ONE_MINUTE;
 export const TEN_MINUTES_IN_SECONDS = 60 * 10;
 
+/** Plunk Lite: a key with any API key in it masked, for logs */
+export const redactKeys = (key: string) => key.replace(/\b(sk|pk)_[\w-]+/g, '$1_…');
+
+/** Plunk Lite: what to log of an error that may be Redis's, without the command it carries */
+export const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 /**
  * @param key The key for redis (use Keys#<type>)
  * @param fn The function to return a resource. Can be a promise
@@ -43,8 +49,9 @@ export async function wrapRedis<T>(
       await redis.set(key, 'null', 'EX', missSeconds);
     }
   } catch (error) {
-    // Keys may hold an API key (project:secret:sk_…), which must not reach the logs
-    signale.warn(`[REDIS] Could not cache ${key.replace(/\b(sk|pk)_[\w-]+/g, '$1_…')}:`, error);
+    // Only the message: a Redis error carries its command's arguments, the cached value included, and
+    // keys may hold an API key (project:secret:sk_…), none of which must reach the logs
+    signale.warn(`[REDIS] Could not cache ${redactKeys(key)}: ${errorMessage(error)}`);
   }
 
   return recent;

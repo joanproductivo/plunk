@@ -66,15 +66,24 @@ describe('ProjectService cache', () => {
     await expect(ProjectService.invalidate({id: 'p', secret: 's', public: 'k'})).resolves.toBeUndefined();
   });
 
-  it('keeps the API key out of the log when it cannot cache it', async () => {
-    vi.spyOn(redis, 'set').mockRejectedValueOnce(new Error('OOM command not allowed'));
+  it('keeps the API key and the cached project out of the log when it cannot cache them', async () => {
+    const {project} = await factories.createUserWithProject();
+    // As ioredis rejects a command: with the command and its arguments on the error
+    const replyError = Object.assign(new Error('OOM command not allowed'), {
+      command: {name: 'set', args: [`project:secret:${project.secret}`, JSON.stringify(project)]},
+    });
+    vi.spyOn(redis, 'set').mockRejectedValueOnce(replyError);
+    vi.spyOn(redis, 'del').mockRejectedValueOnce(replyError);
     const warn = vi.spyOn(signale, 'warn');
-    const unknown = newKey('sk');
 
-    await ProjectService.secret(unknown);
+    await ProjectService.secret(project.secret);
+    await ProjectService.invalidate(project);
 
-    expect(warn).toHaveBeenCalled();
-    expect(JSON.stringify(warn.mock.calls)).not.toContain(unknown.slice(3));
+    expect(warn).toHaveBeenCalledTimes(2);
+    const logged = warn.mock.calls.map(call => call.map(String).join(' ')).join('\n');
+    expect(logged).toContain('OOM command not allowed');
+    expect(logged).not.toContain(project.secret.slice(3));
+    expect(logged).not.toContain(project.public.slice(3));
   });
 
   it('answers even when the cache cannot be written (Redis full)', async () => {

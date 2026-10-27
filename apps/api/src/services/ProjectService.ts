@@ -1,7 +1,7 @@
 import signale from 'signale';
 
 import {Keys} from './keys.js';
-import {redis, wrapRedis} from '../database/redis.js';
+import {errorMessage, redis, wrapRedis} from '../database/redis.js';
 import {prisma} from '../database/prisma.js';
 
 /** Plunk Lite: how long an API key that matches no project is remembered as unknown */
@@ -60,7 +60,8 @@ export class ProjectService {
         ]),
       );
     } catch (error) {
-      signale.warn('[PROJECT] Could not drop the cached project:', error);
+      // Only the message: a Redis error carries its command's arguments, the API keys here
+      signale.warn(`[PROJECT] Could not drop the cached project: ${errorMessage(error)}`);
     }
   }
 }
