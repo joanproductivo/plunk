@@ -446,29 +446,35 @@ describe('Request Logger Middleware', () => {
       expect(await prisma.apiRequest.count({where: {path: '/v1/send', id: {not: id}}})).toBe(1);
     });
 
-    it('always writes sign-in requests, even at the cap', async () => {
+    it('writes sign-ins within their own reserve of 4 past the cap, and drops the 9th write at once', async () => {
       const pending: (() => void)[] = [];
-      const real = appPrisma.apiRequest.create.bind(appPrisma.apiRequest);
+      // Every write stays in flight until the end, sign-ins included
       const create = vi
         .spyOn(appPrisma.apiRequest, 'create')
-        .mockImplementation(((args: never) =>
-          (args as {data: {path: string}}).data.path === '/auth/login'
-            ? real(args)
-            : new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
-
-      for (let i = 0; i < 4; i++) {
+        .mockImplementation((() => new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
+      const respond = (path: string) => {
         res.json = json;
+        req.originalUrl = path;
+        res.statusCode = 200;
         res.locals = {requestId: crypto.randomUUID()};
         databaseRequestLogger(req as Request, res as Response, next);
-        await res.json!({});
-      }
-      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(4));
-      const written = await logged('/auth/login', 401);
+        return res.json!({});
+      };
+
+      for (let i = 0; i < 4; i++) await respond('/v1/send');
+      // At the cap: an ordinary request is dropped, sign-ins are not
+      await respond('/v1/send');
+      for (let i = 0; i < 5; i++) await respond('/auth/login');
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(8));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const paths = create.mock.calls.map(([args]) => (args as {data: {path: string}}).data.path);
       pending.forEach(settle => settle());
       await new Promise(resolve => setTimeout(resolve, 20));
       create.mockRestore();
 
-      expect(written).toBe(true);
+      // 4 ordinary writes and 4 sign-ins; the 5th ordinary request and the 9th write were dropped
+      expect(paths.filter(path => path === '/v1/send')).toHaveLength(4);
+      expect(paths.filter(path => path === '/auth/login')).toHaveLength(4);
     });
   });
 
