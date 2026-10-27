@@ -143,9 +143,13 @@ export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') 
  */
 export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string): number {
   const raw = validateEnv(key, defaultValue);
-  const value = Number(raw);
+  // A decimal comma ("0,4") is how the value is written in many locales
+  const value = Number(raw.trim().replace(',', '.'));
   if (!Number.isFinite(value) || value <= 0 || value >= 100) {
-    throw new Error(`${key} must be a percentage between 0 and 100 (exclusive), got "${raw}"`);
+    // Every process imports these constants, so throwing here would keep the API and the worker
+    // from starting at all; the default is the safe threshold
+    console.warn(`${key} must be a percentage between 0 and 100 (exclusive), got "${raw}": using ${defaultValue}`);
+    return Number(defaultValue);
   }
   return value;
 }
