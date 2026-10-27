@@ -1,0 +1,170 @@
+import http from 'node:http';
+import type {AddressInfo} from 'node:net';
+
+import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
+
+type SESServiceModule = typeof import('../SESService');
+
+/**
+ * The send client against a local server standing in for SES, with the real SDK: whether a
+ * failed send may be retried depends on the exact shape of the errors the SDK throws, which a
+ * mocked `sendRawEmail` cannot show.
+ */
+describe('sendRawEmail against an SES endpoint', () => {
+  let server: http.Server;
+  let requests = 0;
+  let respond: (res: http.ServerResponse) => void = () => {};
+  const previousEndpoint = process.env.AWS_ENDPOINT_URL_SES;
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      requests++;
+      req.resume();
+      req.on('end', () => respond(res));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  });
+
+  afterAll(async () => {
+    await new Promise(resolve => server.close(resolve));
+    if (previousEndpoint === undefined) {
+      delete process.env.AWS_ENDPOINT_URL_SES;
+    } else {
+      process.env.AWS_ENDPOINT_URL_SES = previousEndpoint;
+    }
+  });
+
+  afterEach(() => {
+    requests = 0;
+  });
+
+  /** The module built against `endpoint`: the clients read it when they are created */
+  async function sesServiceAt(endpoint: string): Promise<SESServiceModule> {
+    process.env.AWS_ENDPOINT_URL_SES = endpoint;
+    vi.resetModules();
+    return import('../SESService');
+  }
+
+  const local = () => `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const send = (service: SESServiceModule) =>
+    service.sendRawEmail({
+      from: {name: 'Plunk', email: 'hello@plunk.test'},
+      to: ['someone@plunk.test'],
+      content: {subject: 'Hello', html: '<p>Hello</p>'},
+    });
+
+  async function failureOf(promise: Promise<unknown>): Promise<unknown> {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    throw new Error('Expected the send to fail');
+  }
+
+  it('returns the message id SES answers with', async () => {
+    respond = res => {
+      res.writeHead(200, {'Content-Type': 'text/xml'});
+      res.end(
+        '<SendRawEmailResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><SendRawEmailResult>' +
+          '<MessageId>ses-message-1</MessageId></SendRawEmailResult><ResponseMetadata><RequestId>r-1</RequestId>' +
+          '</ResponseMetadata></SendRawEmailResponse>',
+      );
+    };
+    const service = await sesServiceAt(local());
+
+    expect(await send(service)).toEqual({messageId: 'ses-message-1'});
+  });
+
+  it('does not retry, nor mark safe to retry, an accepted send whose answer was cut off', async () => {
+    respond = res => {
+      // SES accepted it: the status line went out, then the connection dropped mid-body
+      res.writeHead(200, {'Content-Type': 'text/xml', 'Content-Length': '500'});
+      res.write('<SendRawEmailResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><SendRawEm');
+      res.socket?.destroy();
+    };
+    const service = await sesServiceAt(local());
+
+    const error = await failureOf(send(service));
+
+    expect(service.safeToRetrySend(error)).toBe(false);
+    expect(requests).toBe(1);
+  });
+
+  it('does not mark safe to retry an accepted send whose answer cannot be parsed', async () => {
+    respond = res => {
+      res.writeHead(200, {'Content-Type': 'text/xml'});
+      res.end('<SendRawEmailResponse><unterminated');
+    };
+    const service = await sesServiceAt(local());
+
+    const error = await failureOf(send(service));
+
+    expect(service.safeToRetrySend(error)).toBe(false);
+  });
+
+  it('leaves a throttled send to the caller to retry, without retrying it itself', async () => {
+    respond = res => {
+      res.writeHead(400, {'Content-Type': 'text/xml'});
+      res.end(
+        '<ErrorResponse><Error><Type>Sender</Type><Code>Throttling</Code>' +
+          '<Message>Maximum sending rate exceeded.</Message></Error><RequestId>r-2</RequestId></ErrorResponse>',
+      );
+    };
+    const service = await sesServiceAt(local());
+
+    const error = await failureOf(send(service));
+
+    expect(service.safeToRetrySend(error)).toBe(true);
+    // The SDK would retry a throttle three times on its own; the send client makes one attempt
+    expect(requests).toBe(1);
+  });
+
+  it('marks safe to retry a send that never reached SES', async () => {
+    // A port nothing listens on: the connection is refused before anything is sent
+    const closed = http.createServer();
+    await new Promise<void>(resolve => closed.listen(0, '127.0.0.1', resolve));
+    const port = (closed.address() as AddressInfo).port;
+    await new Promise(resolve => closed.close(resolve));
+    const service = await sesServiceAt(`http://127.0.0.1:${port}`);
+
+    const error = await failureOf(send(service));
+
+    expect(service.safeToRetrySend(error)).toBe(true);
+  });
+});
+
+describe('safeToRetrySend', () => {
+  it.each([
+    ['SES refused it', Object.assign(new Error('MessageRejected'), {$metadata: {httpStatusCode: 400}}), true],
+    ['SES failed', Object.assign(new Error('InternalFailure'), {$metadata: {httpStatusCode: 500}}), true],
+    ['an accepted answer could not be read', Object.assign(new Error('parse'), {$metadata: {httpStatusCode: 200}}), false],
+    [
+      'the connection reset',
+      Object.assign(new Error('socket hang up'), {name: 'TimeoutError', code: 'ECONNRESET', $metadata: {attempts: 1}}),
+      false,
+    ],
+    [
+      'the request timed out',
+      Object.assign(new Error('exceeded the configured 15000 ms requestTimeout'), {
+        name: 'TimeoutError',
+        code: 'ETIMEDOUT',
+      }),
+      false,
+    ],
+    ['the host was not found', Object.assign(new Error('getaddrinfo'), {code: 'ENOTFOUND'}), true],
+    [
+      'the connection was never made',
+      Object.assign(
+        new Error('the request socket did not establish a connection with the server within the configured timeout'),
+        {name: 'TimeoutError'},
+      ),
+      true,
+    ],
+    ['the error is unknown', new Error('Could not send email'), false],
+  ])('when %s: %s', async (_case, error, expected) => {
+    const {safeToRetrySend} = await import('../SESService');
+    expect(safeToRetrySend(error)).toBe(expected);
+  });
+});

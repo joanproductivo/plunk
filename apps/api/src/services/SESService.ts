@@ -19,17 +19,70 @@ import {
   htmlToPlainText,
 } from '../utils/mime.js';
 
-/**
- * AWS SES Client
- */
-export const ses = new SES({
+const SES_CLIENT_CONFIG = {
   apiVersion: '2010-12-01',
   region: AWS_SES_REGION,
   credentials: {
     accessKeyId: AWS_SES_ACCESS_KEY_ID,
     secretAccessKey: AWS_SES_SECRET_ACCESS_KEY,
   },
+};
+
+/**
+ * Timeouts for every SES request. The SDK sets none by default, and without
+ * `throwOnRequestTimeout` a request past its `requestTimeout` only logs a warning, so a hung
+ * connection held a worker slot for good. The request timeout stays under the worker's
+ * shutdown timeout, so a send cut short by a deploy is settled before the process exits.
+ */
+const SES_HTTP_OPTIONS = {connectionTimeout: 5_000, requestTimeout: 15_000, throwOnRequestTimeout: true};
+
+/**
+ * AWS SES Client for everything but sending: domain, DKIM and quota calls are safe to repeat,
+ * so they keep the SDK's own retries
+ */
+export const ses = new SES({...SES_CLIENT_CONFIG, requestHandler: SES_HTTP_OPTIONS});
+
+/**
+ * AWS SES Client for sending. One attempt, without keep-alive: the SDK retries a reset or a
+ * timeout on its own, and after SES has accepted an email that delivers it again. A socket kept
+ * alive that SES has closed fails with the same reset as a connection lost after sending, so
+ * fresh connections keep that ambiguity out. Whether a failed send is retried is decided by the
+ * caller, with `safeToRetrySend`.
+ */
+const sesSend = new SES({
+  ...SES_CLIENT_CONFIG,
+  maxAttempts: 1,
+  requestHandler: {...SES_HTTP_OPTIONS, httpsAgent: {keepAlive: false}},
 });
+
+/** Node's codes for a connection that was never made, so nothing reached SES */
+const NEVER_CONNECTED_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
+/**
+ * Whether a failed send can be retried without risking a second copy: SES answered and refused
+ * it (an HTTP error status), or the connection was never made. Anything else -- a reset or a
+ * timeout after the request went out, or a 2xx whose body could not be read, which the SDK
+ * reports with the 2xx status -- may follow an email SES accepted.
+ */
+export function safeToRetrySend(error: unknown): boolean {
+  const failure = error as {$metadata?: {httpStatusCode?: unknown}; code?: unknown; name?: unknown; message?: unknown};
+  const status = failure?.$metadata?.httpStatusCode;
+
+  if (typeof status === 'number') {
+    return status >= 400;
+  }
+
+  if (typeof failure?.code === 'string' && NEVER_CONNECTED_CODES.has(failure.code)) {
+    return true;
+  }
+
+  // The connection timeout fires only before the socket connects
+  return (
+    failure?.name === 'TimeoutError' &&
+    typeof failure.message === 'string' &&
+    failure.message.includes('did not establish a connection')
+  );
+}
 
 /**
  * AWS STS Client, used only to look up the account the SES credentials belong to
@@ -244,7 +297,7 @@ ${breakLongLines(attachment.content, 76)}`;
     TRACKING_TOGGLE_ENABLED && !tracking ? SES_CONFIGURATION_SET_NO_TRACKING : SES_CONFIGURATION_SET;
 
   // Send via SES
-  const response = await ses.sendRawEmail({
+  const response = await sesSend.sendRawEmail({
     Destinations: destinations,
     ConfigurationSetName: configurationSetName,
     RawMessage: {
