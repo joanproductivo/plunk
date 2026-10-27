@@ -43,6 +43,7 @@ import {
 } from '@plunk/shared';
 import {
   Button,
+  cn,
   ConfirmDialog,
   Dialog,
   DialogContent,
@@ -56,7 +57,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@plunk/ui';
-import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet} from 'lucide-react';
+import {AlertTriangle, Code2, Eye, Monitor, PenLine, Smartphone, Tablet} from 'lucide-react';
 import {wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
@@ -71,6 +72,8 @@ interface EmailEditorProps {
   // When set, the "Preview as" dropdown is scoped to this segment's members
   // instead of all contacts in the project (used for SEGMENT-audience campaigns)
   segmentId?: string;
+  // On wide screens, fill the parent's height instead of stopping at 600px
+  fillHeight?: boolean;
 }
 
 const commonVariables = [
@@ -81,7 +84,16 @@ const commonVariables = [
   {name: 'manageUrl', description: 'Manage link'},
 ];
 
-export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
+export function EmailEditor({
+  value,
+  onChange,
+  placeholder,
+  subject,
+  from,
+  replyTo,
+  segmentId,
+  fillHeight,
+}: EmailEditorProps) {
   // The preview text and the brand travel with the body; the editors below only ever see the body
   const {preheader, brand, body} = splitEmailMarkers(value);
   const {activeProject} = useActiveProject();
@@ -104,6 +116,8 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
 
   const [mode, setMode] = useState<'visual' | 'html'>(initialMode);
+  // The preview takes the editor's place; the editor stays mounted underneath, so it keeps its history
+  const [view, setView] = useState<'edit' | 'preview'>('edit');
   const [htmlContent, setHtmlContent] = useState(body);
   const [showVariableDialog, setShowVariableDialog] = useState(false);
   const [showImageDialog, setShowImageDialog] = useState(false);
@@ -111,6 +125,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [customVariable, setCustomVariable] = useState('');
   const [defaultValue, setDefaultValue] = useState('');
+  // '' previews the first contact, 'none' previews with no contact (the template's default values)
   const [selectedContactId, setSelectedContactId] = useState<string>('');
   const [previewUpdateTrigger, setPreviewUpdateTrigger] = useState(0);
 
@@ -144,14 +159,10 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     }
   }, [fieldDetails]);
 
-  // Clear the preview selection when the chosen contact is no longer in the
-  // available list (e.g. the segment changed). Otherwise the preview stays
-  // stuck rendering a contact that's no longer selectable in the dropdown.
-  useEffect(() => {
-    if (selectedContactId && !contacts.some(c => c.id === selectedContactId)) {
-      setSelectedContactId('');
-    }
-  }, [contacts, selectedContactId]);
+  // A chosen contact that is no longer in the list (e.g. the segment changed) falls back
+  // to the first one, so the preview never renders a contact the dropdown can't show.
+  const previewContact =
+    selectedContactId === 'none' ? undefined : (contacts.find(c => c.id === selectedContactId) ?? contacts[0]);
 
   const {data: config} = useConfig();
   const canUploadImages = Boolean(config?.features.storage.s3Enabled);
@@ -302,48 +313,31 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     }
   };
 
-  const replaceVariables = (text: string, contactData: Record<string, unknown>) => {
-    return renderTemplate(text, contactData);
-  };
-
-  const getPreviewHtml = () => {
-    const currentHtml = mode === 'visual' ? editor?.getHTML() || '' : htmlContent;
-    if (!selectedContactId) return currentHtml;
-
-    const contact = contacts.find(c => c.id === selectedContactId);
-    if (!contact) return currentHtml;
-
-    const contactData = {
-      email: contact.email,
-      unsubscribed: (contact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
-      unsubscribeUrl: `${window.location.origin}/unsubscribe/${contact.id}`,
-      subscribeUrl: `${window.location.origin}/subscribe/${contact.id}`,
-      manageUrl: `${window.location.origin}/manage/${contact.id}`,
-      data: contact.data || {},
-      ...((contact.data as Record<string, unknown> | null) || {}),
+  // The variables the preview renders with: the chosen contact's, or none, which leaves
+  // the template's default values (`{{name ?? friend}}`)
+  const previewVariables = (): Record<string, unknown> => {
+    if (!previewContact) return {};
+    return {
+      email: previewContact.email,
+      unsubscribed: (previewContact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
+      unsubscribeUrl: `${window.location.origin}/unsubscribe/${previewContact.id}`,
+      subscribeUrl: `${window.location.origin}/subscribe/${previewContact.id}`,
+      manageUrl: `${window.location.origin}/manage/${previewContact.id}`,
+      data: previewContact.data || {},
+      ...((previewContact.data as Record<string, unknown> | null) || {}),
     };
-
-    return replaceVariables(currentHtml, contactData);
   };
 
-  const getPreviewSubject = () => {
-    if (!subject || !selectedContactId) return subject || '';
-
-    const contact = contacts.find(c => c.id === selectedContactId);
-    if (!contact) return subject;
-
-    const contactData = {
-      email: contact.email,
-      unsubscribed: (contact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
-      unsubscribeUrl: `${window.location.origin}/unsubscribe/${contact.id}`,
-      subscribeUrl: `${window.location.origin}/subscribe/${contact.id}`,
-      manageUrl: `${window.location.origin}/manage/${contact.id}`,
-      data: contact.data || {},
-      ...((contact.data as Record<string, unknown> | null) || {}),
-    };
-
-    return replaceVariables(subject, contactData);
+  // A template that doesn't parse yet is shown as written; the syntax banner already says why
+  const renderPreview = (text: string) => {
+    try {
+      return renderTemplate(text, previewVariables());
+    } catch {
+      return text;
+    }
   };
+
+  const getPreviewHtml = () => renderPreview(mode === 'visual' ? editor?.getHTML() || '' : htmlContent);
 
   const getPreviewContainerWidth = () => {
     // Return the actual width the iframe should have (for media queries)
@@ -354,16 +348,17 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         return '768px';
       case 'desktop':
       default:
-        return '1200px'; // Standard desktop email width
+        return '100%';
     }
   };
 
   // Ref for the preview iframe
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
+  const previewLook = JSON.stringify(emailBrand.look);
 
   // Update iframe content when preview changes
   useEffect(() => {
-    if (previewIframeRef.current && selectedContactId) {
+    if (previewIframeRef.current && view === 'preview') {
       const iframe = previewIframeRef.current;
       const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
 
@@ -403,60 +398,55 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger, JSON.stringify(emailBrand.look)]);
+  }, [view, previewContact?.id, htmlContent, mode, previewDevice, previewUpdateTrigger, previewLook]);
+
+  // Visual and HTML pick how you edit; Preview only covers the editor, which keeps its mode
+  const showEditor = (target: 'visual' | 'html') => {
+    setView('edit');
+    if (mode !== target) handleModeToggle();
+  };
 
   return (
-    <div className="border border-neutral-200 rounded-lg bg-white">
-      {/* Mode toggle */}
-      <div className="border-b border-neutral-200 bg-neutral-50 p-2 flex flex-col sm:flex-row justify-between sm:items-center gap-2">
-        <div className="flex gap-1">
-          <Button
-            type="button"
-            variant={mode === 'visual' ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => mode === 'html' && handleModeToggle()}
-          >
-            <Eye className="h-4 w-4 sm:mr-2" />
-            <span className="hidden sm:inline">Visual</span>
-          </Button>
-          <Button
-            type="button"
-            variant={mode === 'html' ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => mode === 'visual' && handleModeToggle()}
-          >
-            <Code2 className="h-4 w-4 sm:mr-2" />
-            <span className="hidden sm:inline">HTML</span>
-          </Button>
-        </div>
-        <div className="flex items-center gap-2 flex-1 sm:flex-none">
-          <Label htmlFor="preview-contact" className="text-xs text-neutral-600 whitespace-nowrap">
-            Preview as:
-          </Label>
-          <Select
-            value={selectedContactId || 'none'}
-            onValueChange={val => setSelectedContactId(val === 'none' ? '' : val)}
-          >
-            <SelectTrigger id="preview-contact" className="h-8 w-full sm:w-[200px] text-xs">
-              <SelectValue placeholder="Select contact…" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">
-                <span className="text-neutral-500">No preview</span>
-              </SelectItem>
-              {contacts.map(contact => (
-                <SelectItem key={contact.id} value={contact.id}>
-                  {contact.email}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+    <div
+      className={cn(
+        'border border-neutral-200 rounded-lg bg-white',
+        fillHeight && 'xl:flex xl:h-full xl:min-h-0 xl:flex-col',
+      )}
+    >
+      {/* Edit or preview */}
+      <div className="border-b border-neutral-200 bg-neutral-50 p-2 flex gap-1">
+        <Button
+          type="button"
+          variant={view === 'edit' && mode === 'visual' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => showEditor('visual')}
+        >
+          <PenLine className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">Visual</span>
+        </Button>
+        <Button
+          type="button"
+          variant={view === 'edit' && mode === 'html' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => showEditor('html')}
+        >
+          <Code2 className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">HTML</span>
+        </Button>
+        <Button
+          type="button"
+          variant={view === 'preview' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => setView('preview')}
+        >
+          <Eye className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">Preview</span>
+        </Button>
       </div>
 
-      <PreheaderField value={preheader} onChange={next => onChange(withMarkers(body, next))} />
+      {view === 'edit' && <PreheaderField value={preheader} onChange={next => onChange(withMarkers(body, next))} />}
 
-      {mode === 'visual' && emailBrand.differs && (
+      {view === 'edit' && mode === 'visual' && emailBrand.differs && (
         <div className="flex items-center justify-between gap-3 border-t border-sky-200 bg-sky-50 px-4 py-2">
           <p className="text-xs text-sky-900">This email uses different styles from the project&apos;s brand.</p>
           <Button
@@ -507,228 +497,173 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </div>
       )}
 
-      {/* Editor content */}
-      {mode === 'visual' ? (
-        <>
-          <Toolbar
-            editor={editor}
-            onInsertVariable={() => setShowVariableDialog(true)}
-            onInsertImage={() => setShowImageDialog(true)}
-            onButton={button.onToolbar}
-            onDivider={divider.onToolbar}
-            onSpacer={spacer.onToolbar}
-            onVideo={video.onToolbar}
-            onBox={box.onToolbar}
-            canUploadImages={canUploadImages}
-          />
-          <div className="min-h-[400px] max-h-[600px] overflow-y-auto" style={canvas.outer}>
-            <div style={canvas.inner} data-framed={isFramedBrand(emailBrand.look) ? '' : undefined}>
-              <EditorContent editor={editor} />
+      {/* Editor content, hidden rather than unmounted while previewing (xl:flex would undo `hidden`) */}
+      <div className={view === 'preview' ? 'hidden' : cn(fillHeight && 'xl:flex xl:min-h-0 xl:flex-1 xl:flex-col')}>
+        {mode === 'visual' ? (
+          <>
+            <Toolbar
+              editor={editor}
+              onInsertVariable={() => setShowVariableDialog(true)}
+              onInsertImage={() => setShowImageDialog(true)}
+              onButton={button.onToolbar}
+              onDivider={divider.onToolbar}
+              onSpacer={spacer.onToolbar}
+              onVideo={video.onToolbar}
+              onBox={box.onToolbar}
+              canUploadImages={canUploadImages}
+            />
+            <div
+              className={cn(
+                'min-h-[400px] max-h-[600px] overflow-y-auto',
+                fillHeight && 'xl:min-h-0 xl:max-h-none xl:flex-1',
+              )}
+              style={canvas.outer}
+            >
+              <div style={canvas.inner} data-framed={isFramedBrand(emailBrand.look) ? '' : undefined}>
+                <EditorContent editor={editor} />
+              </div>
             </div>
-          </div>
-          {selectedContactId && (
-            <>
-              <div className="border-t border-neutral-200 bg-neutral-100 px-4 py-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium text-neutral-600">Preview</p>
-                    <span className="text-xs text-neutral-500">
-                      ({previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : '1200px'})
-                    </span>
-                  </div>
-                  <div className="flex gap-1">
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('mobile')}
-                      className="h-7 w-7 p-0"
-                      title="Mobile (375px)"
-                    >
-                      <Smartphone className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('tablet')}
-                      className="h-7 w-7 p-0"
-                      title="Tablet (768px)"
-                    >
-                      <Tablet className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('desktop')}
-                      className="h-7 w-7 p-0"
-                      title="Desktop (1200px)"
-                    >
-                      <Monitor className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]">
-                <div
-                  className="transition-all duration-300"
-                  style={{
-                    width: getPreviewContainerWidth(),
-                    maxWidth: '100%',
-                  }}
-                >
-                  <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
-                    {/* Email Header Preview */}
-                    {(subject || from || replyTo) && (
-                      <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
-                        {subject && (
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
-                              <p className="text-base font-semibold text-neutral-900 mt-1">{getPreviewSubject()}</p>
-                            </div>
-                          </div>
-                        )}
-                        {(from || replyTo) && (
-                          <div className="flex gap-6 pt-2 border-t border-neutral-200">
-                            {from && (
-                              <div>
-                                <p className="text-xs text-neutral-500">From</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
-                              </div>
-                            )}
-                            {replyTo && (
-                              <div>
-                                <p className="text-xs text-neutral-500">Reply-To</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <iframe
-                      ref={previewIframeRef}
-                      className="w-full border-0"
-                      style={{
-                        minHeight: '400px',
-                        height: '100%',
-                      }}
-                      title="Email preview"
-                    />
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <>
-          <div className="min-h-[400px] max-h-[600px] overflow-hidden">
+          </>
+        ) : (
+          <div
+            className={cn(
+              'min-h-[400px] max-h-[600px] overflow-hidden',
+              // CodeMirror stops at 600px on its own; filling, the wrapper scrolls instead
+              fillHeight && 'xl:min-h-0 xl:max-h-none xl:flex-1 xl:overflow-auto xl:[&_.cm-scroller]:max-h-none!',
+            )}
+          >
             <HtmlEditor
               value={htmlContent}
               onChange={handleHtmlChange}
               placeholder={placeholder || 'Your next email starts here'}
             />
           </div>
-          {selectedContactId && (
-            <>
-              <div className="border-t border-neutral-200 bg-neutral-100 px-4 py-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium text-neutral-600">Preview</p>
-                    <span className="text-xs text-neutral-500">
-                      ({previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : '1200px'})
-                    </span>
-                  </div>
-                  <div className="flex gap-1">
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('mobile')}
-                      className="h-7 w-7 p-0"
-                      title="Mobile (375px)"
-                    >
-                      <Smartphone className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('tablet')}
-                      className="h-7 w-7 p-0"
-                      title="Tablet (768px)"
-                    >
-                      <Tablet className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('desktop')}
-                      className="h-7 w-7 p-0"
-                      title="Desktop (1200px)"
-                    >
-                      <Monitor className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]">
-                <div
-                  className="transition-all duration-300"
-                  style={{
-                    width: getPreviewContainerWidth(),
-                    maxWidth: '100%',
-                  }}
+        )}
+      </div>
+
+      {view === 'preview' && (
+        <div className={cn(fillHeight && 'xl:flex xl:min-h-0 xl:flex-1 xl:flex-col')}>
+          <div className="border-b border-neutral-200 bg-neutral-100 px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Label htmlFor="preview-contact" className="text-xs text-neutral-600 whitespace-nowrap">
+                Preview as
+              </Label>
+              <Select value={previewContact?.id ?? 'none'} onValueChange={setSelectedContactId}>
+                <SelectTrigger id="preview-contact" className="h-8 w-[220px] max-w-full bg-white text-xs">
+                  <SelectValue placeholder="Select contact…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">
+                    <span className="text-neutral-500">No contact (default values)</span>
+                  </SelectItem>
+                  {contacts.map(contact => (
+                    <SelectItem key={contact.id} value={contact.id}>
+                      {contact.email}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-500">
+                {previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : 'Full width'}
+              </span>
+              <div className="flex gap-1">
+                <Button
+                  type="button"
+                  variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('mobile')}
+                  className="h-7 w-7 p-0"
+                  title="Mobile (375px)"
                 >
-                  <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
-                    {/* Email Header Preview */}
-                    {(subject || from || replyTo) && (
-                      <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
-                        {subject && (
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
-                              <p className="text-base font-semibold text-neutral-900 mt-1">{getPreviewSubject()}</p>
-                            </div>
+                  <Smartphone className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('tablet')}
+                  className="h-7 w-7 p-0"
+                  title="Tablet (768px)"
+                >
+                  <Tablet className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('desktop')}
+                  className="h-7 w-7 p-0"
+                  title="Desktop (full width)"
+                >
+                  <Monitor className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          <div
+            className={cn(
+              'p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]',
+              fillHeight && 'xl:min-h-0 xl:flex-1',
+            )}
+          >
+            <div
+              className="transition-all duration-300"
+              style={{
+                width: getPreviewContainerWidth(),
+                maxWidth: '100%',
+              }}
+            >
+              <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
+                {/* Email Header Preview */}
+                {(subject || preheader || from || replyTo) && (
+                  <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
+                    {subject && (
+                      <div>
+                        <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
+                        <p className="text-base font-semibold text-neutral-900 mt-1">{renderPreview(subject)}</p>
+                      </div>
+                    )}
+                    {preheader && (
+                      <div>
+                        <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Preview text</p>
+                        <p className="text-sm text-neutral-700 mt-1">{renderPreview(preheader)}</p>
+                      </div>
+                    )}
+                    {(from || replyTo) && (
+                      <div className="flex gap-6 pt-2 border-t border-neutral-200">
+                        {from && (
+                          <div>
+                            <p className="text-xs text-neutral-500">From</p>
+                            <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
                           </div>
                         )}
-                        {(from || replyTo) && (
-                          <div className="flex gap-6 pt-2 border-t border-neutral-200">
-                            {from && (
-                              <div>
-                                <p className="text-xs text-neutral-500">From</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
-                              </div>
-                            )}
-                            {replyTo && (
-                              <div>
-                                <p className="text-xs text-neutral-500">Reply-To</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
-                              </div>
-                            )}
+                        {replyTo && (
+                          <div>
+                            <p className="text-xs text-neutral-500">Reply-To</p>
+                            <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
                           </div>
                         )}
                       </div>
                     )}
-                    <iframe
-                      ref={previewIframeRef}
-                      className="w-full border-0"
-                      style={{
-                        minHeight: '400px',
-                        height: '100%',
-                      }}
-                      title="Email preview"
-                    />
                   </div>
-                </div>
+                )}
+                {/* No scripts: the body is the author's HTML, written into a document of the dashboard's origin */}
+                <iframe
+                  ref={previewIframeRef}
+                  sandbox="allow-same-origin"
+                  className="w-full border-0"
+                  style={{
+                    minHeight: '400px',
+                    height: '100%',
+                  }}
+                  title="Email preview"
+                />
               </div>
-            </>
-          )}
-        </>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Variable insertion dialog */}
