@@ -3,7 +3,7 @@ import React from 'react';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
-import {redis, redisReady} from '../database/redis.js';
+import {redis} from '../database/redis.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
@@ -254,22 +254,28 @@ export class SecurityService {
    * here is what re-disabled projects on their next bounce after a manual re-enable.
    *
    * Plunk Lite: throws when the rates cannot be read or the project cannot be disabled, so the job
-   * running it tries again -- a check that failed has not found the project healthy.
+   * running it tries again -- a check that failed has not found the project healthy. `withoutRedis`
+   * is for a check that cannot wait for Redis while it is down (ReputationCheck.run): it neither
+   * reads nor writes there.
    */
-  public static async checkAndEnforceSecurityLimits(projectId: string, triggers: SecurityMetric[]): Promise<void> {
+  public static async checkAndEnforceSecurityLimits(
+    projectId: string,
+    triggers: SecurityMetric[],
+    {withoutRedis = false}: {withoutRedis?: boolean} = {},
+  ): Promise<void> {
     const status = await this.calculateSecurityStatus(projectId);
     // Fresh for the dashboard too (Plunk Lite: unless Redis is down, which it would wait for)
-    if (redisReady()) {
+    if (!withoutRedis) {
       await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
         signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
       });
     }
-    const verdict = await ReputationPolicy.disableByMetric(projectId);
+    const verdict = await ReputationPolicy.disableByMetric(projectId, {withoutRedis});
     const isCritical = triggers.some(trigger => status.criticalByMetric[trigger]);
 
     // If project should be disabled, disable it (only if auto-disable is enabled)
     if (AUTO_PROJECT_DISABLE && triggers.some(trigger => verdict[trigger])) {
-      await this.disableProject(projectId, status, verdict);
+      await this.disableProject(projectId, status, verdict, {withoutRedis});
     } else if (isCritical) {
       // Log critical violations but don't disable: auto-disable is off, or the rates are short of it
       const project = await prisma.project.findUnique({
@@ -609,6 +615,7 @@ export class SecurityService {
     projectId: string,
     status: SecurityStatus,
     verdict: DisableVerdict,
+    {withoutRedis}: {withoutRedis: boolean},
   ): Promise<void> {
     // Check if already disabled to avoid duplicate logs
     const project = await prisma.project.findUnique({
@@ -653,10 +660,14 @@ export class SecurityService {
 
     // Cancel all pending jobs for this project
     try {
-      const cancelledCampaigns = await QueueService.cancelAllProjectJobs(projectId);
+      // Plunk Lite: a reactivation drafts again the scheduled campaigns this cancels, and no other,
+      // noted as soon as they are cancelled. Without Redis they stay cancelled.
+      await QueueService.cancelAllProjectJobs(projectId, async campaignIds => {
+        if (!withoutRedis) {
+          await ReputationPolicy.noteDisableCancelled(projectId, campaignIds);
+        }
+      });
       signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
-      // Plunk Lite: a reactivation drafts again the scheduled campaigns this cancelled, and no other
-      await ReputationPolicy.noteDisableCancelled(projectId, cancelledCampaigns);
     } catch (error) {
       signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
     }

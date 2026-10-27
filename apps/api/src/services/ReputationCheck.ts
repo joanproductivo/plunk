@@ -64,11 +64,14 @@ const QUEUE_TIMEOUT_MS = 3000;
  */
 const RUN_TIMEOUT_MS = 10_000;
 
+/** What withTimeout rejects with: the work may still finish later */
+class TimedOut extends Error {}
+
 /** Rejects once `ms` have passed without `promise` settling */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
+    timer = setTimeout(() => reject(new TimedOut(`Timed out after ${ms} ms`)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -89,7 +92,16 @@ export class ReputationCheck {
       return undefined;
     });
     const data: SecurityCheckJobData = {projectId: email.projectId, trigger, ...(source && {source})};
-    await this.notePending(email.projectId, [`trigger:${trigger}`, ...(source ? [source] : [])]);
+    // Bounded like the queueing: with Redis down it waits for it, and the job carries its own event
+    await withTimeout(
+      this.notePending(email.projectId, [`trigger:${trigger}`, ...(source ? [source] : [])]),
+      QUEUE_TIMEOUT_MS,
+    ).catch((error: unknown) => {
+      signale.warn(
+        `[SECURITY] Could not note the ${trigger} for the reputation check of project ${email.projectId}:`,
+        error,
+      );
+    });
 
     try {
       // A job that is queued after all once Redis is back only checks the project again
@@ -100,7 +112,7 @@ export class ReputationCheck {
         queueError,
       );
       try {
-        await withTimeout(this.run(data), RUN_TIMEOUT_MS);
+        await withTimeout(this.run(data, {reserve: true}), RUN_TIMEOUT_MS);
       } catch (checkError) {
         signale.error(`[SECURITY] Reputation check of project ${email.projectId} failed:`, checkError);
         await this.exhausted(data, checkError);
@@ -111,9 +123,21 @@ export class ReputationCheck {
   /**
    * The check itself, as the job runs it: the sources, then the project, which is checked even when
    * judging a source failed. Throws when either could not tell, so the job tries again.
+   *
+   * With Redis down, the job throws too, to be tried again rather than judge the project without its
+   * grace period. The check run in place of the job (`reserve`) cannot wait: it judges without what
+   * Redis holds -- the source of its own event and every campaign still sending, no grace period,
+   * which can only disable again -- and writes nothing there.
    */
-  public static async run(data: SecurityCheckJobData): Promise<void> {
-    const pending = await this.readPending(data.projectId);
+  public static async run(data: SecurityCheckJobData, {reserve = false}: {reserve?: boolean} = {}): Promise<void> {
+    const withoutRedis = !redisReady();
+    if (withoutRedis && !reserve) {
+      throw new Error('Redis is not connected');
+    }
+    if (withoutRedis) {
+      signale.warn(`[SECURITY] Redis is down, checking project ${data.projectId} without what it holds`);
+    }
+    const pending = withoutRedis ? undefined : await this.readPending(data.projectId);
     const taken = pending?.items ?? [];
     const sources = taken.filter(item => !item.startsWith('trigger:'));
     if (data.source) {
@@ -131,7 +155,7 @@ export class ReputationCheck {
     }
 
     const triggers = METRICS.filter(metric => metric === data.trigger || taken.includes(`trigger:${metric}`));
-    await SecurityService.checkAndEnforceSecurityLimits(data.projectId, triggers);
+    await SecurityService.checkAndEnforceSecurityLimits(data.projectId, triggers, {withoutRedis});
     if (brakeError) {
       throw brakeError;
     }
@@ -141,24 +165,22 @@ export class ReputationCheck {
   }
 
   /**
-   * A check that ran out of attempts, or that could neither be queued nor run: the project's
-   * reputation is not being watched. Never throws.
+   * A check that ran out of attempts, or that could neither be queued nor run in time: the
+   * project's reputation is not being watched, or may not be. Never throws.
    */
   public static async exhausted(data: SecurityCheckJobData, error: unknown): Promise<void> {
     await FailureAlertService.record(data.projectId, {
       sourceKey: 'security:check',
       label: 'Sending reputation check',
-      error: `The bounce and complaint rates could not be checked after a ${data.trigger}, so the project would not be stopped if they were too high: ${error instanceof Error ? error.message : String(error)}`,
+      error:
+        error instanceof TimedOut
+          ? `The check of the bounce and complaint rates after a ${data.trigger} did not finish within ${RUN_TIMEOUT_MS / 1000} seconds, and may complete later. Until it does, the project would not be stopped if they were too high.`
+          : `The bounce and complaint rates could not be checked after a ${data.trigger}, so the project would not be stopped if they were too high: ${error instanceof Error ? error.message : String(error)}`,
     });
   }
 
   private static async notePending(projectId: string, items: string[]): Promise<void> {
     if (items.length === 0) {
-      return;
-    }
-    if (!redisReady()) {
-      // The job still carries its own event
-      signale.warn(`[SECURITY] Redis is down, not noting ${items.join(', ')} for project ${projectId}`);
       return;
     }
     try {
@@ -177,10 +199,6 @@ export class ReputationCheck {
    * Redis cannot say
    */
   private static async readPending(projectId: string): Promise<{items: string[]; upTo: number} | undefined> {
-    if (!redisReady()) {
-      signale.warn(`[SECURITY] Redis is down, judging every campaign of project ${projectId} still sending`);
-      return undefined;
-    }
     try {
       const read = (await redis.eval(
         READ_PENDING,
@@ -208,7 +226,7 @@ export class ReputationCheck {
    * judges it again, which changes nothing.
    */
   private static async clearPending(projectId: string, upTo: number): Promise<void> {
-    if (upTo === 0 || !redisReady()) {
+    if (upTo === 0) {
       return;
     }
     try {

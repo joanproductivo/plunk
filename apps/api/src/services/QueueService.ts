@@ -870,10 +870,13 @@ export class QueueService {
    * Cancel all pending jobs for a specific project
    * This should be called when a project is disabled
    *
-   * Plunk Lite: returns the scheduled campaigns it cancelled, for a reactivation to return them to
-   * the drafts.
+   * Plunk Lite: `onScheduledCancelled` gets the scheduled campaigns it cancels, as soon as they are,
+   * for a reactivation to return them to the drafts. It must not throw.
    */
-  public static async cancelAllProjectJobs(projectId: string): Promise<string[]> {
+  public static async cancelAllProjectJobs(
+    projectId: string,
+    onScheduledCancelled?: (campaignIds: string[]) => Promise<void>,
+  ): Promise<void> {
     signale.info(`[QUEUE] Cancelling all pending jobs for project ${projectId}`);
 
     // Cancel all scheduled campaigns for this project. A disable is final for what was planned:
@@ -886,6 +889,7 @@ export class QueueService {
     });
 
     if (scheduledCampaigns.length > 0) {
+      await onScheduledCancelled?.(scheduledCampaigns.map(campaign => campaign.id));
       for (const campaign of scheduledCampaigns) {
         await this.cancelScheduledCampaign(campaign.id);
       }
@@ -974,7 +978,6 @@ export class QueueService {
     }
 
     signale.info(`[QUEUE] Finished cancelling jobs for project ${projectId}`);
-    return scheduledCampaigns.map(campaign => campaign.id);
   }
 
   /**

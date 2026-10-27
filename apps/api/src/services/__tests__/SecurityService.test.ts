@@ -1,5 +1,6 @@
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {CampaignStatus, EmailStatus, EmailSourceType} from '@plunk/db';
+import {QueueService} from '../QueueService';
 import {ReputationPolicy} from '../ReputationPolicy';
 import {SecurityService} from '../SecurityService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -258,6 +259,20 @@ describe('SecurityService', () => {
       expect(await ReputationPolicy.reactivate(projectId, 'admin@example.com')).toEqual({draftedCampaigns: 1});
       expect((await prisma.campaign.findUniqueOrThrow({where: {id: scheduled.id}})).status).toBe(CampaignStatus.DRAFT);
       expect((await prisma.campaign.findUniqueOrThrow({where: {id: byHand.id}})).status).toBe(CampaignStatus.CANCELLED);
+    });
+
+    it('notes the campaigns it cancels as soon as it does, even if cancelling the rest fails', async () => {
+      const scheduled = await factories.createScheduledCampaign(projectId, new Date(Date.now() + 86_400_000), {
+        status: CampaignStatus.SCHEDULED,
+      });
+      vi.spyOn(QueueService, 'cancelScheduledCampaign').mockRejectedValueOnce(new Error('Redis down'));
+      await createEmails(300, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
+      expect(await redis.smembers(`plunk-lite:disable-cancelled:${projectId}`)).toEqual([scheduled.id]);
+      vi.restoreAllMocks();
+      expect(await ReputationPolicy.reactivate(projectId, 'admin@example.com')).toEqual({draftedCampaigns: 1});
     });
 
     it('emails the alert addresses when it disables the project', async () => {

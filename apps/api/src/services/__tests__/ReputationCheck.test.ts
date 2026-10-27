@@ -54,7 +54,7 @@ describe('ReputationCheck', () => {
 
     const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
     await ReputationCheck.run(delayed[0]!.data);
-    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint']);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint'], {withoutRedis: false});
   });
 
   it('queues the check again when the job its deduplication points to is gone', async () => {
@@ -104,7 +104,7 @@ describe('ReputationCheck', () => {
 
     await expect(ReputationCheck.run({projectId, trigger: 'bounce'})).rejects.toThrow('database down');
 
-    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce']);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce'], {withoutRedis: false});
     // Left for the next attempt
     expect(await pendingItems()).toEqual([`campaign:${campaign.id}`, 'trigger:bounce'].sort());
   });
@@ -135,7 +135,7 @@ describe('ReputationCheck', () => {
     await ReputationCheck.run({projectId, trigger: 'bounce'});
 
     expect(brake).toHaveBeenCalledWith(projectId, [`campaign:${campaign.id}`]);
-    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint']);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint'], {withoutRedis: false});
     expect(await redis.exists(`plunk-lite:security:pending:${projectId}`)).toBe(0);
     expect(await pendingItems()).toEqual([]);
   });
@@ -191,7 +191,7 @@ describe('ReputationCheck', () => {
 
     await expect(ReputationCheck.afterEvent(transactional(), 'bounce')).resolves.toBeUndefined();
 
-    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce']);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce'], {withoutRedis: false});
     // Nothing is watching the project's rates: it is told so
     const failure = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId}});
     expect(failure).toMatchObject({sourceKey: 'security:check', label: 'Sending reputation check'});
@@ -206,51 +206,89 @@ describe('ReputationCheck', () => {
     await ReputationCheck.afterEvent(transactional(), 'complaint');
 
     expect(Date.now() - started).toBeLessThan(10_000);
-    expect(enforce).toHaveBeenCalledWith(projectId, ['complaint']);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['complaint'], {withoutRedis: false});
     expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(0);
   });
 
-  it('runs the check at once without Redis when it is down, and still stops the campaign and the project', async () => {
-    const contact = await factories.createContact({projectId});
-    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
-    const createdAt = new Date(Date.now() - 60_000);
-    await prisma.email.createMany({
-      data: Array.from({length: 300}, (_, i) => ({
-        projectId,
-        contactId: contact.id,
-        campaignId: campaign.id,
-        subject: 'Hi',
-        body: '<p>Hi</p>',
-        from: 'hi@example.com',
-        sourceType: EmailSourceType.CAMPAIGN,
-        status: EmailStatus.SENT,
-        sentAt: createdAt,
-        createdAt,
-        bouncedAt: i < 30 ? createdAt : null,
-      })),
+  describe('with Redis down', () => {
+    /**
+     * A campaign still sending past its brake, and the project past disabling, but reactivated after
+     * those bounces: read, its grace period keeps them from disabling it
+     */
+    async function bouncedAfterReactivation() {
+      const contact = await factories.createContact({projectId});
+      const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
+      const createdAt = new Date(Date.now() - 60_000);
+      await prisma.email.createMany({
+        data: Array.from({length: 300}, (_, i) => ({
+          projectId,
+          contactId: contact.id,
+          campaignId: campaign.id,
+          subject: 'Hi',
+          body: '<p>Hi</p>',
+          from: 'hi@example.com',
+          sourceType: EmailSourceType.CAMPAIGN,
+          status: EmailStatus.SENT,
+          sentAt: createdAt,
+          createdAt,
+          bouncedAt: i < 30 ? createdAt : null,
+        })),
+      });
+      await redis.set(`plunk-lite:reactivated:${projectId}`, JSON.stringify({reactivatedAt: new Date()}), 'EX', 3600);
+      return campaign;
+    }
+
+    /** Runs `fn` with the Redis client reading as reconnecting */
+    async function whileReconnecting(fn: () => Promise<void>) {
+      const status = redis.status;
+      (redis as {status: string}).status = 'reconnecting';
+      try {
+        await fn();
+      } finally {
+        (redis as {status: string}).status = status;
+      }
+    }
+
+    const project = () => prisma.project.findUniqueOrThrow({where: {id: projectId}});
+
+    it('runs the check at once without it, and still stops the campaign and the project', async () => {
+      const campaign = await bouncedAfterReactivation();
+      vi.spyOn(QueueService, 'queueSecurityCheck').mockRejectedValue(new Error('Redis down'));
+      const noted = vi.spyOn(redis, 'eval');
+      const commands = (['get', 'set', 'setex', 'multi', 'smembers', 'zremrangebyscore'] as const).map(name =>
+        vi.spyOn(redis, name),
+      );
+
+      await whileReconnecting(() =>
+        ReputationCheck.afterEvent({projectId, campaignId: campaign.id, workflowExecutionId: null}, 'bounce'),
+      );
+
+      // Only noting the event was tried, bounded; the check read and wrote nothing there
+      expect(noted).toHaveBeenCalledOnce();
+      for (const command of commands) {
+        expect(command).not.toHaveBeenCalled();
+      }
+      expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(
+        CampaignStatus.CANCELLED,
+      );
+      expect(await project()).toMatchObject({disabled: true, disabledReason: 'EMAIL_REPUTATION'});
     });
-    // Reactivated after those bounces: read, its grace period would keep them from disabling it
-    await redis.set(`plunk-lite:reactivated:${projectId}`, JSON.stringify({reactivatedAt: new Date()}), 'EX', 3600);
-    vi.spyOn(QueueService, 'queueSecurityCheck').mockRejectedValue(new Error('Redis down'));
-    const commands = (['eval', 'get', 'set', 'setex', 'multi', 'smembers', 'zremrangebyscore'] as const).map(name =>
-      vi.spyOn(redis, name),
-    );
 
-    const status = redis.status;
-    (redis as {status: string}).status = 'reconnecting';
-    try {
-      await ReputationCheck.afterEvent({projectId, campaignId: campaign.id, workflowExecutionId: null}, 'bounce');
-    } finally {
-      (redis as {status: string}).status = status;
-    }
+    it('fails the job, to be tried again, instead of judging the project without its grace period', async () => {
+      const campaign = await bouncedAfterReactivation();
+      const data = {projectId, trigger: 'bounce' as const, source: `campaign:${campaign.id}`};
 
-    for (const command of commands) {
-      expect(command).not.toHaveBeenCalled();
-    }
-    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.CANCELLED);
-    expect(await prisma.project.findUniqueOrThrow({where: {id: projectId}})).toMatchObject({
-      disabled: true,
-      disabledReason: 'EMAIL_REPUTATION',
+      await whileReconnecting(async () => {
+        await expect(ReputationCheck.run(data)).rejects.toThrow('Redis is not connected');
+      });
+      expect((await project()).disabled).toBe(false);
+
+      // Tried again once Redis is back: the grace period counts
+      await ReputationCheck.run(data);
+      expect((await project()).disabled).toBe(false);
+      expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(
+        CampaignStatus.CANCELLED,
+      );
     });
   });
 
@@ -268,7 +306,7 @@ describe('ReputationCheck', () => {
 
     const failure = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId}});
     expect(failure).toMatchObject({sourceKey: 'security:check'});
-    expect(failure.lastError).toContain('Timed out after 10000 ms');
+    expect(failure.lastError).toContain('did not finish within 10 seconds, and may complete later');
   });
 
   it('tells the project once a check has run out of attempts, and not before', async () => {

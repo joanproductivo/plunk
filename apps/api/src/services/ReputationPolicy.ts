@@ -3,7 +3,7 @@ import signale from 'signale';
 
 import {PLUNK_LITE_DISABLE_BOUNCE_PERCENT, PLUNK_LITE_DISABLE_COMPLAINT_PERCENT} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
-import {redis, redisReady} from '../database/redis.js';
+import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 import {utcTimestamp} from '../utils/database.js';
 
@@ -133,10 +133,14 @@ export class ReputationPolicy {
 
   /**
    * Whether the bounce or the complaint rate of the last 7 days -- or since the project was
-   * reactivated, if that is later -- is past disabling the project
+   * reactivated, if that is later -- is past disabling the project. `withoutRedis`, for a check that
+   * cannot wait for it, counts no grace period: the side that stops sending.
    */
-  public static async disableByMetric(projectId: string): Promise<DisableVerdict> {
-    const grace = await this.grace(projectId);
+  public static async disableByMetric(
+    projectId: string,
+    {withoutRedis = false}: {withoutRedis?: boolean} = {},
+  ): Promise<DisableVerdict> {
+    const grace = withoutRedis ? undefined : await this.grace(projectId);
     const weekAgo = new Date(Date.now() - SEVEN_DAYS_MS);
     const sinceReactivation = Boolean(grace && grace.reactivatedAt > weekAgo);
     const since = sinceReactivation ? grace!.reactivatedAt : weekAgo;
@@ -177,12 +181,6 @@ export class ReputationPolicy {
    */
   public static async noteDisableCancelled(projectId: string, campaignIds: string[]): Promise<void> {
     if (campaignIds.length === 0) {
-      return;
-    }
-    if (!redisReady()) {
-      signale.warn(
-        `[SECURITY] Redis is down, the campaigns the disable of project ${projectId} cancelled stay cancelled`,
-      );
       return;
     }
     try {
@@ -274,18 +272,13 @@ export class ReputationPolicy {
 
   /**
    * When the project was reactivated, within the last 7 days, and what its deleted counts held for
-   * that minute then; undefined when Redis cannot say, or is down. Without those counts (a grace
-   * period stored before they were kept, or before they were kept by the minute, or one that cannot
-   * be read) the minute counts whole.
+   * that minute then; undefined when Redis cannot say. Without those counts (a grace period stored
+   * before they were kept, or before they were kept by the minute, or one that cannot be read) the
+   * minute counts whole.
    */
   private static async grace(
     projectId: string,
   ): Promise<{reactivatedAt: Date; deletedInMinute?: DeletedCounts} | undefined> {
-    if (!redisReady()) {
-      // Counted as if there were no grace period: the side that stops sending
-      signale.warn(`[SECURITY] Redis is down, judging project ${projectId} without its grace period`);
-      return undefined;
-    }
     try {
       const value = await redis.get(REACTIVATED_KEY(projectId));
       if (!value) {
