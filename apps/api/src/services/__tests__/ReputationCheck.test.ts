@@ -33,6 +33,8 @@ describe('ReputationCheck', () => {
   });
 
   const transactional = () => ({projectId, campaignId: null, workflowExecutionId: null});
+  /** What the events since the last check brought, still waiting for one */
+  const pendingItems = async () => (await redis.zrange(`plunk-lite:security:pending-z:${projectId}`, 0, -1)).sort();
 
   /** Take the waiting check as a worker would */
   async function takeCheck(worker: Worker): Promise<Job> {
@@ -86,16 +88,45 @@ describe('ReputationCheck', () => {
     await expect(ReputationCheck.run({projectId, trigger: 'bounce'})).rejects.toThrow('database down');
 
     expect(enforce).toHaveBeenCalledWith(projectId, ['bounce']);
-    // Given back, for the next attempt
-    expect((await redis.smembers(`plunk-lite:security:pending:${projectId}`)).sort()).toEqual(
-      [`campaign:${campaign.id}`, 'trigger:bounce'].sort(),
-    );
+    // Left for the next attempt
+    expect(await pendingItems()).toEqual([`campaign:${campaign.id}`, 'trigger:bounce'].sort());
+  });
+
+  it('removes what it judged once it has, and keeps what was noted again while it ran', async () => {
+    const campaign = await factories.createCampaign({projectId});
+    const other = await factories.createCampaign({projectId});
+    await ReputationCheck.afterEvent({projectId, campaignId: campaign.id, workflowExecutionId: null}, 'bounce');
+    await ReputationCheck.afterEvent({projectId, campaignId: other.id, workflowExecutionId: null}, 'bounce');
+    vi.spyOn(QueueService, 'queueSecurityCheck').mockResolvedValue({} as never);
+    // A bounce of the same campaign arrives while the check judges it
+    vi.spyOn(SourceBrakeService, 'brake').mockImplementation(async () => {
+      await ReputationCheck.afterEvent({projectId, campaignId: campaign.id, workflowExecutionId: null}, 'complaint');
+    });
+    vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+
+    await ReputationCheck.run({projectId, trigger: 'bounce'});
+
+    expect(await pendingItems()).toEqual([`campaign:${campaign.id}`, 'trigger:complaint'].sort());
+  });
+
+  it('merges what the plain set of before kept into the first check after the update', async () => {
+    const campaign = await factories.createCampaign({projectId});
+    await redis.sadd(`plunk-lite:security:pending:${projectId}`, `campaign:${campaign.id}`, 'trigger:complaint');
+    const brake = vi.spyOn(SourceBrakeService, 'brake').mockResolvedValue();
+    const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+
+    await ReputationCheck.run({projectId, trigger: 'bounce'});
+
+    expect(brake).toHaveBeenCalledWith(projectId, [`campaign:${campaign.id}`]);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint']);
+    expect(await redis.exists(`plunk-lite:security:pending:${projectId}`)).toBe(0);
+    expect(await pendingItems()).toEqual([]);
   });
 
   it('judges every campaign still sending when the sources of the burst cannot be read', async () => {
     const sending = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
     await factories.createCampaign({projectId, status: CampaignStatus.SENT});
-    vi.spyOn(redis, 'spop').mockRejectedValueOnce(new Error('Redis down'));
+    vi.spyOn(redis, 'eval').mockRejectedValueOnce(new Error('Redis down'));
     const brake = vi.spyOn(SourceBrakeService, 'brake').mockResolvedValue();
     vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
 
@@ -131,7 +162,7 @@ describe('ReputationCheck', () => {
 
     await expect(ReputationCheck.run({projectId, trigger: 'bounce'})).rejects.toThrow('database down');
 
-    expect(await redis.smembers(`plunk-lite:security:pending:${projectId}`)).toEqual(['trigger:complaint']);
+    expect(await pendingItems()).toEqual(['trigger:complaint']);
     expect((await prisma.project.findUniqueOrThrow({where: {id: projectId}})).disabled).toBe(false);
   });
 

@@ -15,13 +15,41 @@ import {SourceBrakeService} from './SourceBrakeService.js';
  * campaigns and workflows the events came from (SourceBrakeService), then the project.
  *
  * Only the job of the first event of a burst is kept, so what every event brought is collected in a
- * Redis set of the project -- `trigger:<metric>`, and its source as `campaign:<id>` or
- * `workflow:<id>` -- and the check takes it all. A check that fails gives it back for its next
- * attempt. When the set cannot be read, every campaign of the project still sending is judged.
+ * Redis sorted set of the project -- `trigger:<metric>`, and its source as `campaign:<id>` or
+ * `workflow:<id>` -- each scored by a counter that only goes up. The check reads it all and, once it
+ * has judged it, removes what it read up to the highest score: an item noted again meanwhile has a
+ * higher one and stays, and a check that fails, or a worker that dies, leaves it all for the next
+ * one. When the set cannot be read, every campaign of the project still sending is judged.
  */
-const PENDING_KEY = (projectId: string) => `plunk-lite:security:pending:${projectId}`;
+const PENDING_KEY = (projectId: string) => `plunk-lite:security:pending-z:${projectId}`;
+const PENDING_SEQ_KEY = (projectId: string) => `plunk-lite:security:pending-seq:${projectId}`;
+// The plain set the items were kept in before, merged into the sorted one by the next check
+const LEGACY_PENDING_KEY = (projectId: string) => `plunk-lite:security:pending:${projectId}`;
 // A check runs within seconds; this only bounds a set no check ever takes
 const PENDING_SECONDS = 86400;
+
+// Adds the items with the next score, at once, so none is added with a score a check already read
+const NOTE_PENDING = `
+local seq = redis.call('INCR', KEYS[2])
+for i = 2, #ARGV do
+  redis.call('ZADD', KEYS[1], seq, ARGV[i])
+end
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[2], ARGV[1])
+return seq`;
+
+// Merges the legacy set in, then reads the sorted set with its scores
+const READ_PENDING = `
+local legacy = redis.call('SPOP', KEYS[3], 1000)
+if #legacy > 0 then
+  local seq = redis.call('INCR', KEYS[2])
+  for _, item in ipairs(legacy) do
+    redis.call('ZADD', KEYS[1], 'NX', seq, item)
+  end
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  redis.call('EXPIRE', KEYS[2], ARGV[1])
+end
+return redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')`;
 const METRICS: SecurityMetric[] = ['bounce', 'complaint'];
 /**
  * How long queueing the check may take. BullMQ waits for Redis for as long as it is down, and the
@@ -77,32 +105,30 @@ export class ReputationCheck {
    * judging a source failed. Throws when either could not tell, so the job tries again.
    */
   public static async run(data: SecurityCheckJobData): Promise<void> {
-    const pending = await this.takePending(data.projectId);
-    const taken = pending ?? [];
+    const pending = await this.readPending(data.projectId);
+    const taken = pending?.items ?? [];
+    const sources = taken.filter(item => !item.startsWith('trigger:'));
+    if (data.source) {
+      sources.push(data.source);
+    }
+    if (!pending) {
+      sources.push(...(await SourceBrakeService.sendingCampaigns(data.projectId)));
+    }
+
+    let brakeError: unknown;
     try {
-      const sources = taken.filter(item => !item.startsWith('trigger:'));
-      if (data.source) {
-        sources.push(data.source);
-      }
-      if (!pending) {
-        sources.push(...(await SourceBrakeService.sendingCampaigns(data.projectId)));
-      }
-
-      let brakeError: unknown;
-      try {
-        await SourceBrakeService.brake(data.projectId, sources);
-      } catch (error) {
-        brakeError = error;
-      }
-
-      const triggers = METRICS.filter(metric => metric === data.trigger || taken.includes(`trigger:${metric}`));
-      await SecurityService.checkAndEnforceSecurityLimits(data.projectId, triggers);
-      if (brakeError) {
-        throw brakeError;
-      }
+      await SourceBrakeService.brake(data.projectId, sources);
     } catch (error) {
-      await this.notePending(data.projectId, taken);
-      throw error;
+      brakeError = error;
+    }
+
+    const triggers = METRICS.filter(metric => metric === data.trigger || taken.includes(`trigger:${metric}`));
+    await SecurityService.checkAndEnforceSecurityLimits(data.projectId, triggers);
+    if (brakeError) {
+      throw brakeError;
+    }
+    if (pending) {
+      await this.clearPending(data.projectId, pending.upTo);
     }
   }
 
@@ -123,11 +149,7 @@ export class ReputationCheck {
       return;
     }
     try {
-      await redis
-        .multi()
-        .sadd(PENDING_KEY(projectId), ...items)
-        .expire(PENDING_KEY(projectId), PENDING_SECONDS)
-        .exec();
+      await redis.eval(NOTE_PENDING, 2, PENDING_KEY(projectId), PENDING_SEQ_KEY(projectId), PENDING_SECONDS, ...items);
     } catch (error) {
       // The job still carries its own event
       signale.warn(
@@ -137,18 +159,45 @@ export class ReputationCheck {
     }
   }
 
-  /** What the events since the last check brought; undefined when Redis cannot say */
-  private static async takePending(projectId: string): Promise<string[] | undefined> {
-    const items: string[] = [];
+  /**
+   * What the events since the last check brought, and the highest score among them; undefined when
+   * Redis cannot say
+   */
+  private static async readPending(projectId: string): Promise<{items: string[]; upTo: number} | undefined> {
     try {
-      for (let batch = await redis.spop(PENDING_KEY(projectId), 100); batch.length > 0; ) {
-        items.push(...batch);
-        batch = await redis.spop(PENDING_KEY(projectId), 100);
+      const read = (await redis.eval(
+        READ_PENDING,
+        3,
+        PENDING_KEY(projectId),
+        PENDING_SEQ_KEY(projectId),
+        LEGACY_PENDING_KEY(projectId),
+        PENDING_SECONDS,
+      )) as string[];
+      const items: string[] = [];
+      let upTo = 0;
+      for (let i = 0; i < read.length; i += 2) {
+        items.push(read[i]!);
+        upTo = Math.max(upTo, Number(read[i + 1]));
       }
+      return {items, upTo};
     } catch (error) {
       signale.warn(`[SECURITY] Could not read what the reputation check of project ${projectId} is for:`, error);
       return undefined;
     }
-    return items;
+  }
+
+  /**
+   * Removes what a check judged, up to the highest score it read. If it cannot, the next check
+   * judges it again, which changes nothing.
+   */
+  private static async clearPending(projectId: string, upTo: number): Promise<void> {
+    if (upTo === 0) {
+      return;
+    }
+    try {
+      await redis.zremrangebyscore(PENDING_KEY(projectId), '-inf', upTo);
+    } catch (error) {
+      signale.warn(`[SECURITY] Could not clear what the reputation check of project ${projectId} judged:`, error);
+    }
   }
 }
