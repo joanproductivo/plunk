@@ -424,6 +424,34 @@ describe('processContactImport', () => {
   const subscriptionEvents = (contactId: string) =>
     prisma.event.count({where: {contactId, name: {in: ['contact.subscribed', 'contact.unsubscribed']}}});
 
+  it('suppresses the addresses the source reports as bounced, cleaned or complained', async () => {
+    // Subscribed here, but bounced at the source: the file decides
+    await factories.createContact({projectId, email: 'was-subscribed@plunk.test', subscribed: true});
+
+    const result = await runImport(
+      [
+        'email,status',
+        'was-subscribed@plunk.test,bounced',
+        'cleaned@plunk.test,cleaned',
+        'spam@plunk.test,complained',
+        'fine@plunk.test,subscribed',
+      ].join('\n'),
+    );
+
+    const reasons = Object.fromEntries(
+      (await prisma.plunkLiteSuppression.findMany({where: {projectId}})).map(row => [row.email, row.reason]),
+    );
+    expect(reasons).toEqual({
+      'was-subscribed@plunk.test': 'BOUNCE',
+      'cleaned@plunk.test': 'BOUNCE',
+      'spam@plunk.test': 'COMPLAINT',
+    });
+    expect((await contactNamed('was-subscribed@plunk.test')).subscribed).toBe(false);
+    expect((await contactNamed('cleaned@plunk.test')).subscribed).toBe(false);
+    expect((await contactNamed('fine@plunk.test')).subscribed).toBe(true);
+    expect(result.warnings).toContainEqual(expect.stringContaining('Bounced, cleaned or complained in 3 rows'));
+  });
+
   it('imports a dotted date column that within and olderThan filters can use', async () => {
     // Flodesk writes dates without milliseconds; the filters compare against toISOString(), with them
     const daysAgo = (days: number) =>
@@ -502,7 +530,9 @@ describe('processContactImport', () => {
   it('leaves an existing contact alone on a status that is not an opt-out, but imports a new one unsubscribed', async () => {
     const subscribed = await factories.createContact({projectId, email: 'kept@example.test', subscribed: true});
 
-    const result = await runImport('email,status\nkept@example.test,bounced\nfresh@example.test,unconfirmed');
+    // `inactive` is not mailable at the source but says nothing about the address; a bounce does
+    // (see the suppression test)
+    const result = await runImport('email,status\nkept@example.test,inactive\nfresh@example.test,unconfirmed');
 
     expect((await contactNamed('kept@example.test')).subscribed).toBe(true);
     expect(await prisma.event.count({where: {contactId: subscribed.id}})).toBe(0);

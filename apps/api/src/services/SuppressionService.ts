@@ -31,15 +31,16 @@ export class SuppressedAddressError extends ConflictError {
  */
 export class SuppressionService {
   /**
-   * Record addresses as suppressed. A complaint on an address suppressed for a bounce replaces
-   * the reason; anything else already recorded stays as it is.
+   * Record addresses as suppressed, from the email whose bounce or complaint it was -- or none,
+   * for an import that says the address bounced or complained elsewhere. A complaint on an
+   * address suppressed for a bounce replaces the reason; anything else recorded stays as it is.
    */
   public static async record(
     db: Db,
     projectId: string,
     addresses: string[],
     reason: SuppressionReason,
-    emailId: string,
+    emailId: string | null,
   ): Promise<void> {
     for (const email of new Set(addresses.map(normalizeEmail).filter(Boolean))) {
       await db.$executeRaw`

@@ -29,6 +29,16 @@ WHERE c."subscribed" = false
   AND c."snoozedUntil" IS NULL
   AND (e."bouncedAt" IS NOT NULL OR e."complainedAt" IS NOT NULL OR e."status" IN ('BOUNCED', 'COMPLAINED'))
   AND NOT e."simulated"
+  -- A bounce SES could not classify unsubscribed the contact, but the address may well be fine:
+  -- the webhook does not suppress it either
+  AND NOT (
+    e."complainedAt" IS NULL AND e."status" <> 'COMPLAINED'
+    AND EXISTS (
+      SELECT 1 FROM "events" ev
+      WHERE ev."emailId" = e."id" AND ev."name" = 'email.bounce'
+        AND ev."data"->>'bounceType' NOT IN ('Permanent', 'Transient')
+    )
+  )
   AND NOT (COALESCE(e."headers", '{}'::jsonb) ? 'X-Plunk-Recipient-Override')
 ORDER BY e."projectId", c."email",
     (e."complainedAt" IS NOT NULL OR e."status" = 'COMPLAINED') DESC,

@@ -12,6 +12,7 @@ import {ContactService} from '../services/ContactService.js';
 import {type ImportedRow, ImportSegmentResolver} from '../services/ImportSegmentResolver.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {importQueue} from '../services/QueueService.js';
+import {SuppressionService} from '../services/SuppressionService.js';
 
 import {importedSubscription, parseImportCsv, splitImportRecord} from './import-csv.js';
 
@@ -51,6 +52,7 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
   let invalidCreatedAtRows = 0;
   const unknownStatusRows = new Map<string, number>();
   let otherUnknownStatusRows = 0;
+  let suppressedRows = 0;
 
   try {
     // Decode base64 CSV data
@@ -128,12 +130,19 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
           // so a contact created meanwhile (another import, the API) is treated as existing. With
           // neither column, a new contact is created subscribed. upsert only dates a contact it
           // creates: an existing one keeps its date.
+          // An address the source stopped mailing for a bounce or a complaint is suppressed, and its
+          // contact unsubscribed even if it was subscribed here (Plunk Lite)
+          if (row.suppression) {
+            await SuppressionService.record(prisma, projectId, [email], row.suppression, null);
+            suppressedRows++;
+          }
+
           const contact = await ContactService.upsert(
             projectId,
             email,
             row.data,
-            importedSubscription(row, true),
-            importedSubscription(row, false) ?? true,
+            row.suppression ? false : importedSubscription(row, true),
+            row.suppression ? false : (importedSubscription(row, false) ?? true),
             {createdAt: row.createdAt},
           );
           imported.push({contactId: contact.id, segments: row.segments});
@@ -178,7 +187,7 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
     result.segmentAssignments = segments.segmentAssignments;
     // Segment problems go first: there is one per name, and the dashboard lists only the first few errors.
     result.errors.unshift(...segments.errors);
-    result.warnings = importWarnings(invalidCreatedAtRows, unknownStatusRows, otherUnknownStatusRows);
+    result.warnings = importWarnings(invalidCreatedAtRows, unknownStatusRows, otherUnknownStatusRows, suppressedRows);
     if (segmentsCreated.length > 0) {
       signale.info(`[IMPORT-PROCESSOR] Created static segments: ${segmentsCreated.join(', ')}`);
     }
@@ -243,6 +252,7 @@ function importWarnings(
   invalidCreatedAtRows: number,
   unknownStatusRows: Map<string, number>,
   otherUnknownStatusRows: number,
+  suppressedRows: number,
 ): string[] {
   const rows = (count: number) => `${count} row${count === 1 ? '' : 's'}`;
   const warnings: string[] = [];
@@ -260,6 +270,11 @@ function importWarnings(
   }
   if (otherUnknownStatusRows > 0) {
     warnings.push(`Other unknown statuses in ${rows(otherUnknownStatusRows)}, handled the same way`);
+  }
+  if (suppressedRows > 0) {
+    warnings.push(
+      `Bounced, cleaned or complained in ${rows(suppressedRows)}: those addresses were suppressed and their contacts unsubscribed`,
+    );
   }
   return warnings;
 }

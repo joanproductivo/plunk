@@ -66,6 +66,19 @@ describe('suppression list seeding', () => {
       headers: {'X-Plunk-Recipient-Override': 'team@else.test'},
     });
     await emailTo(false, {status: EmailStatus.DELIVERED});
+    // A bounce SES could not classify: unsubscribed, but not suppressed
+    const undetermined = await emailTo(false, {status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    const undeterminedContact = await prisma.contact.findFirstOrThrow({where: {projectId, email: undetermined}});
+    const undeterminedEmail = await prisma.email.findFirstOrThrow({where: {contactId: undeterminedContact.id}});
+    await prisma.event.create({
+      data: {
+        projectId,
+        contactId: undeterminedContact.id,
+        emailId: undeterminedEmail.id,
+        name: 'email.bounce',
+        data: {bounceType: 'Undetermined'},
+      },
+    });
     // Snoozed: the sweep will resubscribe it, so it was resubscribed on purpose
     const snoozed = await emailTo(false, {status: EmailStatus.BOUNCED, bouncedAt: new Date()});
     await prisma.contact.updateMany({

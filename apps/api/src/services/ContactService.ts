@@ -846,17 +846,18 @@ export class ContactService {
       }
 
       // Only contacts still snoozed: a bounce or complaint since they were read clears the date,
-      // and must not be undone here
-      await prisma.contact.updateMany({
+      // and must not be undone here. Those it resubscribes are the ones counted and announced.
+      const resubscribed = await prisma.contact.updateManyAndReturn({
         where: {id: {in: due.map(c => c.id)}, snoozedUntil: {not: null, lte: new Date()}},
         data: {subscribed: true, snoozedUntil: null},
+        select: {id: true, projectId: true},
       });
 
       // Events are per-project because `trackEvent` resolves workflows per project. Awaited,
       // unlike the bulk paths: the sweep has no caller waiting on it, and letting a batch's
       // events finish before the next batch is read keeps the load flat.
       const byProject = new Map<string, string[]>();
-      for (const contact of due) {
+      for (const contact of resubscribed) {
         const ids = byProject.get(contact.projectId);
         if (ids) {
           ids.push(contact.id);
@@ -872,7 +873,7 @@ export class ContactService {
       }
 
       processed += found.length;
-      resumed += due.length;
+      resumed += resubscribed.length;
 
       // A short batch means the queue is drained; anything else is a full page and there may
       // be more.
