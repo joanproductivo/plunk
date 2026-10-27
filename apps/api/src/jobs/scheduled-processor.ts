@@ -84,14 +84,10 @@ export async function processScheduledCampaign(job: Job<ScheduledCampaignJobData
 }
 
 export function createScheduledCampaignWorker() {
-  const worker = new Worker<ScheduledCampaignJobData>(
-    scheduledQueue.name,
-    processScheduledCampaign,
-    {
-      connection: scheduledQueue.opts.connection,
-      concurrency: 2, // Process up to 2 scheduled campaigns concurrently
-    },
-  );
+  const worker = new Worker<ScheduledCampaignJobData>(scheduledQueue.name, processScheduledCampaign, {
+    connection: scheduledQueue.opts.connection,
+    concurrency: 2, // Process up to 2 scheduled campaigns concurrently
+  });
 
   worker.on('completed', job => {
     signale.info(`[SCHEDULED-PROCESSOR] Job ${job.id} completed`);

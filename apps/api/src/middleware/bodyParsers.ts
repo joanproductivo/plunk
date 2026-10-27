@@ -1,4 +1,4 @@
-import type {Express} from 'express';
+import type {Application} from 'express';
 import {json} from 'express';
 
 /**
@@ -8,7 +8,7 @@ import {json} from 'express';
  * small -- the largest, lists of up to 10,000 ids -- and 2 MB keeps unauthenticated requests
  * from filling the heap. A body over its limit fails with `type: 'entity.too.large'`.
  */
-export function useJsonBodyParsers(app: Express): void {
+export function useJsonBodyParsers(app: Application): void {
   app.use('/v1/send', json({limit: '10mb'}));
   app.use(json({limit: '2mb'}));
 }

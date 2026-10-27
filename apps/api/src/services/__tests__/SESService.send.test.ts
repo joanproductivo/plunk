@@ -139,7 +139,11 @@ describe('safeToRetrySend', () => {
   it.each([
     ['SES refused it', Object.assign(new Error('MessageRejected'), {$metadata: {httpStatusCode: 400}}), true],
     ['SES failed', Object.assign(new Error('InternalFailure'), {$metadata: {httpStatusCode: 500}}), true],
-    ['an accepted answer could not be read', Object.assign(new Error('parse'), {$metadata: {httpStatusCode: 200}}), false],
+    [
+      'an accepted answer could not be read',
+      Object.assign(new Error('parse'), {$metadata: {httpStatusCode: 200}}),
+      false,
+    ],
     [
       'the connection reset',
       Object.assign(new Error('socket hang up'), {name: 'TimeoutError', code: 'ECONNRESET', $metadata: {attempts: 1}}),

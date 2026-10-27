@@ -38,7 +38,6 @@ describe('Auth.login - attempt limit', () => {
     });
   }
 
-
   it('refuses further attempts once the limit is reached, even with the right password', async () => {
     for (let attempt = 0; attempt < LOGIN_RATE_LIMIT; attempt++) {
       expect((await login({email, password: 'wrong-password'})).json?.success).toBe(false);
