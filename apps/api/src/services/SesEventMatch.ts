@@ -7,6 +7,7 @@ import {z} from 'zod';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 
+import {CampaignService} from './CampaignService.js';
 import {recipientAddress} from './EmailHeaderService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import type {SesMessageTags} from './SESService.js';
@@ -20,7 +21,7 @@ import {SuppressionService} from './SuppressionService.js';
  */
 
 /** The SES notifications the webhook handles; anything else is acknowledged and left alone */
-const SES_EVENT_TYPES = ['Bounce', 'Complaint', 'Delivery', 'Open', 'Click', 'Received'] as const;
+const SES_EVENT_TYPES = ['Bounce', 'Complaint', 'Delivery', 'Open', 'Click', 'Reject', 'Received'] as const;
 export type SesEventType = (typeof SES_EVENT_TYPES)[number];
 
 /**
@@ -306,6 +307,30 @@ export async function suppressUnmatched(
       error: `A ${reason === 'COMPLAINT' ? 'complaint' : 'permanent bounce'} matched no email of the project (SES message ${mail.messageId}): the address was suppressed and its contacts unsubscribed.`,
       contactEmail: addresses[0],
     });
+  }
+}
+
+/**
+ * SES took the email and then refused to deliver it, for what it contained (a virus): the email
+ * failed, under the source that sent it. Nothing is said about the address, which is fine. Only a
+ * row whose send is recorded (SENT) moves; `matchEmail` makes the event wait for one still being
+ * sent.
+ */
+export async function recordReject(email: MatchedEmail, reason: unknown): Promise<void> {
+  const error = `Rejected by SES: ${typeof reason === 'string' && reason ? reason : 'no reason given'}`;
+  const failed = await prisma.email.updateMany({
+    where: {id: email.id, status: EmailStatus.SENT},
+    data: {status: EmailStatus.FAILED, error},
+  });
+  if (failed.count === 0) {
+    signale.info(`[WEBHOOK] Reject for email ${email.id} in status ${email.status}, nothing to record`);
+    return;
+  }
+
+  signale.warn(`[WEBHOOK] Email ${email.id} of project ${email.projectId} was rejected by SES: ${error}`);
+  await FailureAlertService.recordEmail(email, error);
+  if (email.campaignId) {
+    await CampaignService.markStatsDirty(email.campaignId);
   }
 }
 

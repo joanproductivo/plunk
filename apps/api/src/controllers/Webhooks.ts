@@ -39,6 +39,7 @@ import {
   noteSnsRejection,
   parseSnsMessage,
   readSesNotification,
+  recordReject,
   reportUnreadable,
   sentAddress,
   suppressUnmatched,
@@ -602,6 +603,11 @@ export class Webhooks {
             ...(suppression && {complainedAt: (email.complainedAt ?? now).toISOString()}),
           };
           break;
+
+        case 'Reject':
+          // Not a bounce: the content was refused, not the address, so nothing is suppressed
+          await recordReject(email, body.reject?.reason);
+          return res.status(200).json({success: true});
 
         default:
           signale.warn(`[WEBHOOK] Unknown event type: ${eventType}`);
