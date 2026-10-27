@@ -224,6 +224,10 @@ const LIST_UNSUBSCRIBE_PAIR = ['list-unsubscribe', 'list-unsubscribe-post'];
  * inherit Plunk's `List-Unsubscribe-Post`, making us assert one-click support for
  * a URL that never claimed it — mailbox providers would then POST to an endpoint
  * that may do nothing, and silently report the unsubscribe as done.
+ *
+ * Caller headers naming SES's own (`X-SES-…`) are dropped (Plunk Lite): SES reads them as
+ * instructions, so one could send the email under another configuration set -- which decides
+ * where its bounces and complaints are published -- or with message tags that the webhook trusts.
  */
 function mergeHeaders(
   defaults: Record<string, string>,
@@ -245,7 +249,9 @@ function mergeHeaders(
     byLowerName.set(lowerName, {name, value});
   }
   for (const [name, value] of Object.entries(custom)) {
-    byLowerName.set(name.toLowerCase(), {name, value});
+    if (!name.toLowerCase().startsWith('x-ses-')) {
+      byLowerName.set(name.toLowerCase(), {name, value});
+    }
   }
 
   const merged: Record<string, string> = {};

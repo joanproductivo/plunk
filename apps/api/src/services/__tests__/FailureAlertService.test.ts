@@ -196,6 +196,7 @@ describe('FailureAlertService', () => {
       expect(params.content.html).toContain('Ha fallado 1 vez');
       expect(params.headers).toMatchObject({'Auto-Submitted': 'auto-generated'});
       expect(params.tracking).toBe(false);
+      expect(params.tags).toEqual({projectId, kind: 'alert'});
     });
 
     it('records but sends nothing without addresses, for a disabled project, or with no verified domain', async () => {

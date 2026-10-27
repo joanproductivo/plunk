@@ -136,6 +136,32 @@ export const getAwsAccountId = (): Promise<string> => {
   return awsAccountId;
 };
 
+/**
+ * Plunk Lite: the SES message tags each email is sent with. SES repeats them in every event it
+ * publishes for the email (`mail.tags`), so the webhook can tell which email and project an event
+ * is about even when the email's messageId was never stored.
+ */
+export const SES_TAG = {emailId: 'plunk_email_id', projectId: 'plunk_project_id', kind: 'plunk_kind'} as const;
+
+/** What an email sent through SES is: one of the project's emails, a campaign's test send, or an alert */
+export interface SesMessageTags {
+  emailId?: string;
+  projectId: string;
+  kind: 'email' | 'test' | 'alert';
+}
+
+/** The tags as SES takes them, which allows only letters, digits, `_` and `-` in a value */
+function toSesTags(tags: SesMessageTags): {Name: string; Value: string}[] {
+  const values: [string, string | undefined][] = [
+    [SES_TAG.emailId, tags.emailId],
+    [SES_TAG.projectId, tags.projectId],
+    [SES_TAG.kind, tags.kind],
+  ];
+  return values
+    .filter((tag): tag is [string, string] => Boolean(tag[1]))
+    .map(([Name, Value]) => ({Name, Value: Value.replace(/[^A-Za-z0-9_-]/g, '_')}));
+}
+
 interface SendRawEmailParams {
   from: {
     name: string;
@@ -164,6 +190,7 @@ interface SendRawEmailParams {
       }[]
     | null;
   tracking?: boolean;
+  tags?: SesMessageTags;
 }
 
 /**
@@ -192,6 +219,7 @@ export async function sendRawEmail({
   headers,
   attachments,
   tracking = true,
+  tags,
 }: SendRawEmailParams): Promise<{messageId: string}> {
   // Generate unique boundaries for multipart messages
   const altBoundary = `----=_AltPart_${Math.random().toString(36).substring(2)}`;
@@ -324,6 +352,7 @@ ${breakLongLines(attachment.content, 76)}`;
       // The address alone: the display name travels in the From header above, and Source
       // only names the sending identity and where bounces go.
       Source: from.email,
+      ...(tags && {Tags: toSesTags(tags)}),
     },
     // The request timeout stops once SES's answer starts arriving; this bounds the whole send,
     // the answer's body included. An abort mid-answer reports no error status, so it is failed

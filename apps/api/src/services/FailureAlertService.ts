@@ -510,6 +510,7 @@ export class FailureAlertService {
           // Out-of-office replies to an hourly alert would come back every hour
           headers: {'Auto-Submitted': 'auto-generated', 'X-Auto-Response-Suppress': 'All'},
           tracking: false,
+          tags: {projectId, kind: 'alert'},
         });
       } catch (error) {
         rejected.push(`${recipient}: ${error instanceof Error ? error.message : String(error)}`);

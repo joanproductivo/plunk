@@ -1596,6 +1596,7 @@ export class CampaignService {
         customHeaders: {'X-Plunk-Test': 'true'},
       }),
       tracking: false, // Disable tracking for test emails
+      tags: {projectId, kind: 'test'},
     });
   }
 

@@ -13,14 +13,19 @@ type SESServiceModule = typeof import('../SESService');
 describe('sendRawEmail against an SES endpoint', () => {
   let server: http.Server;
   let requests = 0;
+  let lastRequestBody = '';
   let respond: (res: http.ServerResponse) => void = () => {};
   const previousEndpoint = process.env.AWS_ENDPOINT_URL_SES;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       requests++;
-      req.resume();
-      req.on('end', () => respond(res));
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        lastRequestBody = Buffer.concat(chunks).toString();
+        respond(res);
+      });
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   });
@@ -75,6 +80,37 @@ describe('sendRawEmail against an SES endpoint', () => {
     const service = await sesServiceAt(local());
 
     expect(await send(service)).toEqual({messageId: 'ses-message-1'});
+  });
+
+  it('sends the message tags, with what SES does not allow in a value replaced', async () => {
+    respond = res => {
+      res.writeHead(200, {'Content-Type': 'text/xml'});
+      res.end(
+        '<SendRawEmailResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><SendRawEmailResult>' +
+          '<MessageId>ses-message-2</MessageId></SendRawEmailResult><ResponseMetadata><RequestId>r-2</RequestId>' +
+          '</ResponseMetadata></SendRawEmailResponse>',
+      );
+    };
+    const service = await sesServiceAt(local());
+
+    await service.sendRawEmail({
+      from: {name: 'Plunk', email: 'hello@plunk.test'},
+      to: ['someone@plunk.test'],
+      content: {subject: 'Hello', html: '<p>Hello</p>'},
+      tags: {emailId: '0b6b7a2e-1c3d-5e4f-8a9b-0c1d2e3f4a5b', projectId: 'project.1 ', kind: 'email'},
+    });
+
+    const tags = Object.fromEntries(
+      [...new URLSearchParams(lastRequestBody)].filter(([name]) => name.startsWith('Tags.member.')),
+    );
+    expect(tags).toEqual({
+      'Tags.member.1.Name': 'plunk_email_id',
+      'Tags.member.1.Value': '0b6b7a2e-1c3d-5e4f-8a9b-0c1d2e3f4a5b',
+      'Tags.member.2.Name': 'plunk_project_id',
+      'Tags.member.2.Value': 'project_1_',
+      'Tags.member.3.Name': 'plunk_kind',
+      'Tags.member.3.Value': 'email',
+    });
   });
 
   it('does not retry, nor mark safe to retry, an accepted send whose answer was cut off', async () => {

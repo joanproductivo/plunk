@@ -41,4 +41,12 @@ describe('CampaignService - sendTest', () => {
 
     expect(vi.mocked(sendRawEmail).mock.calls[0]?.[0].content.html).toBe(body);
   });
+
+  it('tags the send as a test of the project, so its bounces are not looked for among its emails', async () => {
+    const campaign = await factories.createCampaign({projectId});
+
+    await CampaignService.sendTest(projectId, campaign.id, memberEmail);
+
+    expect(vi.mocked(sendRawEmail).mock.calls[0]?.[0].tags).toEqual({projectId, kind: 'test'});
+  });
 });
