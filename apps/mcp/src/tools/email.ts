@@ -47,6 +47,13 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         '',
         '**This cannot be undone once sent.** Sending to multiple recipients asks for confirmation first.',
         '',
+        "**Suppressed addresses:** an address on the project's suppression list (it bounced permanently",
+        'or reported spam) is never emailed, transactional email included. The send is still accepted and',
+        'returns an email record, but that email is dropped before it goes out, marked failed with',
+        '"Address is suppressed after a bounce" (or "complaint"). `subscribed: true` does not subscribe it',
+        'either. Do not resend: `plunk_get_contact` shows the `suppression`, and only the Plunk dashboard',
+        "can lift it, from the contact's page.",
+        '',
         '**Key trigger phrases:** "send an email", "email this to", "notify", "send them a message"',
       ].join('\n'),
       inputSchema: z.object({

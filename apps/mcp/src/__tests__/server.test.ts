@@ -408,6 +408,106 @@ describe('tool behaviour', () => {
     await close();
   });
 
+  it('says why a created contact stayed unsubscribed when its address is suppressed', async () => {
+    mockApi(() =>
+      json({
+        id: 'contact-1',
+        email: 'ada@example.com',
+        subscribed: false,
+        _meta: {isNew: true, isUpdate: false, suppressed: {reason: 'BOUNCE', createdAt: '2026-10-20T08:00:00.000Z'}},
+      }),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_create_contact', arguments: {email: 'ada@example.com'}});
+
+    expect(result.isError).toBeFalsy();
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('stays unsubscribed');
+    expect(text).toContain('bounced permanently on 2026-10-20');
+
+    await close();
+  });
+
+  it('adds no suppression note to a contact that was subscribed', async () => {
+    mockApi(() =>
+      json({id: 'contact-1', email: 'ada@example.com', subscribed: true, _meta: {isNew: true, isUpdate: false}}),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_create_contact', arguments: {email: 'ada@example.com'}});
+
+    expect(JSON.stringify(result.content)).not.toContain('suppression');
+
+    await close();
+  });
+
+  it('notes a suppressed contact when tracking an event through the upsert', async () => {
+    mockApi((url) =>
+      url.endsWith('/contacts')
+        ? json({id: 'contact-1', _meta: {suppressed: {reason: 'COMPLAINT', createdAt: '2026-10-21T08:00:00.000Z'}}})
+        : json({ok: true}),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_track_event',
+      arguments: {event: 'user.signup', email: 'ada@example.com'},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('reported an email as spam on 2026-10-21');
+
+    await close();
+  });
+
+  it('surfaces ADDRESS_SUPPRESSED when subscribing a suppressed address', async () => {
+    mockApi(() =>
+      json(
+        {
+          error: {
+            code: 'ADDRESS_SUPPRESSED',
+            message: 'ada@example.com cannot be subscribed: it bounced on 2026-10-20.',
+            statusCode: 409,
+          },
+        },
+        409,
+      ),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_subscribe_contact', arguments: {id: 'contact-1'}});
+
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('409 ADDRESS_SUPPRESSED');
+    expect(text).toContain('cannot be subscribed');
+
+    await close();
+  });
+
+  it('tells the model how suppressed addresses behave in the tools that can meet one', async () => {
+    const {client, close} = await connect(baseConfig);
+
+    const {tools} = await client.listTools();
+    const description = (name: string) => tools.find((tool) => tool.name === name)?.description ?? '';
+
+    for (const name of ['plunk_subscribe_contact', 'plunk_update_contact']) {
+      expect(description(name)).toContain('ADDRESS_SUPPRESSED');
+      expect(description(name)).toContain('Do not retry');
+    }
+    expect(description('plunk_create_contact')).toContain('_meta.suppressed');
+    expect(description('plunk_get_contact')).toContain('`suppression`');
+    expect(description('plunk_send_email')).toContain('suppression list');
+    expect(description('plunk_track_event')).toContain('suppression list');
+
+    await close();
+  });
+
   it('uses /v1/track directly when a public key is configured', async () => {
     const calls: string[] = [];
 

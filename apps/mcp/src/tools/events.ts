@@ -2,6 +2,7 @@ import * as z from 'zod';
 
 import type {PlunkClient} from '../client.js';
 
+import {suppressionNote} from './contacts.js';
 import {jsonResult, register, runTool, type ToolContext} from './shared.js';
 
 export function registerEventTools(ctx: ToolContext, client: PlunkClient): void {
@@ -19,6 +20,10 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
         'records it — any email that follows comes from a workflow triggered by the event.',
         '',
         '**Returns:** The recorded event and the contact it was attached to.',
+        '',
+        "If the address is on the project's suppression list (it bounced permanently or reported spam),",
+        'the event is still recorded but the contact stays unsubscribed, and no email reaches it — not',
+        'even from the workflows the event starts. Only the Plunk dashboard can lift a suppression.',
         '',
         '**When to use:**',
         '- The user wants to trigger a workflow for a specific person',
@@ -57,7 +62,7 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
           return jsonResult(`Tracked "${event}" for ${email}.`, result);
         }
 
-        const contact = await client.request<{id: string}>({
+        const contact = await client.request<{id: string; _meta?: unknown}>({
           method: 'POST',
           path: '/contacts',
           body: {email, subscribed: subscribed ?? true, data},
@@ -69,7 +74,7 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
           body: {name: event, contactId: contact.id, data},
         });
 
-        return jsonResult(`Tracked "${event}" for ${email}.`, result);
+        return jsonResult(`Tracked "${event}" for ${email}.${suppressionNote(contact)}`, result);
       }),
   );
 }
