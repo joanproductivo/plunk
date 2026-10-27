@@ -7,14 +7,17 @@ import {FailureAlertService} from './FailureAlertService.js';
 import {QueueService} from './QueueService.js';
 import type {SecurityMetric} from './SecurityService.js';
 import {SecurityService} from './SecurityService.js';
+import {SourceBrakeService} from './SourceBrakeService.js';
 
 /**
  * Plunk Lite: the reputation check that follows a new bounce or complaint, run once for a burst of
- * them in the `plunk-lite-checks` queue (see QueueService.queueSecurityCheck).
+ * them in the `plunk-lite-checks` queue (see QueueService.queueSecurityCheck). It judges first the
+ * campaigns and workflows the events came from (SourceBrakeService), then the project.
  *
  * Only the job of the first event of a burst is kept, so what every event brought is collected in a
- * Redis set of the project, `trigger:<metric>`, and the check takes it all. A check that fails gives
- * it back for its next attempt.
+ * Redis set of the project -- `trigger:<metric>`, and its source as `campaign:<id>` or
+ * `workflow:<id>` -- and the check takes it all. A check that fails gives it back for its next
+ * attempt. When the set cannot be read, every campaign of the project still sending is judged.
  */
 const PENDING_KEY = (projectId: string) => `plunk-lite:security:pending:${projectId}`;
 // A check runs within seconds; this only bounds a set no check ever takes
@@ -26,9 +29,16 @@ export class ReputationCheck {
    * Has the project's reputation checked after a new bounce or complaint of one of its emails. When
    * the check cannot be queued it runs here and now. Never throws: the event is already recorded.
    */
-  public static async afterEvent(email: {projectId: string}, trigger: SecurityMetric): Promise<void> {
-    const data: SecurityCheckJobData = {projectId: email.projectId, trigger};
-    await this.notePending(email.projectId, [`trigger:${trigger}`]);
+  public static async afterEvent(
+    email: {projectId: string; campaignId: string | null; workflowExecutionId: string | null},
+    trigger: SecurityMetric,
+  ): Promise<void> {
+    const source = await SourceBrakeService.sourceOf(email).catch((error: unknown) => {
+      signale.warn(`[SECURITY] Could not tell which workflow an email of project ${email.projectId} came from:`, error);
+      return undefined;
+    });
+    const data: SecurityCheckJobData = {projectId: email.projectId, trigger, ...(source && {source})};
+    await this.notePending(email.projectId, [`trigger:${trigger}`, ...(source ? [source] : [])]);
 
     try {
       await QueueService.queueSecurityCheck(data);
@@ -45,14 +55,36 @@ export class ReputationCheck {
     }
   }
 
-  /** The check itself, as the job runs it. Throws when it could not tell, so the job tries again. */
+  /**
+   * The check itself, as the job runs it: the sources, then the project, which is checked even when
+   * judging a source failed. Throws when either could not tell, so the job tries again.
+   */
   public static async run(data: SecurityCheckJobData): Promise<void> {
     const pending = await this.takePending(data.projectId);
+    const taken = pending ?? [];
     try {
-      const triggers = METRICS.filter(metric => metric === data.trigger || pending.includes(`trigger:${metric}`));
+      const sources = taken.filter(item => !item.startsWith('trigger:'));
+      if (data.source) {
+        sources.push(data.source);
+      }
+      if (!pending) {
+        sources.push(...(await SourceBrakeService.sendingCampaigns(data.projectId)));
+      }
+
+      let brakeError: unknown;
+      try {
+        await SourceBrakeService.brake(data.projectId, sources);
+      } catch (error) {
+        brakeError = error;
+      }
+
+      const triggers = METRICS.filter(metric => metric === data.trigger || taken.includes(`trigger:${metric}`));
       await SecurityService.checkAndEnforceSecurityLimits(data.projectId, triggers);
+      if (brakeError) {
+        throw brakeError;
+      }
     } catch (error) {
-      await this.notePending(data.projectId, pending);
+      await this.notePending(data.projectId, taken);
       throw error;
     }
   }
@@ -85,8 +117,8 @@ export class ReputationCheck {
     }
   }
 
-  /** What the events since the last check brought; nothing when Redis cannot say */
-  private static async takePending(projectId: string): Promise<string[]> {
+  /** What the events since the last check brought; undefined when Redis cannot say */
+  private static async takePending(projectId: string): Promise<string[] | undefined> {
     const items: string[] = [];
     try {
       for (let batch = await redis.spop(PENDING_KEY(projectId), 100); batch.length > 0; ) {
@@ -95,6 +127,7 @@ export class ReputationCheck {
       }
     } catch (error) {
       signale.warn(`[SECURITY] Could not read what the reputation check of project ${projectId} is for:`, error);
+      return undefined;
     }
     return items;
   }

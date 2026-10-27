@@ -73,6 +73,8 @@ export interface SnoozeSweepJobData {
 export interface SecurityCheckJobData {
   projectId: string;
   trigger: 'bounce' | 'complaint';
+  /** The campaign or workflow the email came from, `campaign:<id>` or `workflow:<id>` */
+  source?: string;
 }
 
 /**

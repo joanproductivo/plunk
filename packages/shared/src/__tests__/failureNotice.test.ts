@@ -11,6 +11,9 @@ describe('isFailureNotice', () => {
     'sns:subscription',
     'aws:alarm:ses-rebotes-alto',
     'project',
+    'brake:campaign:abc',
+    'brake:workflow:abc',
+    'security:check',
   ])('reads %s as a condition that needs attention', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });

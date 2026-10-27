@@ -15,9 +15,9 @@ import {failureSourceFor} from './failureSources.js';
 export interface FailureReport {
   /**
    * `workflow:<id>`, `campaign:<id>` or `transactional` for failures; `project` (disabled),
-   * `security:warning`, `security:critical`, `security:check`, `domain:<id>`, `sns:<what>` (the SES
-   * event pipeline) or `aws:alarm:<name>` for conditions the project should hear about. Each kind
-   * is in SOURCE_KINDS.
+   * `brake:campaign:<id>` and `brake:workflow:<id>` (stopped for their bounces), `security:warning`,
+   * `security:critical`, `security:check`, `domain:<id>`, `sns:<what>` (the SES event pipeline) or
+   * `aws:alarm:<name>` for conditions the project should hear about. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -72,6 +72,15 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
   'campaign': {
     name: {en: label => `Campaign "${label}"`, es: label => `Campaña «${label}»`},
     path: id => `/campaigns/${encodeURIComponent(id)}`,
+  },
+  // A campaign or workflow stopped for its bounces or complaints (SourceBrakeService)
+  'brake:campaign': {
+    name: {en: label => `Campaign "${label}" stopped`, es: label => `Campaña «${label}» detenida`},
+    path: id => `/campaigns/${encodeURIComponent(id)}`,
+  },
+  'brake:workflow': {
+    name: {en: label => `Workflow "${label}" disabled`, es: label => `Workflow «${label}» desactivado`},
+    path: id => `/workflows/${encodeURIComponent(id)}`,
   },
   'project': {name: {en: () => 'Project disabled', es: () => 'Proyecto desactivado'}, path: () => SECURITY_PATH},
   'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},

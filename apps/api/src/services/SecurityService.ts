@@ -9,6 +9,8 @@ import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+import type {DisableVerdict, RateData} from './ReputationPolicy.js';
+import {ReputationPolicy} from './ReputationPolicy.js';
 import {getAwsAccountId} from './SESService.js';
 import {
   AUTO_PROJECT_DISABLE,
@@ -26,11 +28,14 @@ import {
 /**
  * Security thresholds for bounce and complaint rates
  * These limits protect AWS SES reputation and prevent account suspension. The critical ones sit
- * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate -- so a
- * project is stopped before SES has to act on the whole account. The dashboard repeats them
- * (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
+ * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate. The dashboard
+ * repeats them (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
+ *
+ * Plunk Lite: past a critical one the project is alerted, and the campaign or workflow sending is
+ * stopped (SourceBrakeService); the project is only disabled past the higher rates of
+ * ReputationPolicy.
  */
-const SECURITY_THRESHOLDS = {
+export const SECURITY_THRESHOLDS = {
   // Minimum emails required before enforcing rate-based limits (prevents false positives)
   MIN_EMAILS_FOR_ENFORCEMENT: 100,
 
@@ -121,14 +126,6 @@ async function getRecentPhishingCount(projectId: string): Promise<number> {
 async function clearPhishingHistory(projectId: string): Promise<void> {
   const key = `phishing:detections:${projectId}`;
   await redis.del(key);
-}
-
-interface RateData {
-  total: number;
-  bounces: number;
-  complaints: number;
-  bounceRate: number;
-  complaintRate: number;
 }
 
 /**
@@ -246,8 +243,9 @@ export class SecurityService {
 
   /**
    * Check security status after new bounces or complaints, and auto-disable the project if one of
-   * them pushed its own metric past a critical threshold. `triggers` are the metrics the events
-   * since the last check moved (Plunk Lite: a check runs once for a burst of them).
+   * them pushed its own metric past disabling it (Plunk Lite: ReputationPolicy; past a critical
+   * threshold short of that, it is alerted). `triggers` are the metrics the events since the last
+   * check moved (Plunk Lite: a check runs once for a burst of them).
    *
    * Only violations of a triggering metric can disable. The complaint rate is complaints
    * over total sent, so a bounce cannot raise it (and every send only lowers it); the same
@@ -264,13 +262,14 @@ export class SecurityService {
     await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
       signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
     });
-    const shouldDisable = triggers.some(trigger => status.criticalByMetric[trigger]);
+    const verdict = await ReputationPolicy.disableByMetric(projectId);
+    const isCritical = triggers.some(trigger => status.criticalByMetric[trigger]);
 
     // If project should be disabled, disable it (only if auto-disable is enabled)
-    if (shouldDisable && AUTO_PROJECT_DISABLE) {
-      await this.disableProject(projectId, status);
-    } else if (shouldDisable && !AUTO_PROJECT_DISABLE) {
-      // Log critical violations but don't auto-disable (self-hosted mode)
+    if (AUTO_PROJECT_DISABLE && triggers.some(trigger => verdict[trigger])) {
+      await this.disableProject(projectId, status, verdict);
+    } else if (isCritical) {
+      // Log critical violations but don't disable: auto-disable is off, or the rates are short of it
       const project = await prisma.project.findUnique({
         where: {id: projectId},
         select: {name: true},
@@ -278,7 +277,7 @@ export class SecurityService {
 
       if (project) {
         signale.error(
-          `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations but auto-disable is turned off:`,
+          `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations, not disabled (auto-disable ${AUTO_PROJECT_DISABLE ? 'on' : 'off'}):`,
           status.violations,
         );
         signale.info(
@@ -423,64 +422,6 @@ export class SecurityService {
   }
 
   /**
-   * Calculate bounce and complaint rates for a project
-   */
-  private static async calculateRates(projectId: string, startDate?: Date): Promise<RateData> {
-    const where = {
-      projectId,
-      // Mail to the SES mailbox simulator is excluded from both sides of every rate: it
-      // never leaves AWS, and AWS itself keeps it out of bounce rates, complaint rates,
-      // sending quotas and reputation metrics. Counting a deliberate
-      // `bounce@simulator.amazonses.com` test here would let a sender rehearsing their
-      // bounce handling warn or auto-disable their own project. Excluding it from the
-      // denominator as well as the numerator is the part that is easy to miss: dropping
-      // only the bounces would leave the test sends inflating the denominator and quietly
-      // understating the real bounce rate.
-      //
-      // Nothing else changes for these emails -- the webhook fires, the activity feed
-      // shows the bounce, the contact is still suppressed.
-      simulated: false,
-      // Only emails SES was given count, as only those count for AWS: a campaign creates its
-      // rows well ahead of the send, and counting the ones still queued (or never sent) would
-      // understate the rate exactly while a large send is going out
-      sentAt: {not: null},
-      ...(startDate && {
-        createdAt: {
-          gte: startDate,
-        },
-      }),
-    };
-
-    // Get counts in parallel for performance
-    const [total, bounces, complaints] = await Promise.all([
-      prisma.email.count({where}),
-      prisma.email.count({
-        where: {
-          ...where,
-          bouncedAt: {not: null},
-        },
-      }),
-      prisma.email.count({
-        where: {
-          ...where,
-          complainedAt: {not: null},
-        },
-      }),
-    ]);
-
-    const bounceRate = total > 0 ? (bounces / total) * 100 : 0;
-    const complaintRate = total > 0 ? (complaints / total) * 100 : 0;
-
-    return {
-      total,
-      bounces,
-      complaints,
-      bounceRate,
-      complaintRate,
-    };
-  }
-
-  /**
    * Calculate security status without caching
    */
   private static async calculateSecurityStatus(projectId: string): Promise<SecurityStatus> {
@@ -499,9 +440,9 @@ export class SecurityService {
 
     // Get 24-hour, 7-day and all-time rates in parallel
     const [twentyFourHour, sevenDay, allTime] = await Promise.all([
-      this.calculateRates(projectId, oneDayAgo),
-      this.calculateRates(projectId, sevenDaysAgo),
-      this.calculateRates(projectId),
+      ReputationPolicy.rates({projectId, since: oneDayAgo}),
+      ReputationPolicy.rates({projectId, since: sevenDaysAgo}),
+      ReputationPolicy.rates({projectId}),
     ]);
 
     const violations: string[] = [];
@@ -662,7 +603,11 @@ export class SecurityService {
    * Disable a project due to security violations. Throws if the project cannot be read or
    * disabled (Plunk Lite), so its check runs again; what follows the disable never throws.
    */
-  private static async disableProject(projectId: string, status: SecurityStatus): Promise<void> {
+  private static async disableProject(
+    projectId: string,
+    status: SecurityStatus,
+    verdict: DisableVerdict,
+  ): Promise<void> {
     // Check if already disabled to avoid duplicate logs
     const project = await prisma.project.findUnique({
       where: {id: projectId},
@@ -692,7 +637,7 @@ export class SecurityService {
     // Log critical security event
     signale.error(
       `[SECURITY] Project ${projectId} (${project.name}) has been automatically disabled due to security violations:`,
-      status.violations,
+      verdict.violations,
     );
     signale.info(
       `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
@@ -712,20 +657,18 @@ export class SecurityService {
     await FailureAlertService.record(projectId, {
       sourceKey: 'project',
       label: 'Project disabled',
-      error: status.violations.join('; '),
+      error: verdict.violations.join('; '),
     });
 
     // Send urgent notification about project suspension
-    await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, status.violations);
+    await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, verdict.violations);
 
     // Send email notification to project members
     try {
       const members = await MembershipService.getMembers(projectId);
       const emails = members.map(m => m.email);
       if (emails.length > 0) {
-        const metrics = (Object.keys(status.criticalByMetric) as SecurityMetric[]).filter(
-          m => status.criticalByMetric[m],
-        );
+        const metrics = (['bounce', 'complaint'] as SecurityMetric[]).filter(m => verdict[m]);
         // Bounce/complaint rates are visible in the dashboard, so the email names them.
         // Thresholds and the new-project 24h window stay internal.
         const template = React.createElement(ProjectDisabledEmail, {
