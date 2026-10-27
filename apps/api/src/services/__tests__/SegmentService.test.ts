@@ -264,6 +264,20 @@ describe('SegmentService', () => {
     });
   });
 
+  describe('refreshAllMemberCounts (Plunk Lite)', () => {
+    it('counts the segments that do not track membership, and leaves the others to computeMembership', async () => {
+      await factories.createContact({projectId, data: {plan: 'pro'}});
+      const filters = [{field: 'data.plan', operator: 'equals', value: 'pro'}];
+      const untracked = await factories.createSegment(projectId, {filters, trackMembership: false});
+      const tracked = await factories.createSegment(projectId, {filters, trackMembership: true});
+
+      await SegmentService.refreshAllMemberCounts(projectId);
+
+      expect((await prisma.segment.findUniqueOrThrow({where: {id: untracked.id}})).memberCount).toBe(1);
+      expect((await prisma.segment.findUniqueOrThrow({where: {id: tracked.id}})).memberCount).toBe(0);
+    });
+  });
+
   describe('Dynamic Segment Updates', () => {
     it('should reflect in segment when contact data changes', async () => {
       const contact = await factories.createContact({
