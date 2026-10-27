@@ -3,7 +3,7 @@ import React from 'react';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
-import {redis} from '../database/redis.js';
+import {redis, redisReady} from '../database/redis.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
@@ -258,10 +258,12 @@ export class SecurityService {
    */
   public static async checkAndEnforceSecurityLimits(projectId: string, triggers: SecurityMetric[]): Promise<void> {
     const status = await this.calculateSecurityStatus(projectId);
-    // Fresh for the dashboard too
-    await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
-      signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
-    });
+    // Fresh for the dashboard too (Plunk Lite: unless Redis is down, which it would wait for)
+    if (redisReady()) {
+      await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
+        signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
+      });
+    }
     const verdict = await ReputationPolicy.disableByMetric(projectId);
     const isCritical = triggers.some(trigger => status.criticalByMetric[trigger]);
 

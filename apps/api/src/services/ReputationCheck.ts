@@ -1,7 +1,7 @@
 import type {SecurityCheckJobData} from '@plunk/types';
 import signale from 'signale';
 
-import {redis} from '../database/redis.js';
+import {redis, redisReady} from '../database/redis.js';
 
 import {FailureAlertService} from './FailureAlertService.js';
 import {QueueService} from './QueueService.js';
@@ -56,6 +56,13 @@ const METRICS: SecurityMetric[] = ['bounce', 'complaint'];
  * webhook that queues it must still answer SNS.
  */
 const QUEUE_TIMEOUT_MS = 3000;
+/**
+ * How long the check run in its place may take, for the same reason. With Redis down it skips what
+ * it reads and writes there; what still waits on it (cancelling the project's jobs once it is
+ * disabled) comes after the database writes that stop the sending. A connection cut without a
+ * reset still reads as connected, and only this bounds it.
+ */
+const RUN_TIMEOUT_MS = 10_000;
 
 /** Rejects once `ms` have passed without `promise` settling */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -69,8 +76,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export class ReputationCheck {
   /**
    * Has the project's reputation checked after a new bounce or complaint of one of its emails. When
-   * the check cannot be queued, within a few seconds, it runs here and now; if that fails too, the
-   * project is told its reputation is not being watched. Never throws: the event is already recorded.
+   * the check cannot be queued, within a few seconds, it runs here and now, for ten seconds at most;
+   * if that fails too, the project is told its reputation is not being watched. Never throws: the
+   * event is already recorded.
    */
   public static async afterEvent(
     email: {projectId: string; campaignId: string | null; workflowExecutionId: string | null},
@@ -92,7 +100,7 @@ export class ReputationCheck {
         queueError,
       );
       try {
-        await this.run(data);
+        await withTimeout(this.run(data), RUN_TIMEOUT_MS);
       } catch (checkError) {
         signale.error(`[SECURITY] Reputation check of project ${email.projectId} failed:`, checkError);
         await this.exhausted(data, checkError);
@@ -148,6 +156,11 @@ export class ReputationCheck {
     if (items.length === 0) {
       return;
     }
+    if (!redisReady()) {
+      // The job still carries its own event
+      signale.warn(`[SECURITY] Redis is down, not noting ${items.join(', ')} for project ${projectId}`);
+      return;
+    }
     try {
       await redis.eval(NOTE_PENDING, 2, PENDING_KEY(projectId), PENDING_SEQ_KEY(projectId), PENDING_SECONDS, ...items);
     } catch (error) {
@@ -164,6 +177,10 @@ export class ReputationCheck {
    * Redis cannot say
    */
   private static async readPending(projectId: string): Promise<{items: string[]; upTo: number} | undefined> {
+    if (!redisReady()) {
+      signale.warn(`[SECURITY] Redis is down, judging every campaign of project ${projectId} still sending`);
+      return undefined;
+    }
     try {
       const read = (await redis.eval(
         READ_PENDING,
@@ -191,7 +208,7 @@ export class ReputationCheck {
    * judges it again, which changes nothing.
    */
   private static async clearPending(projectId: string, upTo: number): Promise<void> {
-    if (upTo === 0) {
+    if (upTo === 0 || !redisReady()) {
       return;
     }
     try {

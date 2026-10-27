@@ -2,7 +2,7 @@ import type {Job} from 'bullmq';
 import {Worker} from 'bullmq';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
-import {CampaignStatus} from '@plunk/db';
+import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {redis} from '../../database/redis';
@@ -208,6 +208,67 @@ describe('ReputationCheck', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(enforce).toHaveBeenCalledWith(projectId, ['complaint']);
     expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(0);
+  });
+
+  it('runs the check at once without Redis when it is down, and still stops the campaign and the project', async () => {
+    const contact = await factories.createContact({projectId});
+    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
+    const createdAt = new Date(Date.now() - 60_000);
+    await prisma.email.createMany({
+      data: Array.from({length: 300}, (_, i) => ({
+        projectId,
+        contactId: contact.id,
+        campaignId: campaign.id,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hi@example.com',
+        sourceType: EmailSourceType.CAMPAIGN,
+        status: EmailStatus.SENT,
+        sentAt: createdAt,
+        createdAt,
+        bouncedAt: i < 30 ? createdAt : null,
+      })),
+    });
+    // Reactivated after those bounces: read, its grace period would keep them from disabling it
+    await redis.set(`plunk-lite:reactivated:${projectId}`, JSON.stringify({reactivatedAt: new Date()}), 'EX', 3600);
+    vi.spyOn(QueueService, 'queueSecurityCheck').mockRejectedValue(new Error('Redis down'));
+    const commands = (['eval', 'get', 'set', 'setex', 'multi', 'smembers', 'zremrangebyscore'] as const).map(name =>
+      vi.spyOn(redis, name),
+    );
+
+    const status = redis.status;
+    (redis as {status: string}).status = 'reconnecting';
+    try {
+      await ReputationCheck.afterEvent({projectId, campaignId: campaign.id, workflowExecutionId: null}, 'bounce');
+    } finally {
+      (redis as {status: string}).status = status;
+    }
+
+    for (const command of commands) {
+      expect(command).not.toHaveBeenCalled();
+    }
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect(await prisma.project.findUniqueOrThrow({where: {id: projectId}})).toMatchObject({
+      disabled: true,
+      disabledReason: 'EMAIL_REPUTATION',
+    });
+  });
+
+  it('gives up on the check run at once after ten seconds, and tells the project', async () => {
+    vi.spyOn(QueueService, 'queueSecurityCheck').mockRejectedValue(new Error('Redis down'));
+    const enforce = vi
+      .spyOn(SecurityService, 'checkAndEnforceSecurityLimits')
+      .mockReturnValue(new Promise<never>(() => undefined));
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+
+    const done = ReputationCheck.afterEvent(transactional(), 'bounce');
+    await vi.waitFor(() => expect(enforce).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(10_000);
+    await done;
+
+    const failure = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId}});
+    expect(failure).toMatchObject({sourceKey: 'security:check'});
+    expect(failure.lastError).toContain('Timed out after 10000 ms');
   });
 
   it('tells the project once a check has run out of attempts, and not before', async () => {
