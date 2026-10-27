@@ -187,7 +187,7 @@ describe('CampaignService - cancel', () => {
 });
 
 /**
- * The cleanup's raw SQL, tested on its own. Its two predicates are what stand between
+ * The cleanup's raw SQL, tested on its own. Its predicates are what stand between
  * clearing a queue and destroying delivery history, and neither is expressible in the
  * `deleteMany` the rest of the codebase would use -- Prisma has no LIMIT there, and an
  * unbounded delete is the thing this job exists to avoid.
@@ -255,6 +255,64 @@ describe('deleteUnsentCampaignEmails', () => {
     expect(await prisma.email.findUnique({where: {id: sending.id}})).not.toBeNull();
   });
 
+  /**
+   * Claim an email as a worker that read the campaign as sending before the cancel does, while the
+   * cleanup runs: it picks the row while still PENDING and waits for the claim to commit. Returns
+   * what the cleanup deleted.
+   */
+  async function cleanUpWhileClaiming(emailId: string): Promise<number> {
+    let deleting: Promise<number> | undefined;
+    await prisma.$transaction(async tx => {
+      await tx.email.updateMany({
+        where: {id: emailId, status: EmailStatus.PENDING},
+        data: {status: EmailStatus.SENDING},
+      });
+      deleting = deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
+      // Commit only once the delete is waiting on the claimed row: earlier, it would read the
+      // row as SENDING and skip it with or without the re-check
+      for (let waited = 0; ; waited += 20) {
+        const [{blocked}] = await prisma.$queryRaw<{blocked: bigint}[]>`
+          SELECT count(*) AS blocked FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%DELETE FROM "emails"%'
+        `;
+        if (blocked > 0n) break;
+        if (waited > 4000) throw new Error('The cleanup never waited on the claimed row');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    });
+    return deleting!;
+  }
+
+  it('never deletes a row a worker claims while the delete waits for it', async () => {
+    const claimed = await makeEmail();
+
+    expect(await cleanUpWhileClaiming(claimed.id)).toBe(0);
+    expect((await prisma.email.findUnique({where: {id: claimed.id}}))?.status).toBe(EmailStatus.SENDING);
+  });
+
+  it('goes on past a batch that a claimed row cut short', async () => {
+    const contact = await factories.createContact({projectId, email: `bulk-${Date.now()}@plunk.test`});
+    await prisma.email.createMany({
+      data: Array.from({length: 1100}, () => ({
+        projectId,
+        contactId: contact.id,
+        campaignId,
+        subject: 'Bulk',
+        body: '<p>x</p>',
+        from: 'hello@plunk.test',
+        sourceType: EmailSourceType.CAMPAIGN,
+        status: EmailStatus.PENDING,
+      })),
+    });
+    // The first row the cleanup's first batch reads, so that batch deletes one row short of full
+    const [first] = await prisma.$queryRaw<{id: string}[]>`
+      SELECT "id" FROM "emails" WHERE "campaignId" = ${campaignId} AND "sentAt" IS NULL LIMIT 1
+    `;
+
+    expect(await cleanUpWhileClaiming(first.id)).toBe(1099);
+    expect(await prisma.email.count({where: {campaignId}})).toBe(1);
+  });
+
   it('leaves rows created after the cancellation alone', async () => {
     // The campaign went back to draft and was sent again while this cleanup was still
     // draining. Those rows belong to the new send and deleting them would gut it.
@@ -317,7 +375,7 @@ describe('deleteUnsentCampaignEmails', () => {
 
     expect(deleted).toBe(1100);
     expect(await prisma.email.count({where: {campaignId}})).toBe(0);
-    // One full batch, then the remainder ends the loop.
-    expect(progress).toEqual([1000]);
+    // A full batch, the remainder, and then an empty batch ends the loop.
+    expect(progress).toEqual([1000, 1100]);
   });
 });

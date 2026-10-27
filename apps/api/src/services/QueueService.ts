@@ -505,19 +505,35 @@ export class QueueService {
   /**
    * Queue the cleanup that returns a cancelled campaign to draft.
    *
-   * The job id is derived from the campaign so that re-running `cancel` on a campaign
-   * whose cleanup died mid-way -- the repair path -- re-uses the existing job instead
-   * of starting a second one racing it over the same rows.
+   * The job id is derived from the campaign so that re-running `cancel` while its
+   * cleanup is still pending or running re-uses that job instead of starting a second
+   * one racing it over the same rows.
+   *
+   * A finished job keeps the id for as long as BullMQ retains it, and an add under it
+   * is dropped: the cleanup of a campaign cancelled again after it was sent again, or
+   * of one whose cleanup ran out of attempts (the repair path), would never run, and
+   * the campaign would stay CANCELLED for good. So a completed or failed job goes
+   * first. A job that finishes between the check and the add still drops it; cancel
+   * again once it has.
    */
   public static async queueCampaignCancelCleanup(
     campaignId: string,
     projectId: string,
     cancelledAt: Date,
   ): Promise<void> {
+    const jobId = `campaign-cancel-cleanup-${campaignId}`;
+    const previous = await campaignCancelCleanupQueue.getJob(jobId);
+    const state = await previous?.getState();
+    if (previous && (state === 'completed' || state === 'failed')) {
+      // A concurrent cancel can have replaced it with a job that is now running, and
+      // removing that one fails as locked: the running job does the cleanup
+      await previous.remove().catch(() => undefined);
+    }
+
     await campaignCancelCleanupQueue.add(
       'cleanup',
       {campaignId, projectId, cancelledAt: cancelledAt.toISOString()},
-      {jobId: `campaign-cancel-cleanup-${campaignId}`},
+      {jobId},
     );
   }
 
