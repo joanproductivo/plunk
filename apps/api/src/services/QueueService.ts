@@ -407,26 +407,8 @@ export class QueueService {
   }
 
   /**
-   * Add workflow step to queue for execution
-   */
-  public static async queueWorkflowStep(
-    executionId: string,
-    stepId: string,
-    delay?: number,
-  ): Promise<Job<WorkflowStepJobData>> {
-    return workflowQueue.add(
-      'process-step',
-      {executionId, stepId, type: 'process-step'},
-      {
-        delay,
-        jobId: `workflow-${executionId}-${stepId}`,
-      },
-    );
-  }
-
-  /**
-   * Queue the end of a DELAY step that has no step after it, so the execution completes
-   * when the delay runs out instead of staying WAITING forever
+   * Queue the end of a DELAY step: when the delay runs out, the execution moves on to the step
+   * connected after it then, or completes if there is none
    */
   public static async queueWorkflowDelayEnd(
     executionId: string,

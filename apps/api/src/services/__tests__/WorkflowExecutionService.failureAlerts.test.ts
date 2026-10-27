@@ -8,7 +8,6 @@ import {WorkflowExecutionService} from '../WorkflowExecutionService';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
-    queueWorkflowStep: vi.fn(async () => ({id: 'mock-job-id'})),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
     cancelWorkflowTimeout: vi.fn(async () => true),

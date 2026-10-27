@@ -85,8 +85,9 @@ export class WorkflowExecutionService {
     });
 
     if (!initialExecution) {
-      signale.error(`[WORKFLOW] Execution ${executionId} not found`);
-      throw new HttpException(404, 'Workflow execution not found');
+      // Plunk Lite: its contact or workflow was deleted; retrying the job would not bring it back
+      signale.warn(`[WORKFLOW] Execution ${executionId} not found, skipping`);
+      return;
     }
 
     signale.info(`[WORKFLOW] Execution ${executionId} status: ${initialExecution.status}`);
@@ -131,8 +132,16 @@ export class WorkflowExecutionService {
 
     const step = initialExecution.workflow.steps.find(s => s.id === stepId);
     if (!step) {
+      // Plunk Lite: a job queued, before delays ended through their own job, for the step after a
+      // DELAY that was deleted while the run waited: end the delay as it now stands
+      const waitingOn = initialExecution.workflow.steps.find(s => s.id === initialExecution.currentStepId);
+      if (initialExecution.status === WorkflowExecutionStatus.WAITING && waitingOn?.type === 'DELAY') {
+        signale.warn(`[WORKFLOW] Step ${stepId} after delay ${waitingOn.id} was deleted; ending the delay as it now stands`);
+        return this.processDelayEnd(executionId, waitingOn.id);
+      }
       signale.error(`[WORKFLOW] Step ${stepId} not found in workflow ${initialExecution.workflow.id}`);
-      throw new HttpException(404, 'Step not found in workflow');
+      await this.failDeletedStep(executionId);
+      return;
     }
 
     signale.info(`[WORKFLOW] Found step: ${step.name} (${step.type})`);
@@ -418,7 +427,8 @@ export class WorkflowExecutionService {
   }
 
   /**
-   * End a DELAY step that had no step after it when the delay started
+   * End a DELAY step: move on to the step connected after it now -- one connected, removed or
+   * replaced while the contact waited included -- or complete the run if there is none
    * Called by BullMQ worker when the delay-end job executes
    */
   public static async processDelayEnd(executionId: string, stepId: string): Promise<void> {
@@ -429,19 +439,29 @@ export class WorkflowExecutionService {
       return;
     }
 
+    // Plunk Lite: the delay itself was deleted while the run waited on it (its current step became
+    // null): the rest of the route went with it, so the run fails rather than completing quietly
+    if (execution.currentStepId === null) {
+      await this.failDeletedStep(executionId);
+      return;
+    }
+
     // A step may have been connected after the delay while the contact was waiting
     const firstTransition = await prisma.workflowTransition.findFirst({
       where: {fromStepId: stepId},
       orderBy: {priority: 'asc'},
     });
 
+    // Plunk Lite: the run is claimed only while it still waits on this very delay, so a repeated
+    // copy of this job, or one for a delay the run has since left, does nothing
+    const waitingHere = {id: executionId, status: WorkflowExecutionStatus.WAITING, currentStepId: stepId};
+
     if (firstTransition) {
-      if (
-        await this.updateUnlessStopped(executionId, {
-          status: WorkflowExecutionStatus.RUNNING,
-          currentStepId: firstTransition.toStepId,
-        })
-      ) {
+      const {count} = await prisma.workflowExecution.updateMany({
+        where: waitingHere,
+        data: {status: WorkflowExecutionStatus.RUNNING, currentStepId: firstTransition.toStepId},
+      });
+      if (count > 0) {
         await this.processStepExecution(executionId, firstTransition.toStepId);
       }
       return;
@@ -449,7 +469,7 @@ export class WorkflowExecutionService {
 
     // The delay was the last step, so the workflow is done (guarded on WAITING so a cancel that lands first wins)
     await prisma.workflowExecution.updateMany({
-      where: {id: executionId, status: WorkflowExecutionStatus.WAITING},
+      where: waitingHere,
       data: {
         status: WorkflowExecutionStatus.COMPLETED,
         completedAt: new Date(),
@@ -756,23 +776,10 @@ export class WorkflowExecutionService {
     // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
     await this.updateUnlessStopped(_execution.id, {status: WorkflowExecutionStatus.WAITING});
 
-    // Find next steps to queue
-    const transitions = await prisma.workflowTransition.findMany({
-      where: {fromStepId: _step.id},
-      include: {toStep: true},
-      orderBy: {priority: 'asc'},
-    });
-
-    if (transitions.length > 0) {
-      const firstTransition = transitions[0];
-      if (firstTransition?.toStep) {
-        const nextStep = firstTransition.toStep;
-        await QueueService.queueWorkflowStep(_execution.id, nextStep.id, Math.max(0, delayMs));
-      }
-    } else {
-      // Nothing follows the delay: still schedule its end, or the execution would never leave WAITING
-      await QueueService.queueWorkflowDelayEnd(_execution.id, _step.id, stepExecution.id, Math.max(0, delayMs));
-    }
+    // Plunk Lite: the delay always ends through its own job, which follows the step connected after
+    // it when it runs out. Queuing the step connected now failed the run if that step was deleted
+    // meanwhile, and skipped one inserted after the delay.
+    await QueueService.queueWorkflowDelayEnd(_execution.id, _step.id, stepExecution.id, Math.max(0, delayMs));
 
     return {
       delayAmount: amount,
@@ -1460,6 +1467,32 @@ export class WorkflowExecutionService {
     // Process the next step
     // All steps are processed immediately - DELAY and WAIT_FOR_EVENT will pause the workflow internally
     await this.processStepExecution(execution.id, nextStep.id);
+  }
+
+  /**
+   * Plunk Lite: fail a run whose step was deleted under it, and tell the project, instead of throwing
+   * on every retry of the job or completing the run without the rest of its route
+   */
+  private static async failDeletedStep(executionId: string): Promise<void> {
+    const {count} = await prisma.workflowExecution.updateMany({
+      where: {id: executionId, status: {notIn: STOPPED_STATUSES}},
+      data: {status: WorkflowExecutionStatus.FAILED, completedAt: new Date(), exitReason: 'Step deleted'},
+    });
+    if (count === 0) {
+      return;
+    }
+    const run = await prisma.workflowExecution.findUnique({
+      where: {id: executionId},
+      select: {workflowId: true, workflow: {select: {name: true, projectId: true}}, contact: {select: {email: true}}},
+    });
+    if (run) {
+      await FailureAlertService.record(run.workflow.projectId, {
+        sourceKey: `workflow:${run.workflowId}`,
+        label: run.workflow.name,
+        error: 'A step was deleted while a contact was on its way to it',
+        contactEmail: run.contact.email,
+      });
+    }
   }
 
   /**

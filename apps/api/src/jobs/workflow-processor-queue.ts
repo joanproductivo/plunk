@@ -25,10 +25,10 @@ export function createWorkflowWorker() {
 
         await WorkflowExecutionService.processTimeout(executionId, stepId, stepExecutionId);
       } else if (type === 'delay-end') {
-        // Complete an execution whose DELAY step was the last step
+        // End a DELAY: move on to the step after it, or complete the execution
         await WorkflowExecutionService.processDelayEnd(executionId, stepId);
       } else {
-        // Handle regular step execution
+        // A step queued for after a delay, by jobs from before delays ended through delay-end
         await WorkflowExecutionService.processStepExecution(executionId, stepId);
       }
     },

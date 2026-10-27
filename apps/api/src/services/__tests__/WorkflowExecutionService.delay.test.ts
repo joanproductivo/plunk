@@ -7,7 +7,6 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
-    queueWorkflowStep: vi.fn(async () => ({id: 'mock-job-id'})),
     queueWorkflowDelayEnd: vi.fn(async () => ({id: 'mock-delay-end-job-id'})),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
@@ -79,7 +78,6 @@ describe('WorkflowExecutionService - a delay with no step after it', () => {
       expect.any(String),
       60 * 60 * 1000,
     );
-    expect(QueueService.queueWorkflowStep).not.toHaveBeenCalled();
   });
 
   it('completes the run when the delay ends', async () => {
@@ -129,3 +127,123 @@ describe('WorkflowExecutionService - a delay with no step after it', () => {
     await expect(run.endDelay()).resolves.toBeUndefined();
   });
 });
+
+/** TRIGGER → DELAY → … → SEND_EMAIL, with the given steps between the delay and the email. */
+async function createRoute(between: number) {
+  const workflow = await factories.createWorkflow({projectId});
+  const trigger = await prisma.workflowStep.findFirstOrThrow({
+    where: {workflowId: workflow.id, type: WorkflowStepType.TRIGGER},
+  });
+  const delays = [];
+  let from = trigger.id;
+  for (let i = 0; i <= between; i++) {
+    const delay = await factories.createWorkflowStep({workflowId: workflow.id, type: DELAY.type, config: DELAY.config});
+    await prisma.workflowTransition.create({data: {fromStepId: from, toStepId: delay.id}});
+    delays.push(delay.id);
+    from = delay.id;
+  }
+  const template = await factories.createTemplate({projectId});
+  const send = await factories.createWorkflowStep({
+    workflowId: workflow.id,
+    type: WorkflowStepType.SEND_EMAIL,
+    templateId: template.id,
+  });
+  await prisma.workflowTransition.create({data: {fromStepId: from, toStepId: send.id}});
+
+  const execution = await prisma.workflowExecution.create({
+    data: {workflowId: workflow.id, contactId, status: WorkflowExecutionStatus.RUNNING, currentStepId: trigger.id},
+  });
+  await WorkflowExecutionService.processStepExecution(execution.id, trigger.id);
+
+  return {
+    executionId: execution.id,
+    delays,
+    sendStepId: send.id,
+    endDelay: (index = 0) => WorkflowExecutionService.processDelayEnd(execution.id, delays[index]!),
+  };
+}
+
+/**
+ * Plunk Lite: every delay ends through its own job, which follows the step connected after it when
+ * the delay runs out, and claims the run only while it still waits on that very delay.
+ */
+describe('WorkflowExecutionService - a delay with a step after it (Plunk Lite)', () => {
+  beforeEach(async () => {
+    const {project} = await factories.createUserWithProject();
+    projectId = project.id;
+    contactId = (await factories.createContact({projectId, subscribed: true})).id;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const status = async (executionId: string) =>
+    (await prisma.workflowExecution.findUniqueOrThrow({where: {id: executionId}})).status;
+  const emails = (executionId: string) => prisma.email.count({where: {workflowExecutionId: executionId}});
+
+  it('schedules the end of the delay, and sends the email when it runs out', async () => {
+    const route = await createRoute(0);
+    expect(QueueService.queueWorkflowDelayEnd).toHaveBeenCalledTimes(1);
+
+    await route.endDelay();
+
+    expect(await emails(route.executionId)).toBe(1);
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+
+  it('completes the run when the step after the delay was deleted while it waited', async () => {
+    const route = await createRoute(0);
+    await prisma.workflowStep.delete({where: {id: route.sendStepId}});
+
+    await route.endDelay();
+
+    expect(await emails(route.executionId)).toBe(0);
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+
+  it('fails the run, and says so, when the delay itself was deleted while it waited', async () => {
+    const route = await createRoute(0);
+    await prisma.workflowStep.delete({where: {id: route.delays[0]!}});
+
+    await route.endDelay();
+
+    const run = await prisma.workflowExecution.findUniqueOrThrow({where: {id: route.executionId}});
+    expect(run).toMatchObject({status: WorkflowExecutionStatus.FAILED, exitReason: 'Step deleted'});
+    expect(await emails(route.executionId)).toBe(0);
+  });
+
+  it('sends once when the delay ends twice', async () => {
+    const route = await createRoute(0);
+
+    await Promise.all([route.endDelay(), route.endDelay()]);
+
+    expect(await emails(route.executionId)).toBe(1);
+  });
+
+  it('waits out a second delay before the email, and ignores a late copy of the first', async () => {
+    const route = await createRoute(1);
+
+    await route.endDelay(0);
+    expect(await emails(route.executionId)).toBe(0);
+    expect(QueueService.queueWorkflowDelayEnd).toHaveBeenCalledTimes(2);
+
+    // A late copy of the first delay's job while the run waits on the second
+    await route.endDelay(0);
+    expect(await emails(route.executionId)).toBe(0);
+
+    await route.endDelay(1);
+    expect(await emails(route.executionId)).toBe(1);
+  });
+
+  it('ends the delay when an old job for the deleted step after it runs', async () => {
+    const route = await createRoute(0);
+    await prisma.workflowStep.delete({where: {id: route.sendStepId}});
+
+    // A process-step job queued before delays ended through delay-end
+    await WorkflowExecutionService.processStepExecution(route.executionId, route.sendStepId);
+
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+});
+
