@@ -869,23 +869,23 @@ export class QueueService {
   /**
    * Cancel all pending jobs for a specific project
    * This should be called when a project is disabled
+   *
+   * Plunk Lite: returns the scheduled campaigns it cancelled, for a reactivation to return them to
+   * the drafts.
    */
-  public static async cancelAllProjectJobs(projectId: string): Promise<void> {
+  public static async cancelAllProjectJobs(projectId: string): Promise<string[]> {
     signale.info(`[QUEUE] Cancelling all pending jobs for project ${projectId}`);
 
     // Cancel all scheduled campaigns for this project. A disable is final for what was planned:
     // re-enabling the project must not send them, so the campaign itself is cancelled, not only its job
-    const scheduledCampaigns = await prisma.campaign.findMany({
+    // Only the ones this cancels, and no campaign cancelled before
+    const scheduledCampaigns = await prisma.campaign.updateManyAndReturn({
       where: {projectId, status: CampaignStatus.SCHEDULED},
+      data: {status: CampaignStatus.CANCELLED},
       select: {id: true},
     });
 
     if (scheduledCampaigns.length > 0) {
-      await prisma.campaign.updateMany({
-        where: {id: {in: scheduledCampaigns.map(c => c.id)}, status: CampaignStatus.SCHEDULED},
-        data: {status: CampaignStatus.CANCELLED},
-      });
-
       for (const campaign of scheduledCampaigns) {
         await this.cancelScheduledCampaign(campaign.id);
       }
@@ -974,6 +974,7 @@ export class QueueService {
     }
 
     signale.info(`[QUEUE] Finished cancelling jobs for project ${projectId}`);
+    return scheduledCampaigns.map(campaign => campaign.id);
   }
 
   /**

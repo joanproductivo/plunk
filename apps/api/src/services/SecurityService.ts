@@ -651,8 +651,10 @@ export class SecurityService {
 
     // Cancel all pending jobs for this project
     try {
-      await QueueService.cancelAllProjectJobs(projectId);
+      const cancelledCampaigns = await QueueService.cancelAllProjectJobs(projectId);
       signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
+      // Plunk Lite: a reactivation drafts again the scheduled campaigns this cancelled, and no other
+      await ReputationPolicy.noteDisableCancelled(projectId, cancelledCampaigns);
     } catch (error) {
       signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
     }

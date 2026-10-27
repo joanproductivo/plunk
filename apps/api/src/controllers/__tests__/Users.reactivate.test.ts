@@ -70,10 +70,13 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
     return prisma.project.findUniqueOrThrow({where: {id: projectId}});
   }
 
-  it('reactivates it, drops it from the caches and returns the cancelled scheduled campaigns to the drafts', async () => {
+  it('reactivates it, drops it from the caches and returns the scheduled campaigns the disable cancelled to the drafts', async () => {
     const contact = await factories.createContact({projectId});
     const scheduled = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
     const halfSent = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+    // Cancelled by hand before the disable
+    const byHand = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+    await ReputationPolicy.noteDisableCancelled(projectId, [scheduled.id, halfSent.id]);
     await prisma.email.create({
       data: {
         projectId,
@@ -103,12 +106,25 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
     expect(await redis.ttl(graceKey())).toBeGreaterThan(7 * 86400 - 60);
     expect((await prisma.campaign.findUniqueOrThrow({where: {id: scheduled.id}})).status).toBe(CampaignStatus.DRAFT);
     expect((await prisma.campaign.findUniqueOrThrow({where: {id: halfSent.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: byHand.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect(await redis.exists(`plunk-lite:disable-cancelled:${projectId}`)).toBe(0);
 
     const failures = await prisma.plunkLiteFailure.findMany({where: {projectId}});
     const disabled = failures.find(failure => failure.sourceKey === 'project')!;
     expect(disabled.reviewedAt).toEqual(disabled.lastAt);
     expect(failures.find(failure => failure.sourceKey === 'project:reactivated')?.lastError).toContain(
       `Reactivated by ${userEmail}. For 7 days only the emails sent from now on count`,
+    );
+  });
+
+  it('returns no campaign to the drafts when it does not know which ones the disable cancelled', async () => {
+    const cancelled = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+
+    const {json} = await reactivate(userId, projectId);
+
+    expect(json).toEqual({draftedCampaigns: 0});
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: cancelled.id}})).status).toBe(
+      CampaignStatus.CANCELLED,
     );
   });
 

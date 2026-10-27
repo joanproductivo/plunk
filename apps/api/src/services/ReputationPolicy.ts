@@ -71,6 +71,11 @@ interface Grace {
  */
 const REACTIVATED_KEY = (projectId: string) => `plunk-lite:reactivated:${projectId}`;
 
+/** The scheduled campaigns a disable for the reputation cancelled, which a reactivation drafts again */
+const DISABLE_CANCELLED_KEY = (projectId: string) => `plunk-lite:disable-cancelled:${projectId}`;
+// Longer than a project is likely to stay disabled; past it, they stay cancelled
+const DISABLE_CANCELLED_SECONDS = 30 * 86400;
+
 /**
  * Past these, in the last 7 days, the project is disabled (with AUTO_PROJECT_DISABLE). The minimum of
  * emails is for bounces only: a handful of complaints is already a warning from the mailbox
@@ -166,12 +171,35 @@ export class ReputationPolicy {
   }
 
   /**
+   * Notes the scheduled campaigns a disable for the reputation cancelled (QueueService.
+   * cancelAllProjectJobs), for its reactivation. Never throws: if they cannot be noted, they stay
+   * cancelled.
+   */
+  public static async noteDisableCancelled(projectId: string, campaignIds: string[]): Promise<void> {
+    if (campaignIds.length === 0) {
+      return;
+    }
+    try {
+      await redis
+        .multi()
+        .sadd(DISABLE_CANCELLED_KEY(projectId), ...campaignIds)
+        .expire(DISABLE_CANCELLED_KEY(projectId), DISABLE_CANCELLED_SECONDS)
+        .exec();
+    } catch (error) {
+      signale.warn(
+        `[SECURITY] Could not note the ${campaignIds.length} scheduled campaigns the disable of project ${projectId} cancelled:`,
+        error,
+      );
+    }
+  }
+
+  /**
    * Reactivates a project disabled for its sending reputation, for an admin of it (`by`). Other
    * reasons still take a database change, on purpose. The grace period is stored first: if it
    * cannot be, the project stays disabled rather than being disabled again by its next bounce.
    *
-   * The scheduled campaigns the disable cancelled, which never created an email, go back to drafts
-   * to be scheduled again. Returns how many.
+   * The scheduled campaigns the disable cancelled (noteDisableCancelled) that never created an
+   * email go back to drafts to be scheduled again; none that was cancelled otherwise. Returns how many.
    */
   public static async reactivate(projectId: string, by: string): Promise<{draftedCampaigns: number}> {
     const project = await prisma.project.findUnique({
@@ -198,7 +226,12 @@ export class ReputationPolicy {
 
     let draftedCampaigns = 0;
     const cancelled = await prisma.campaign.findMany({
-      where: {projectId, status: CampaignStatus.CANCELLED, emails: {none: {}}},
+      where: {
+        id: {in: await this.disableCancelled(projectId)},
+        projectId,
+        status: CampaignStatus.CANCELLED,
+        emails: {none: {}},
+      },
       select: {id: true},
     });
     for (const {id} of cancelled) {
@@ -209,6 +242,9 @@ export class ReputationPolicy {
         signale.warn(`[SECURITY] Could not return campaign ${id} of project ${projectId} to the drafts:`, error);
       }
     }
+    await redis.del(DISABLE_CANCELLED_KEY(projectId)).catch((error: unknown) => {
+      signale.warn(`[SECURITY] Could not forget the campaigns the disable of project ${projectId} cancelled:`, error);
+    });
 
     signale.info(`[SECURITY] Project ${projectId} reactivated by ${by}`);
     await FailureAlertService.resolve('project', projectId);
@@ -218,6 +254,16 @@ export class ReputationPolicy {
       error: `Reactivated by ${by}. For 7 days only the emails sent from now on count towards disabling it again.${draftedCampaigns > 0 ? ` ${draftedCampaigns} scheduled ${draftedCampaigns === 1 ? 'campaign was' : 'campaigns were'} cancelled when it was disabled: ${draftedCampaigns === 1 ? 'it is a draft' : 'they are drafts'} again, to schedule again.` : ''}`,
     });
     return {draftedCampaigns};
+  }
+
+  /** The campaigns noted by noteDisableCancelled; none when Redis cannot say */
+  private static async disableCancelled(projectId: string): Promise<string[]> {
+    try {
+      return await redis.smembers(DISABLE_CANCELLED_KEY(projectId));
+    } catch (error) {
+      signale.warn(`[SECURITY] Could not read the campaigns the disable of project ${projectId} cancelled:`, error);
+      return [];
+    }
   }
 
   /**
