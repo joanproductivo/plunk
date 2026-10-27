@@ -19,11 +19,12 @@ import {utcTimestamp} from '../utils/database.js';
  */
 
 /**
- * The emails a rate counts, of `emails` as `e`: the ones given to SES, as only those count for
- * AWS, and not to its mailbox simulator, which AWS leaves out of its own rates. The one definition,
+ * The emails a rate counts, of `emails` as `e`: the ones SES took, as only those count for AWS --
+ * sent, or with the message id SES gave them, which a row the send then failed to mark still has --
+ * and not to its mailbox simulator, which AWS leaves out of its own rates. The one definition,
  * shared by the rates and the counts of deleted emails.
  */
-export const RATED_EMAIL = Prisma.sql`e."simulated" = false AND e."sentAt" IS NOT NULL`;
+export const RATED_EMAIL = Prisma.sql`e."simulated" = false AND (e."sentAt" IS NOT NULL OR e."messageId" IS NOT NULL)`;
 
 /** How many of them, how many bounced and how many were reported as spam: three int columns */
 export const RATE_COUNTS = Prisma.sql`count(*)::int,
@@ -50,7 +51,7 @@ export const DeletedEmailCounts = {
         DELETE FROM "emails"
         WHERE "projectId" = ${projectId}
           ${contactIds ? Prisma.sql`AND "contactId" = ANY(${contactIds}::text[])` : Prisma.empty}
-        RETURNING "projectId", "createdAt", "sentAt", "simulated", "bouncedAt", "complainedAt"
+        RETURNING "projectId", "createdAt", "sentAt", "messageId", "simulated", "bouncedAt", "complainedAt"
       )
       INSERT INTO "plunk_lite_deleted_email_counts" AS d ("projectId", "hour", "sent", "bounced", "complained")
       SELECT e."projectId", date_trunc('minute', e."createdAt"), ${RATE_COUNTS}

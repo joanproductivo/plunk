@@ -89,6 +89,33 @@ describe('DeletedEmailCounts', () => {
     expect(await projectRates()).toEqual(before);
   });
 
+  it('counts an email SES took that the send failed to mark as sent, before and after it is deleted', async () => {
+    const contact = await factories.createContact({projectId});
+    await email(contact.id);
+    // SES took it and gave it its message id, then the send failed before stamping sentAt
+    await prisma.email.create({
+      data: {
+        projectId,
+        contactId: contact.id,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hello@plunk.test',
+        sourceType: 'TRANSACTIONAL',
+        status: EmailStatus.FAILED,
+        messageId: `ses-${contact.id}`,
+        bouncedAt: new Date(),
+      },
+    });
+    // Neither sent nor taken by SES: not counted
+    await email(contact.id, {unsent: true});
+
+    expect(await ReputationPolicy.rates({projectId})).toMatchObject({total: 2, bounces: 1});
+
+    await ContactService.delete(projectId, contact.id);
+
+    expect(await ReputationPolicy.rates({projectId})).toMatchObject({total: 2, bounces: 1});
+  });
+
   it('adds the deletes of the same minute together, per project', async () => {
     vi.useFakeTimers({toFake: ['Date']});
     vi.setSystemTime(new Date('2026-10-20T10:40:05Z'));
