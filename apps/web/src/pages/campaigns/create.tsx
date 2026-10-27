@@ -186,17 +186,27 @@ export default function CreateCampaignPage() {
                 A one-off email sent to a list of contacts.
               </p>
             </div>
+            {/* Wide screens: the actions go up here; below that they stay under the form */}
+            <div className="hidden xl:flex gap-3">
+              <Button asChild variant="outline">
+                <Link href="/campaigns">Cancel</Link>
+              </Button>
+              <Button type="submit" form="create-campaign" disabled={saving}>
+                {saving ? 'Creating…' : 'Create Campaign'}
+              </Button>
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit}>
+          <form id="create-campaign" onSubmit={handleSubmit}>
             <div className="space-y-6">
               {/* Wide screens: the editor on the left, the settings on the right. Below that, settings first */}
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-                <div className="space-y-6 xl:col-start-2 xl:row-start-1">
+                {/* Wide screens: basic information, audience, email settings and the campaign type last */}
+                <div className="flex flex-col gap-6 xl:col-start-2 xl:row-start-1">
                   {/* Row 1: Basic Info + Campaign Type */}
-                  <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-1">
+                  <div className="grid gap-6 md:grid-cols-2 xl:contents">
                     {/* Basic Information */}
-                    <Card>
+                    <Card className="xl:order-1">
                       <CardHeader>
                         <CardTitle>Basic information</CardTitle>
                       </CardHeader>
@@ -227,7 +237,7 @@ export default function CreateCampaignPage() {
                     </Card>
 
                     {/* Campaign Type */}
-                    <Card>
+                    <Card className="xl:order-4">
                       <CardHeader>
                         <CardTitle>Campaign type</CardTitle>
                         <CardDescription>Transactional campaigns skip the subscription check and the footer.</CardDescription>
@@ -280,7 +290,7 @@ export default function CreateCampaignPage() {
                   </div>
 
                   {/* Email Settings */}
-                  <Card>
+                  <Card className="xl:order-3">
                     <CardHeader>
                       <CardTitle>Email settings</CardTitle>
                     </CardHeader>
@@ -310,9 +320,8 @@ export default function CreateCampaignPage() {
                     </CardContent>
                   </Card>
 
-
                   {/* Audience */}
-                  <Card>
+                  <Card className="xl:order-2">
                     <CardHeader>
                       <CardTitle>Audience</CardTitle>
                     </CardHeader>
@@ -403,7 +412,7 @@ export default function CreateCampaignPage() {
               </div>
 
               {/* Actions */}
-              <div className="flex justify-end gap-3">
+              <div className="flex justify-end gap-3 xl:hidden">
                 <Button asChild variant="outline">
                   <Link href="/campaigns">Cancel</Link>
                 </Button>
