@@ -366,11 +366,16 @@ export function EmailEditor({
         iframeDoc.write(fullHtml);
         iframeDoc.close();
 
-        // Links open in a new tab. Followed in the frame, they would take it to another origin,
+        // The frame opens nothing itself: the dashboard opens its web and mail links in a new tab
+        // with no way back to this page. Followed in the frame, a link would take it to another origin,
         // and the preview could no longer write to it
-        const base = iframeDoc.createElement('base');
-        base.target = '_blank';
-        iframeDoc.head?.prepend(base);
+        const openLink = (event: MouseEvent) => {
+          const link = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+          if (!link) return;
+          event.preventDefault();
+          if (/^(https?|mailto):/i.test(link.href)) window.open(link.href, '_blank', 'noopener,noreferrer');
+        };
+        iframeDoc.addEventListener('click', openLink);
 
         // Auto-adjust iframe height to content. Reset to a small value first so
         // body content that uses % / vh heights doesn't lock the iframe to its
@@ -396,6 +401,7 @@ export function EmailEditor({
         return () => {
           timeouts.forEach(window.clearTimeout);
           iframe.contentWindow?.removeEventListener('load', adjustHeight);
+          iframeDoc.removeEventListener('click', openLink);
         };
       }
     }
@@ -652,11 +658,11 @@ export function EmailEditor({
                     )}
                   </div>
                 )}
-                {/* No scripts: the body is the author's HTML, written into a document of the dashboard's origin.
-                    Links still open, in a new tab outside the sandbox */}
+                {/* No scripts and no windows: the body is the author's HTML, written into a document of the
+                    dashboard's origin. Its links are opened by the dashboard (see openLink) */}
                 <iframe
                   ref={previewIframeRef}
-                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                  sandbox="allow-same-origin"
                   className="w-full border-0"
                   style={{
                     minHeight: '400px',

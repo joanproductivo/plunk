@@ -90,13 +90,23 @@ describe('Preview tab', () => {
     expect(changes).not.toHaveBeenCalled();
   });
 
-  it('runs no scripts from the email, and still opens its links', async () => {
+  it('runs no scripts and opens no windows from the email', async () => {
     await render('Hi');
     await click('Preview');
-    const sandbox = iframe()?.getAttribute('sandbox')?.split(' ') ?? [];
-    expect(sandbox).toContain('allow-same-origin');
-    expect(sandbox).toContain('allow-popups');
-    expect(sandbox).not.toContain('allow-scripts');
+    expect(iframe()?.getAttribute('sandbox')).toBe('allow-same-origin');
+  });
+
+  it('opens web links from the preview in a new tab, with no way back', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    await render('Hi', '<p><a href="https://example.com/offer">Offer</a></p>');
+    await click('Preview');
+    // Let the effect write the frame
+    await act(async () => undefined);
+    const link = iframe()?.contentDocument?.querySelector('a');
+    expect(link).toBeTruthy();
+    await act(async () => link?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+    expect(open).toHaveBeenCalledWith('https://example.com/offer', '_blank', 'noopener,noreferrer');
+    open.mockRestore();
   });
 
   it('renders the first contact by default', async () => {
