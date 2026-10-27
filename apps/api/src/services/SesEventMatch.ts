@@ -244,8 +244,8 @@ export function keepsSendStatus(email: {status: EmailStatus; sentAt: Date | null
  * - Still PENDING or SENDING: its send is being recorded, so the event waits for it within the
  *   window. After it, the event is applied to the row without touching its status (and its
  *   bounce or complaint suppresses the address), which is left to the send path.
- * - Otherwise its messageId is stored, and only that: whether it counts as sent is the send
- *   path's to say.
+ * - Otherwise its messageId is stored, and only that. That alone counts it in the rates
+ *   (RATED_EMAIL), as SES took it; its status is the send path's to say.
  *
  * Without a row, an email that had tags is gone (a deleted contact) or never had one (a test
  * send, an alert), and waiting will not change that. An untagged one, sent before tags existed,
