@@ -23,7 +23,7 @@ export async function processPlunkLiteCheck(job: Job<PlunkLiteChecksJobData>): P
     case 'redis-memory':
       return checkRedisMemory();
     case 'workflow-recovery':
-      await WorkflowRecoveryService.failInterrupted();
+      await WorkflowRecoveryService.sweep();
       return;
     default:
       throw new Error(`Unknown Plunk Lite check: ${job.name}`);

@@ -85,6 +85,9 @@ export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   },
 });
 
+/** The ID of the job that ends a delay, or a wait's timeout: one per step execution */
+const workflowJobId = (type: 'delay-end' | 'timeout', stepExecutionId: string) => `workflow-${type}-${stepExecutionId}`;
+
 // Plunk Lite: 8 attempts over about 4 minutes, like emails, so a delay's end or a wait's timeout
 // that comes due while the database restarts is not lost. Both claim the run before moving it, so a
 // retry never moves it twice.
@@ -433,7 +436,7 @@ export class QueueService {
       {executionId, stepId, stepExecutionId, type: 'delay-end'},
       {
         delay: delayMs,
-        jobId: `workflow-delay-end-${stepExecutionId}`,
+        jobId: workflowJobId('delay-end', stepExecutionId),
       },
     );
   }
@@ -452,16 +455,36 @@ export class QueueService {
       {executionId, stepId, stepExecutionId, type: 'timeout'},
       {
         delay: timeoutMs,
-        jobId: `workflow-timeout-${stepExecutionId}`,
+        jobId: workflowJobId('timeout', stepExecutionId),
       },
     );
+  }
+
+  /**
+   * Plunk Lite: make sure the job that ends a delay or a wait's timeout is queued, to run now: for a
+   * run the recovery sweep finds still waiting well after it was due. A job that is still to run is
+   * left as it is; one that finished or failed is replaced. Safe to repeat: the job claims the run
+   * before moving it. Returns whether a job was queued.
+   */
+  public static async ensureWorkflowWaitEnd(
+    type: 'delay-end' | 'timeout',
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const jobId = workflowJobId(type, stepExecutionId);
+    if (await this.clearFinishedJob(workflowQueue, jobId)) {
+      return false;
+    }
+    await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
+    return true;
   }
 
   /**
    * Cancel a queued timeout job
    */
   public static async cancelWorkflowTimeout(stepExecutionId: string): Promise<void> {
-    const jobId = `workflow-timeout-${stepExecutionId}`;
+    const jobId = workflowJobId('timeout', stepExecutionId);
     const job = await workflowQueue.getJob(jobId);
 
     if (job) {
@@ -534,13 +557,7 @@ export class QueueService {
     cancelledAt: Date,
   ): Promise<void> {
     const jobId = `campaign-cancel-cleanup-${campaignId}`;
-    const previous = await campaignCancelCleanupQueue.getJob(jobId);
-    const state = await previous?.getState();
-    if (previous && (state === 'completed' || state === 'failed')) {
-      // A concurrent cancel can have replaced it with a job that is now running, and
-      // removing that one fails as locked: the running job does the cleanup
-      await previous.remove().catch(() => undefined);
-    }
+    await this.clearFinishedJob(campaignCancelCleanupQueue, jobId);
 
     await campaignCancelCleanupQueue.add(
       'cleanup',
@@ -716,6 +733,25 @@ export class QueueService {
       {type: 'contact-subscription', ...data},
       {jobId: `contact-events-${crypto.randomUUID()}`},
     );
+  }
+
+  /**
+   * Remove the job with this ID if it has finished (or sits in no list), so adding one with the same
+   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns true if a job that is
+   * still to run, or running, holds the ID. A concurrent caller can have replaced it with a job that
+   * is now running, and removing that one fails as locked: the running job does the work.
+   */
+  private static async clearFinishedJob(queue: Queue, jobId: string): Promise<boolean> {
+    const previous = await queue.getJob(jobId);
+    if (!previous) {
+      return false;
+    }
+    const state = await previous.getState();
+    if (state === 'completed' || state === 'failed' || state === 'unknown') {
+      await previous.remove().catch(() => undefined);
+      return false;
+    }
+    return true;
   }
 
   /**
