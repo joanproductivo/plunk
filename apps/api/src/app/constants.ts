@@ -63,6 +63,11 @@ export const EMAIL_RATE_LIMIT_PER_SECOND = process.env.EMAIL_RATE_LIMIT_PER_SECO
   ? Number(process.env.EMAIL_RATE_LIMIT_PER_SECOND)
   : undefined;
 
+// How long the api and the worker get to finish in-flight requests and jobs when they are
+// stopped. Below pm2's `kill_timeout` (30s, docker-entrypoint-nginx.sh), so a shutdown that
+// hangs ends in the process's own exit with a log line rather than a silent SIGKILL.
+export const SHUTDOWN_TIMEOUT_MS = 25_000;
+
 // Email Worker Concurrency (optional override)
 // If not set, concurrency is derived from the effective rate limit so a higher
 // SES quota actually translates into higher throughput. Set this to pin a fixed

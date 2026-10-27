@@ -251,6 +251,31 @@ describe('EventService', () => {
       expect(executions).toHaveLength(1); // Still only 1
     });
 
+    it('does not start a workflow disabled while its cached listing still has it', async () => {
+      const contact = await factories.createContact({projectId});
+
+      const workflow = await factories.createWorkflow({
+        projectId,
+        enabled: true,
+        allowReentry: true,
+        triggerType: WorkflowTriggerType.EVENT,
+        triggerConfig: {eventName: 'cached.event'},
+      });
+
+      // Caches the enabled workflows for five minutes
+      await EventService.trackEvent(projectId, 'cached.event', contact.id);
+      // Disabled behind the cache's back, as a disable whose invalidation failed leaves it
+      await prisma.workflow.update({where: {id: workflow.id}, data: {enabled: false}});
+
+      await EventService.trackEvent(projectId, 'cached.event', contact.id);
+
+      const executions = await prisma.workflowExecution.findMany({
+        where: {workflowId: workflow.id, contactId: contact.id},
+      });
+
+      expect(executions).toHaveLength(1);
+    });
+
     it('should allow re-entry when enabled', async () => {
       const contact = await factories.createContact({projectId});
 

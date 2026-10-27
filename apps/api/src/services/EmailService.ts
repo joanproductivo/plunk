@@ -1,5 +1,5 @@
-import type {Contact, Email, Project} from '@plunk/db';
-import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
+import type {Contact, Email, Project, TemplateType} from '@plunk/db';
+import {EmailSourceType, EmailStatus, Prisma, TrackingMode} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
@@ -30,6 +30,8 @@ interface Attachment {
 }
 
 interface SendEmailParams {
+  /** A fixed id for the row (campaign emails): creating it a second time returns the first */
+  id?: string;
   projectId: string;
   contactId: string;
   subject: string;
@@ -48,12 +50,49 @@ interface SendEmailParams {
   isTransactional?: boolean; // Override source type to TRANSACTIONAL (e.g. for transactional campaigns)
 }
 
+/** A create that collided with an existing row's primary key */
+function isIdConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = error.meta?.target;
+  return Array.isArray(target) ? target.includes('id') : String(target).endsWith('_pkey');
+}
+
 /**
  * Email Service
  * Builds and queues outbound email. The send itself is jobs/email-processor.ts, and the SES
  * events that follow it are handled by controllers/Webhooks.ts.
  */
 export class EmailService {
+  /**
+   * Whether an email may only go to a subscribed contact.
+   *
+   * Decided when the email is queued and again by the send path just before it leaves: a
+   * contact can unsubscribe, bounce or complain in between, and a large campaign takes an hour
+   * to drain at 14/s.
+   *
+   * - Campaign and workflow emails are marketing. A transactional template makes their source
+   *   type TRANSACTIONAL, as does a transactional campaign.
+   * - A transactional send with a MARKETING template is still marketing.
+   * - A workflow email to a custom recipient goes to an address outside the contact list.
+   */
+  public static requiresSubscribedContact(params: {
+    sourceType: EmailSourceType;
+    templateType?: TemplateType | null;
+    hasRecipientOverride: boolean;
+  }): boolean {
+    if (params.hasRecipientOverride) {
+      return false;
+    }
+
+    if (params.sourceType !== EmailSourceType.TRANSACTIONAL) {
+      return true;
+    }
+
+    return params.templateType === 'MARKETING';
+  }
+
   /**
    * Send a transactional email via API
    */
@@ -67,7 +106,13 @@ export class EmailService {
       });
 
       // If using a marketing template, check subscription status
-      if (template?.type === 'MARKETING') {
+      if (
+        this.requiresSubscribedContact({
+          sourceType: EmailSourceType.TRANSACTIONAL,
+          templateType: template?.type,
+          hasRecipientOverride: false,
+        })
+      ) {
         const contact = await prisma.contact.findUnique({
           where: {id: params.contactId},
           select: {subscribed: true, email: true},
@@ -158,23 +203,41 @@ export class EmailService {
       signale.warn(`[BILLING_LIMIT] ${limitCheck.message}`);
     }
 
-    const email = await prisma.email.create({
-      data: {
-        projectId: params.projectId,
-        contactId: params.contactId,
-        subject: params.subject,
-        body: params.body,
-        from: params.from,
-        fromName: params.fromName,
-        replyTo: params.replyTo,
-        headers: params.headers ? toPrismaJson(params.headers) : undefined,
-        attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
-        sourceType,
-        templateId: params.templateId,
-        campaignId: params.campaignId,
-        status: EmailStatus.PENDING,
-      },
-    });
+    let email: Email;
+    try {
+      email = await prisma.email.create({
+        data: {
+          id: params.id,
+          projectId: params.projectId,
+          contactId: params.contactId,
+          subject: params.subject,
+          body: params.body,
+          from: params.from,
+          fromName: params.fromName,
+          replyTo: params.replyTo,
+          headers: params.headers ? toPrismaJson(params.headers) : undefined,
+          attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
+          sourceType,
+          templateId: params.templateId,
+          campaignId: params.campaignId,
+          status: EmailStatus.PENDING,
+        },
+      });
+    } catch (error) {
+      const existing =
+        params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
+      if (!existing) {
+        throw error;
+      }
+
+      // An earlier run of the same batch created this email. It is not created or counted
+      // again; if it was never sent, it is queued again, because that run may have died
+      // before queueing it (the job id is the email's, so a job that exists is not doubled).
+      if (existing.status === EmailStatus.PENDING) {
+        await this.queueEmail(existing.id, existing.sourceType);
+      }
+      return existing;
+    }
 
     // Increment usage counter in cache
     await BillingLimitService.incrementUsage(params.projectId, sourceType);
@@ -208,7 +271,7 @@ export class EmailService {
     // Check subscription status for marketing emails
     // Transactional emails should always be sent regardless of subscription status
     // Custom recipient emails also bypass subscription checks (they're not in the contact list)
-    if (sourceType !== EmailSourceType.TRANSACTIONAL && !params.recipientEmail) {
+    if (this.requiresSubscribedContact({sourceType, hasRecipientOverride: Boolean(params.recipientEmail)})) {
       const contact = await prisma.contact.findUnique({
         where: {id: params.contactId},
         select: {subscribed: true},

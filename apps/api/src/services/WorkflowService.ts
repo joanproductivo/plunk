@@ -11,6 +11,7 @@ import type {ListSort} from '../utils/listSort.js';
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
 export class WorkflowService {
@@ -1159,37 +1160,6 @@ export class WorkflowService {
       throw new HttpException(404, 'Contact not found');
     }
 
-    // Check re-entry rules
-    if (!workflow.allowReentry) {
-      // If re-entry is not allowed, check if contact has ANY execution (regardless of status)
-      const existingExecution = await prisma.workflowExecution.findFirst({
-        where: {
-          workflowId,
-          contactId,
-        },
-      });
-
-      if (existingExecution) {
-        throw new HttpException(
-          409,
-          `Workflow does not allow re-entry. Contact already has execution (${existingExecution.status})`,
-        );
-      }
-    } else {
-      // If re-entry is allowed, only check if there's a currently RUNNING execution
-      const runningExecution = await prisma.workflowExecution.findFirst({
-        where: {
-          workflowId,
-          contactId,
-          status: WorkflowExecutionStatus.RUNNING,
-        },
-      });
-
-      if (runningExecution) {
-        throw new HttpException(409, 'Workflow is already running for this contact');
-      }
-    }
-
     // Find the trigger step
     const triggerStep = workflow.steps.find(step => step.type === 'TRIGGER');
 
@@ -1197,16 +1167,18 @@ export class WorkflowService {
       throw new HttpException(400, 'Workflow has no trigger step');
     }
 
-    // Create workflow execution
-    const execution = await prisma.workflowExecution.create({
-      data: {
-        workflowId,
-        contactId,
-        status: WorkflowExecutionStatus.RUNNING,
-        currentStepId: triggerStep.id,
-        context: context ?? Prisma.JsonNull,
-      },
-    });
+    const entry = await WorkflowEntryService.enter(workflow, contactId, triggerStep.id, context ?? Prisma.JsonNull);
+
+    if (!entry.entered) {
+      throw new HttpException(
+        409,
+        entry.refusal.reason === 'already-entered'
+          ? `Workflow does not allow re-entry. Contact already has execution (${entry.refusal.status})`
+          : 'Workflow is already running for this contact',
+      );
+    }
+
+    const {execution} = entry;
 
     // Start executing the workflow asynchronously
     // Don't await - let it run in background

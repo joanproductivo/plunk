@@ -418,6 +418,10 @@ export class Webhooks {
       // suppressed but deliberately left out of the rate -- see the branch for why.
       let countsTowardBounceRate = false;
 
+      // Operator notification for a new suppression, sent last: it is not part of recording
+      // the suppression, so a failure to send it must never fail the event.
+      let notify: (() => Promise<void>) | undefined;
+
       // Base event data with email metadata
       const baseEventData = {
         subject: email.subject,
@@ -516,7 +520,8 @@ export class Webhooks {
 
             // Send notification about permanent bounce
             if (!isSimulated && !alreadyBounced) {
-              await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+              notify = () =>
+                NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
             }
           } else if (isTransientBounce) {
             // Soft bounce (e.g., out-of-office, mailbox full) - don't count toward bounce rate
@@ -552,7 +557,8 @@ export class Webhooks {
             };
 
             if (!isSimulated && !alreadyBounced) {
-              await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+              notify = () =>
+                NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
             }
           }
           break;
@@ -576,7 +582,7 @@ export class Webhooks {
 
           // Send notification about complaint
           if (!isSimulated && !alreadyComplained) {
-            await NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
+            notify = () => NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
           }
           break;
 
@@ -600,24 +606,16 @@ export class Webhooks {
         data: {...updateData, status: nextStatus(email.status, updateData.status as EmailStatus | undefined)},
       });
 
-      // The campaign counters the stats endpoint reads live on the campaign row, and this
-      // event has just moved one of them. They are not incremented from here: this handler
-      // runs once per recipient per event, so a write per event would serialize thousands of
-      // updates on a single row -- the same reason `sentCount` is not incremented in the send
-      // path either. Marking the campaign costs one Redis SADD, and the sweep recounts it.
-      if (email.campaignId) {
-        await CampaignService.markStatsDirty(email.campaignId);
-      }
-
-      // Track event (this will trigger workflows)
-      await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
-
       // Check security limits only when this event is a suppression the project has not been
       // charged for yet. Transient bounces never count. Neither does a redelivered
       // notification: the rates are computed by counting `bouncedAt`/`complainedAt` rows, so a
       // second copy of an old event leaves every number exactly where it was. Re-running
       // enforcement on one could only re-disable a project over history it has already been
       // judged against -- which is what happened to projects that were manually re-enabled.
+      //
+      // Runs before anything below, which may fail without failing the event. Up to the
+      // email update above, a failure answers 500 and SNS delivers the notification again;
+      // this check logs its own failures rather than throwing.
       const isNewSuppression =
         (countsTowardBounceRate && !alreadyBounced) || (eventType === 'Complaint' && !alreadyComplained);
       if (isNewSuppression && !isSimulated) {
@@ -629,12 +627,43 @@ export class Webhooks {
         );
       }
 
+      // The suppression is recorded. What follows is answered with 200 even when it fails:
+      // a redelivery would record the event again and start the workflows listening for it a
+      // second time -- one more email per retry for every workflow that allows re-entry --
+      // and add the open or click to the counters twice. Losing a workflow trigger is the
+      // lesser failure.
+      try {
+        // The campaign counters the stats endpoint reads live on the campaign row, and this
+        // event has just moved one of them. They are not incremented from here: this handler
+        // runs once per recipient per event, so a write per event would serialize thousands of
+        // updates on a single row -- the same reason `sentCount` is not incremented in the send
+        // path either. Marking the campaign costs one Redis SADD, and the sweep recounts it.
+        if (email.campaignId) {
+          await CampaignService.markStatsDirty(email.campaignId);
+        }
+
+        // Track event (this will trigger workflows)
+        await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
+      } catch (error) {
+        signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but tracking the event failed:`, error);
+      }
+
+      if (notify) {
+        try {
+          await notify();
+        } catch (error) {
+          signale.error(`[WEBHOOK] Failed to send the ${eventType} notification for email ${email.id}:`, error);
+        }
+      }
+
       signale.success(`[WEBHOOK] Processed ${eventType} event for email ${email.id}`);
       return res.status(200).json({success: true});
     } catch (error) {
       signale.error('[WEBHOOK] Error processing SNS webhook:', error);
-      // Always return 200 to prevent SNS from retrying
-      return res.status(200).json({success: true});
+      // 500 makes SNS deliver the notification again. Everything that reaches here failed
+      // before the suppression was fully recorded, and a redelivery is safe: the first-seen
+      // timestamps and the enforcement are gated on what the row already holds.
+      return res.status(500).json({success: false, message: 'Failed to process SNS notification'});
     }
   }
 

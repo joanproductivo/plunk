@@ -1,3 +1,5 @@
+import type {Server as HttpServer} from 'node:http';
+
 import {Server} from '@overnightjs/core';
 import cookies from 'cookie-parser';
 import cors from 'cors';
@@ -20,6 +22,7 @@ import {
   RATE_LIMIT_ENABLED,
   RATE_LIMIT_SEND_PER_SECOND,
   RATE_LIMIT_TRACK_PER_SECOND,
+  SHUTDOWN_TIMEOUT_MS,
   S3_ENABLED,
   SMTP_ENABLED,
   STRIPE_ENABLED,
@@ -423,8 +426,45 @@ process.on('uncaughtException', error => {
   // Don't exit the process - just log the error
 });
 
+let httpServer: HttpServer | undefined;
+let stopping = false;
+
+/**
+ * Stop taking requests and let the running ones finish: a request cut off between creating an
+ * email row and queueing its job would leave the row PENDING with nothing to send it. Work a
+ * request starts without awaiting it (a manual workflow start) is not waited for.
+ */
+function shutdown(signal: string) {
+  // A second signal must not fall through to Node's default handler, which exits at once
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+
+  signale.info(`[API] Received ${signal}, closing the HTTP server...`);
+
+  const deadline = setTimeout(() => {
+    signale.error(`[API] Requests did not finish within ${SHUTDOWN_TIMEOUT_MS / 1000}s, exiting`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+
+  if (!httpServer) {
+    process.exit(0);
+  }
+
+  // Stops accepting connections and waits for the requests already running
+  httpServer.close(() => {
+    signale.success('[API] HTTP server closed');
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
 void prisma.$connect().then(async () => {
-  server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
+  httpServer = server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
 
   // Feature matrix
   const features = [

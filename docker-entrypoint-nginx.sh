@@ -88,6 +88,8 @@ module.exports = {
       exec_mode: 'fork',
       autorestart: true,
       watch: false,
+      // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
+      kill_timeout: 30000,
       env: {
         NODE_ENV: 'production',
         PORT: 8080,
@@ -105,6 +107,8 @@ module.exports = {
       exec_mode: 'fork',
       autorestart: true,
       watch: false,
+      // Room for in-flight jobs and requests to finish on stop (pm2's default is 1.6s)
+      kill_timeout: 30000,
       env: {
         NODE_ENV: 'production',
         API_URI: '${API_URI}',

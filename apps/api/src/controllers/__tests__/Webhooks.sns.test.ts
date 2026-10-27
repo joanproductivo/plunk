@@ -3,9 +3,11 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
+import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {CampaignService} from '../../services/CampaignService';
 import {ContactService} from '../../services/ContactService';
+import {EventService} from '../../services/EventService';
 import {Keys} from '../../services/keys';
 import {NtfyService} from '../../services/NtfyService';
 import {SecurityService} from '../../services/SecurityService';
@@ -675,6 +677,72 @@ describe('Webhooks - SES event notifications', () => {
       expect(updated?.openedAt).toBeNull();
       expect(updated?.opens).toBe(0);
       expect(await prisma.event.count({where: {emailId: email.id, name: 'email.open'}})).toBe(0);
+    });
+  });
+
+  /**
+   * What SNS is told when processing fails. SNS only delivers again on a 5xx, so a 200 after a
+   * failure loses the event for good -- for a bounce or complaint, the suppression the
+   * reputation depends on. A 5xx after the suppression is recorded is wrong the other way: the
+   * redelivery records the event again and starts the workflows listening for it again.
+   */
+  describe('failures', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('asks SNS to deliver again when the suppression could not be recorded', async () => {
+      await sentEmail('ses-fail-before');
+      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
+
+      const response = await post(notification('Bounce', 'ses-fail-before', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(response.status).toBe(500);
+    });
+
+    it('records the suppression and answers 200 when tracking the event fails', async () => {
+      const email = await sentEmail('ses-fail-track');
+      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      vi.spyOn(EventService, 'trackEvent').mockRejectedValue(new Error('workflow blew up'));
+
+      const response = await post(notification('Bounce', 'ses-fail-track', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(response.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).not.toBeNull();
+      const contact = await prisma.contact.findUnique({where: {id: contactId}});
+      expect(contact?.subscribed).toBe(false);
+      // Enforcement runs before the event is tracked, so a failing workflow cannot skip it
+      expect(enforce).toHaveBeenCalledWith(projectId, 'bounce');
+    });
+
+    it('answers 200 when the operator notification fails', async () => {
+      const email = await sentEmail('ses-fail-notify');
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      vi.spyOn(NtfyService, 'notifyEmailComplaint').mockRejectedValue(new Error('redis down'));
+
+      const response = await post(notification('Complaint', 'ses-fail-notify'));
+
+      expect(response.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.complainedAt).not.toBeNull();
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.complaint'}})).toBe(1);
+    });
+
+    it('records the suppression and enforces on the redelivery after a 500', async () => {
+      const email = await sentEmail('ses-fail-redeliver');
+      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      vi.spyOn(appPrisma.email, 'update').mockRejectedValueOnce(new Error('database down'));
+
+      const first = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
+      const second = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(first.status).toBe(500);
+      expect(second.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).not.toBeNull();
+      // Nothing was recorded by the failed attempt, so the redelivery is the new suppression
+      expect(enforce).toHaveBeenCalledTimes(1);
     });
   });
 });
