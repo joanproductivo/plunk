@@ -8,6 +8,10 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
+    // Runs the queueing it is given, which here is a mock too
+    queueWithoutWaiting: vi.fn(async (add: Promise<unknown>) => {
+      await add.catch(() => undefined);
+    }),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
     cancelWorkflowTimeout: vi.fn(async () => true),
@@ -168,23 +172,58 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     expect(status).toBe(WorkflowExecutionStatus.COMPLETED);
   });
 
-  it('marks the run WAITING before its wait step, so an event cannot strand it (Plunk Lite)', async () => {
-    const statusWhenStepWaits: string[] = [];
-    const update = servicePrisma.workflowStepExecution.update.bind(servicePrisma.workflowStepExecution);
-    vi.spyOn(servicePrisma.workflowStepExecution, 'update').mockImplementation(((args: never) => {
-      const {where, data} = args as {where: {id: string}; data: {status?: string}};
-      if (data.status === StepExecutionStatus.WAITING) {
-        return prisma.workflowStepExecution
-          .findUniqueOrThrow({where, include: {execution: true}})
-          .then(step => statusWhenStepWaits.push(step.execution.status))
-          .then(() => update(args));
-      }
-      return update(args);
+  it('sets up the run and its wait together, so a cut between them leaves neither (Plunk Lite)', async () => {
+    const transaction = servicePrisma.$transaction.bind(servicePrisma);
+    vi.spyOn(servicePrisma, '$transaction').mockImplementationOnce(((
+      write: (tx: unknown) => Promise<unknown>,
+      options: never,
+    ) =>
+      transaction(async tx => {
+        await write(tx);
+        throw new Error('server stopped');
+      }, options)) as never);
+
+    await expect(createRun({parked: false})).rejects.toThrow('server stopped');
+
+    const run = await prisma.workflowExecution.findFirstOrThrow({
+      where: {contactId},
+      include: {stepExecutions: true},
+    });
+    expect(run.stepExecutions.map(step => step.status)).not.toContain(StepExecutionStatus.WAITING);
+    expect(run.status).toBe(WorkflowExecutionStatus.FAILED);
+  });
+
+  it('claims the run with its wait, so a failure moving on leaves it running, not waiting (Plunk Lite)', async () => {
+    const run = await createRun();
+    vi.spyOn(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      WorkflowExecutionService as any,
+      'processNextSteps',
+    ).mockRejectedValueOnce(new Error('database gone'));
+    vi.spyOn(servicePrisma.workflowExecution, 'updateMany').mockImplementation((() => {
+      throw new Error('database gone');
     }) as never);
 
-    await createRun();
+    await ship();
 
-    expect(statusWhenStepWaits).toEqual([WorkflowExecutionStatus.WAITING]);
+    vi.mocked(servicePrisma.workflowExecution.updateMany).mockRestore();
+    const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
+    expect(status).toBe(WorkflowExecutionStatus.RUNNING);
+    expect((await run.waitExecution()).status).toBe(StepExecutionStatus.COMPLETED);
+  });
+
+  it('leaves a finished run with an old wait step alone when its event arrives (Plunk Lite)', async () => {
+    const run = await createRun();
+    await prisma.workflowExecution.update({
+      where: {id: run.executionId},
+      data: {status: WorkflowExecutionStatus.COMPLETED},
+    });
+
+    await ship();
+    await run.timeOut();
+
+    expect(await outcome(run)).toEqual({sends: 0, emails: 0});
+    expect((await run.waitExecution()).status).toBe(StepExecutionStatus.WAITING);
   });
 
   it('never resumes a failed run, by its event or its timeout (Plunk Lite)', async () => {

@@ -28,8 +28,9 @@ export function createWorkflowWorker() {
         // End a DELAY: move on to the step after it, or complete the execution
         await WorkflowExecutionService.processDelayEnd(executionId, stepId);
       } else {
-        // A step queued for after a delay, by jobs from before delays ended through delay-end
-        await WorkflowExecutionService.processStepExecution(executionId, stepId);
+        // A step queued for after a delay, by jobs from before delays ended through delay-end:
+        // ended through the delay the run waits on, if it still does
+        await WorkflowExecutionService.resumeLegacyStep(executionId);
       }
     },
     {

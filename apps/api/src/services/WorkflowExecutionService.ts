@@ -32,6 +32,9 @@ import {WorkflowRecoveryService} from './WorkflowRecoveryService.js';
 // had completed; the step it came from has handled it, so those pass it up untouched.
 const handledFailures = new WeakSet<object>();
 
+/** Plunk Lite: rolls back the claim of a wait whose run no longer waits */
+class WaitNotClaimed extends Error {}
+
 /** Plunk Lite: most of a webhook step's response that is read and stored */
 const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 
@@ -39,6 +42,14 @@ const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 // (by a step, or by the recovery sweep after a restart). An EXITED run is not one of them: Plunk
 // still completes it when its EXIT step has nothing after it.
 const STOPPED_STATUSES: WorkflowExecutionStatus[] = [WorkflowExecutionStatus.CANCELLED, WorkflowExecutionStatus.FAILED];
+
+// Plunk Lite: what moving a run on never touches -- a stopped run, or one that waits, which only
+// what ends its wait may move (claiming it first)
+const UNMOVABLE_STATUSES: WorkflowExecutionStatus[] = [...STOPPED_STATUSES, WorkflowExecutionStatus.WAITING];
+
+// Plunk Lite: as long as a lone query may wait for a pooled connection (see EmailService); Prisma's
+// 2 s default would fail a wait or its claim on every short pool spike
+const TRANSACTION_MAX_WAIT_MS = 20_000;
 
 type StepConfig = Prisma.JsonValue;
 type StepResult = Record<string, unknown>;
@@ -96,15 +107,14 @@ export class WorkflowExecutionService {
 
     signale.info(`[WORKFLOW] Execution ${executionId} status: ${initialExecution.status}`);
 
-    // For WAITING executions, check if this is a delayed step that's ready to execute
-    if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
-      signale.info(`[WORKFLOW] Execution ${executionId} is WAITING, resuming from delay`);
-      // This is a delayed step - continue with execution
-    } else if (initialExecution.status !== WorkflowExecutionStatus.RUNNING) {
+    // Plunk Lite: steps run only in a running run. Whatever resumes a waiting one (its delay's end,
+    // its event or timeout) claims it as RUNNING first, so a job that finds it in any other status
+    // is a late copy: the run waits, or has finished, been cancelled or failed
+    if (initialExecution.status !== WorkflowExecutionStatus.RUNNING) {
       signale.info(
-        `[WORKFLOW] Execution ${executionId} already completed or cancelled with status ${initialExecution.status}, skipping`,
+        `[WORKFLOW] Execution ${executionId} is ${initialExecution.status}, not running: skipping step ${stepId}`,
       );
-      return; // Already completed or cancelled
+      return;
     }
 
     // Check if project is disabled
@@ -136,15 +146,6 @@ export class WorkflowExecutionService {
 
     const step = initialExecution.workflow.steps.find(s => s.id === stepId);
     if (!step) {
-      // Plunk Lite: a job queued, before delays ended through their own job, for the step after a
-      // DELAY that was deleted while the run waited: end the delay as it now stands
-      const waitingOn = initialExecution.workflow.steps.find(s => s.id === initialExecution.currentStepId);
-      if (initialExecution.status === WorkflowExecutionStatus.WAITING && waitingOn?.type === 'DELAY') {
-        signale.warn(
-          `[WORKFLOW] Step ${stepId} after delay ${waitingOn.id} was deleted; ending the delay as it now stands`,
-        );
-        return this.processDelayEnd(executionId, waitingOn.id);
-      }
       signale.error(`[WORKFLOW] Step ${stepId} not found in workflow ${initialExecution.workflow.id}`);
       await this.failDeletedStep(executionId);
       return;
@@ -161,43 +162,25 @@ export class WorkflowExecutionService {
       select: {status: true, output: true},
     });
     if (previous) {
-      // A copy of a job for a run that has since moved on and waits further along
-      if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
-        return;
-      }
-      // A wait already set up, or a delay whose end is queued: the run waits there
-      if (previous.status === StepExecutionStatus.WAITING || step.type === 'DELAY') {
+      // A wait set up by the order of writes from before they were one transaction, cut before the
+      // run was marked: the run waits there
+      if (previous.status === StepExecutionStatus.WAITING) {
         await prisma.workflowExecution.updateMany({
           where: {id: executionId, status: WorkflowExecutionStatus.RUNNING},
           data: {status: WorkflowExecutionStatus.WAITING, currentStepId: stepId},
         });
         return;
       }
-      // A wait its event or timeout already claimed: whoever claimed it moves the run on
-      if (step.type === 'WAIT_FOR_EVENT') {
+      // A delay or wait already done: the run either waits there (marked with the step, in one
+      // transaction) or was moved on by whoever ended it -- a copy of a job must not pull it back
+      if (step.type === 'DELAY' || step.type === 'WAIT_FOR_EVENT') {
         return;
       }
       await this.processNextSteps(initialExecution, step, this.storedResult(previous.output));
       return;
     }
 
-    // If workflow execution is WAITING (e.g., from a delay), set it back to RUNNING
-    let execution = initialExecution;
-    if (initialExecution.status === WorkflowExecutionStatus.WAITING) {
-      signale.info(`[WORKFLOW] Setting execution ${executionId} from WAITING to RUNNING`);
-      // Plunk Lite: only one caller resumes a waiting run -- a cancel, or another copy of this job,
-      // leaves it alone
-      const {count} = await prisma.workflowExecution.updateMany({
-        where: {id: executionId, status: WorkflowExecutionStatus.WAITING},
-        data: {status: WorkflowExecutionStatus.RUNNING, currentStepId: stepId},
-      });
-      if (count === 0) {
-        return;
-      }
-      execution = {...initialExecution, status: WorkflowExecutionStatus.RUNNING, currentStepId: stepId};
-
-      signale.info(`[WORKFLOW] Execution ${executionId} status updated to RUNNING`);
-    }
+    const execution = initialExecution;
 
     // Create or get step execution record
     let stepExecution = await prisma.workflowStepExecution.findFirst({
@@ -336,33 +319,28 @@ export class WorkflowExecutionService {
     }
 
     // Only process if step is still waiting (event might have arrived before timeout)
-    // and the execution was not stopped (cancelled, or failed: Plunk Lite)
+    // and the execution still waits on it (Plunk Lite: not stopped, nor finished)
     if (
       stepExecution.status !== StepExecutionStatus.WAITING ||
-      STOPPED_STATUSES.includes(stepExecution.execution.status)
+      stepExecution.execution.status !== WorkflowExecutionStatus.WAITING
     ) {
       return;
     }
 
-    // Mark step as completed with timeout, unless the event claimed the wait since it was read
-    const {count} = await prisma.workflowStepExecution.updateMany({
-      where: {id: stepExecution.id, status: StepExecutionStatus.WAITING},
-      data: {
-        status: StepExecutionStatus.COMPLETED,
-        completedAt: new Date(),
-        output: {
-          timedOut: true,
-          eventName:
-            stepExecution.step.config &&
-            typeof stepExecution.step.config === 'object' &&
-            'eventName' in stepExecution.step.config
-              ? stepExecution.step.config.eventName
-              : undefined,
-        },
-      },
+    // Mark step as completed with timeout, unless the event claimed the wait since it was read.
+    // Plunk Lite: the execution is claimed with it, as RUNNING, so a failure or a restart from here
+    // on leaves a running run the recovery sweep sees, not a waiting one with its wait used up
+    const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, {
+      timedOut: true,
+      eventName:
+        stepExecution.step.config &&
+        typeof stepExecution.step.config === 'object' &&
+        'eventName' in stepExecution.step.config
+          ? stepExecution.step.config.eventName
+          : undefined,
     });
 
-    if (count === 0) {
+    if (!claimed) {
       return;
     }
 
@@ -379,12 +357,7 @@ export class WorkflowExecutionService {
 
     if (fallbackTransition) {
       // Follow timeout branch
-      if (
-        await this.updateUnlessStopped(stepExecution.executionId, {
-          status: WorkflowExecutionStatus.RUNNING,
-          currentStepId: fallbackTransition.toStep.id,
-        })
-      ) {
+      if (await this.moveRun(stepExecution.executionId, fallbackTransition.toStep.id)) {
         await this.processStepExecution(stepExecution.executionId, fallbackTransition.toStep.id);
       }
     } else if (transitions.length > 0) {
@@ -392,12 +365,7 @@ export class WorkflowExecutionService {
       const firstTransition = transitions[0];
       if (firstTransition?.toStep) {
         const nextStep = firstTransition.toStep;
-        if (
-          await this.updateUnlessStopped(stepExecution.executionId, {
-            status: WorkflowExecutionStatus.RUNNING,
-            currentStepId: nextStep.id,
-          })
-        ) {
+        if (await this.moveRun(stepExecution.executionId, nextStep.id)) {
           await this.processStepExecution(stepExecution.executionId, nextStep.id);
         }
       }
@@ -454,7 +422,7 @@ export class WorkflowExecutionService {
       return;
     }
 
-    // The delay was the last step, so the workflow is done (guarded on WAITING so a cancel that lands first wins)
+    // Nothing is connected after the delay now, so the workflow is done (claimed like the move above)
     await prisma.workflowExecution.updateMany({
       where: waitingHere,
       data: {
@@ -463,6 +431,44 @@ export class WorkflowExecutionService {
         currentStepId: null,
       },
     });
+  }
+
+  /**
+   * Plunk Lite: a process-step job queued before delays ended through their own job, for the step
+   * after a DELAY. Only a run still waiting on a delay is moved, and through that delay's end, so it
+   * follows the steps connected after the delay now (one inserted or deleted while it waited
+   * included). A delay that has not run out yet gets its end queued for when it does. Anything else
+   * -- a run already moved on, a wait for an event, a copy of the job -- is left alone.
+   */
+  public static async resumeLegacyStep(executionId: string): Promise<void> {
+    const execution = await prisma.workflowExecution.findUnique({
+      where: {id: executionId},
+      select: {status: true, currentStepId: true, currentStep: {select: {type: true}}},
+    });
+    if (execution?.status !== WorkflowExecutionStatus.WAITING) {
+      return;
+    }
+    if (execution.currentStepId === null) {
+      // The delay was deleted while the run waited on it
+      await this.failDeletedStep(executionId);
+      return;
+    }
+    if (execution.currentStep?.type !== 'DELAY') {
+      return;
+    }
+
+    const delay = await prisma.workflowStepExecution.findFirst({
+      where: {executionId, stepId: execution.currentStepId, status: StepExecutionStatus.COMPLETED},
+      orderBy: {createdAt: 'desc'},
+      select: {id: true, output: true},
+    });
+    const resumeAt = delay ? this.storedResult(delay.output).resumeAt : undefined;
+    const left = typeof resumeAt === 'string' ? Date.parse(resumeAt) - Date.now() : Number.NaN;
+    if (delay && left > 0) {
+      await QueueService.queueWorkflowDelayEnd(executionId, execution.currentStepId, delay.id, left);
+      return;
+    }
+    await this.processDelayEnd(executionId, execution.currentStepId);
   }
 
   /**
@@ -487,8 +493,9 @@ export class WorkflowExecutionService {
         status: StepExecutionStatus.WAITING,
         execution: {
           workflow: {projectId},
-          // Plunk Lite: a cancelled or failed run keeps its wait step WAITING, and never resumes
-          status: {notIn: STOPPED_STATUSES},
+          // Plunk Lite: only a run that still waits resumes -- a cancelled or failed one keeps its
+          // wait step WAITING, and a finished one may carry an old one
+          status: WorkflowExecutionStatus.WAITING,
           contactId,
         },
         step: {
@@ -540,31 +547,24 @@ export class WorkflowExecutionService {
         // as the same event may be delivered twice at once (SES notifications, repeated clicks)
         // or tracked again while an earlier wait of this loop was resumed. Whoever moves the
         // step out of WAITING resumes it; everyone else leaves it alone.
-        const {count} = await prisma.workflowStepExecution.updateMany({
-          where: {id: stepExecution.id, status: StepExecutionStatus.WAITING},
-          data: {
-            status: StepExecutionStatus.COMPLETED,
-            completedAt: new Date(),
-            output: toPrismaJson({
-              eventName,
-              eventData: data ? toPrismaJson(data) : undefined,
-              receivedAt: new Date().toISOString(),
-            }),
-          },
+        // Plunk Lite: the execution is claimed with it, as RUNNING, so a failure or a restart from
+        // here on leaves a running run the recovery sweep sees, not a waiting one with its wait used up
+        const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, {
+          eventName,
+          eventData: data ? toPrismaJson(data) : undefined,
+          receivedAt: new Date().toISOString(),
         });
 
-        if (count === 0) {
+        if (!claimed) {
           continue;
         }
 
-        // Cancel any pending timeout job. Best effort: a timeout job that is already running
-        // cannot be removed, and it will find the wait claimed and stop. Failing here would
-        // leave the claimed execution with nobody to move it on.
-        try {
-          await QueueService.cancelWorkflowTimeout(stepExecution.id);
-        } catch (error) {
-          signale.warn(`[WORKFLOW] Could not cancel the timeout of step execution ${stepExecution.id}:`, error);
-        }
+        // Cancel any pending timeout job. Best effort, without waiting on a Redis that does not
+        // answer: a timeout job left behind finds the wait claimed and stops.
+        await QueueService.queueWithoutWaiting(
+          QueueService.cancelWorkflowTimeout(stepExecution.id),
+          `the removal of the timeout of step execution ${stepExecution.id}`,
+        );
 
         // Continue workflow. Plunk Lite: one resumed run's failure stays in that run -- it must not
         // stop the others waiting for this event, nor fail whatever tracked it (a /v1/track call,
@@ -775,26 +775,32 @@ export class WorkflowExecutionService {
 
     const resumeAt = new Date(Date.now() + delayMs);
 
-    // Mark step as completed immediately (BullMQ handles the delay)
-    await prisma.workflowStepExecution.update({
-      where: {id: stepExecution.id},
-      data: {
-        status: StepExecutionStatus.COMPLETED,
-        completedAt: new Date(),
-        output: {
-          delayAmount: amount,
-          delayUnit: unit,
-          resumeAt: resumeAt.toISOString(),
+    // Mark step as completed immediately (BullMQ handles the delay), and the execution as waiting
+    // (a cancelled one stays cancelled; what is queued below then does nothing). Plunk Lite: in one
+    // transaction, so a restart never leaves one without the other
+    await prisma.$transaction([
+      prisma.workflowStepExecution.update({
+        where: {id: stepExecution.id},
+        data: {
+          status: StepExecutionStatus.COMPLETED,
+          completedAt: new Date(),
+          output: {
+            delayAmount: amount,
+            delayUnit: unit,
+            resumeAt: resumeAt.toISOString(),
+          },
         },
-      },
-    });
-
-    // Update workflow execution to waiting (a cancelled one stays cancelled; what is queued below then does nothing)
-    await this.updateUnlessStopped(_execution.id, {status: WorkflowExecutionStatus.WAITING});
+      }),
+      prisma.workflowExecution.updateMany({
+        where: {id: _execution.id, status: {notIn: STOPPED_STATUSES}},
+        data: {status: WorkflowExecutionStatus.WAITING},
+      }),
+    ]);
 
     // Plunk Lite: the delay always ends through its own job, which follows the step connected after
     // it when it runs out. Queuing the step connected now failed the run if that step was deleted
-    // meanwhile, and skipped one inserted after the delay.
+    // meanwhile, and skipped one inserted after the delay. If the server stops before it is queued,
+    // the recovery sweep queues it.
     await QueueService.queueWorkflowDelayEnd(_execution.id, _step.id, stepExecution.id, Math.max(0, delayMs));
 
     return {
@@ -819,27 +825,36 @@ export class WorkflowExecutionService {
     // Calculate timeout
     const timeoutDate = timeout ? new Date(Date.now() + timeout * 1000) : null;
 
-    // Plunk Lite: the run waits before its step does. The other way round, an event could claim the
-    // step and move the run on before it was marked WAITING, leaving it WAITING for good. A run that
-    // is no longer running (cancelled meanwhile) sets up no wait.
-    const {count} = await prisma.workflowExecution.updateMany({
-      where: {id: _execution.id, status: WorkflowExecutionStatus.RUNNING},
-      data: {status: WorkflowExecutionStatus.WAITING},
-    });
-    if (count === 0) {
+    // Plunk Lite: the run and its step wait together, in one transaction. Step first, an event
+    // could claim it and move the run on before the run was marked WAITING, leaving it WAITING for
+    // good; run first, a restart in between left it waiting on a step nothing would claim. A run
+    // that is no longer running (cancelled meanwhile) sets up no wait.
+    const waiting = await prisma.$transaction(
+      async tx => {
+        const {count} = await tx.workflowExecution.updateMany({
+          where: {id: _execution.id, status: WorkflowExecutionStatus.RUNNING},
+          data: {status: WorkflowExecutionStatus.WAITING},
+        });
+        if (count === 0) {
+          return false;
+        }
+        await tx.workflowStepExecution.update({
+          where: {id: stepExecution.id},
+          data: {
+            status: StepExecutionStatus.WAITING,
+            executeAfter: timeoutDate,
+          },
+        });
+        return true;
+      },
+      {maxWait: TRANSACTION_MAX_WAIT_MS},
+    );
+    if (!waiting) {
       return {eventName, timeout: timeout || null, waitingUntil: null};
     }
 
-    // Update step execution to waiting
-    await prisma.workflowStepExecution.update({
-      where: {id: stepExecution.id},
-      data: {
-        status: StepExecutionStatus.WAITING,
-        executeAfter: timeoutDate,
-      },
-    });
-
-    // Queue timeout handler if timeout is specified
+    // Queue timeout handler if timeout is specified (if the server stops first, the recovery sweep
+    // queues it)
     if (timeout && timeout > 0) {
       const timeoutMs = timeout * 1000;
       await QueueService.queueWorkflowTimeout(_execution.id, _step.id, stepExecution.id, timeoutMs);
@@ -1476,12 +1491,7 @@ export class WorkflowExecutionService {
     }
 
     // Update current step and continue execution
-    if (
-      !(await this.updateUnlessStopped(execution.id, {
-        currentStepId: nextStep.id,
-        status: WorkflowExecutionStatus.RUNNING,
-      }))
-    ) {
+    if (!(await this.moveRun(execution.id, nextStep.id))) {
       return;
     }
 
@@ -1538,6 +1548,63 @@ export class WorkflowExecutionService {
         exitReason: 'Step deleted',
       });
     }
+  }
+
+  /**
+   * Plunk Lite: end a wait -- its step WAITING → COMPLETED with `output`, and its run WAITING →
+   * RUNNING -- in one transaction. Whoever claims both moves the run on; false for everyone else
+   * (another copy of the event or timeout, or a run cancelled meanwhile).
+   */
+  private static async claimWait(
+    stepExecutionId: string,
+    executionId: string,
+    output: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      return await prisma.$transaction(
+        async tx => {
+          const step = await tx.workflowStepExecution.updateMany({
+            where: {id: stepExecutionId, status: StepExecutionStatus.WAITING},
+            data: {status: StepExecutionStatus.COMPLETED, completedAt: new Date(), output: toPrismaJson(output)},
+          });
+          if (step.count === 0) {
+            return false;
+          }
+          const run = await tx.workflowExecution.updateMany({
+            where: {id: executionId, status: WorkflowExecutionStatus.WAITING},
+            data: {status: WorkflowExecutionStatus.RUNNING},
+          });
+          if (run.count === 0) {
+            throw new WaitNotClaimed();
+          }
+          return true;
+        },
+        {maxWait: TRANSACTION_MAX_WAIT_MS},
+      );
+    } catch (error) {
+      if (error instanceof WaitNotClaimed) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Plunk Lite: move a run on to its next step. Never a stopped run, nor a waiting one: a late copy
+   * of a job walking steps it already did must not pull a run that waits further along out of its
+   * wait (its delay's end or its event would then find it running and leave it)
+   */
+  private static async moveRun(executionId: string, nextStepId: string): Promise<boolean> {
+    const {count} = await prisma.workflowExecution.updateMany({
+      where: {id: executionId, status: {notIn: UNMOVABLE_STATUSES}},
+      data: {status: WorkflowExecutionStatus.RUNNING, currentStepId: nextStepId},
+    });
+
+    if (count === 0) {
+      signale.info(`[WORKFLOW] Execution ${executionId} is stopped, waiting or gone: not moving it on`);
+    }
+
+    return count > 0;
   }
 
   /**

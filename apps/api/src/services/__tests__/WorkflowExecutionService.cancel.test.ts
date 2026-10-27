@@ -8,6 +8,10 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
+    // Runs the queueing it is given, which here is a mock too
+    queueWithoutWaiting: vi.fn(async (add: Promise<unknown>) => {
+      await add.catch(() => undefined);
+    }),
     queueWorkflowDelayEnd: vi.fn(async () => ({id: 'mock-delay-end-job-id'})),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),

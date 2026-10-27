@@ -33,6 +33,7 @@ import type {
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
+import {errorMessage} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
 
 /** How long a change that is already written waits for a queue before carrying on without it */
@@ -84,10 +85,13 @@ export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   },
 });
 
+// Plunk Lite: 8 attempts over about 4 minutes, like emails, so a delay's end or a wait's timeout
+// that comes due while the database restarts is not lost. Both claim the run before moving it, so a
+// retry never moves it twice.
 export const workflowQueue = new Queue<WorkflowStepJobData>('workflow', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 2000,
@@ -724,7 +728,8 @@ export class QueueService {
     const settled = add.then(
       () => true,
       error => {
-        signale.error(`[QUEUE] Failed to queue ${what}:`, error);
+        // Only the message: ioredis attaches the command and its arguments (contact IDs) to errors
+        signale.error(`[QUEUE] Failed to queue ${what}: ${errorMessage(error)}`);
         return true;
       },
     );

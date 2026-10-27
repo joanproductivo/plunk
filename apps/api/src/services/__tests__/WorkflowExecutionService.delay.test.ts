@@ -7,6 +7,10 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
+    // Runs the queueing it is given, which here is a mock too
+    queueWithoutWaiting: vi.fn(async (add: Promise<unknown>) => {
+      await add.catch(() => undefined);
+    }),
     queueWorkflowDelayEnd: vi.fn(async () => ({id: 'mock-delay-end-job-id'})),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
@@ -238,11 +242,62 @@ describe('WorkflowExecutionService - a delay with a step after it (Plunk Lite)',
 
   it('ends the delay when an old job for the deleted step after it runs', async () => {
     const route = await createRoute(0);
+    await runOut(route.executionId, route.delays[0]!);
     await prisma.workflowStep.delete({where: {id: route.sendStepId}});
 
     // A process-step job queued before delays ended through delay-end
-    await WorkflowExecutionService.processStepExecution(route.executionId, route.sendStepId);
+    await WorkflowExecutionService.resumeLegacyStep(route.executionId);
 
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
   });
+
+  it('follows a step inserted after the delay when an old job for the step it replaced runs', async () => {
+    const route = await createRoute(0);
+    await runOut(route.executionId, route.delays[0]!);
+    const template = await factories.createTemplate({projectId});
+    const inserted = await factories.createWorkflowStep({
+      workflowId: (await prisma.workflowExecution.findUniqueOrThrow({where: {id: route.executionId}})).workflowId,
+      type: WorkflowStepType.SEND_EMAIL,
+      templateId: template.id,
+    });
+    await prisma.workflowTransition.deleteMany({where: {fromStepId: route.delays[0]!}});
+    await prisma.workflowTransition.create({data: {fromStepId: route.delays[0]!, toStepId: inserted.id}});
+    await prisma.workflowTransition.create({data: {fromStepId: inserted.id, toStepId: route.sendStepId}});
+
+    await WorkflowExecutionService.resumeLegacyStep(route.executionId);
+
+    expect(await emails(route.executionId)).toBe(2);
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
+
+  it('queues the end of a delay that has not run out when an old job for it runs early', async () => {
+    const route = await createRoute(0);
+    vi.mocked(QueueService.queueWorkflowDelayEnd).mockClear();
+
+    await WorkflowExecutionService.resumeLegacyStep(route.executionId);
+
+    expect(QueueService.queueWorkflowDelayEnd).toHaveBeenCalledTimes(1);
+    const [, stepId, , left] = vi.mocked(QueueService.queueWorkflowDelayEnd).mock.calls[0]!;
+    expect(stepId).toBe(route.delays[0]);
+    expect(left).toBeGreaterThan(0);
+    expect(await emails(route.executionId)).toBe(0);
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
+  });
+
+  it('leaves alone a run an old job finds already moved on', async () => {
+    const route = await createRoute(0);
+    await route.endDelay();
+
+    await WorkflowExecutionService.resumeLegacyStep(route.executionId);
+
+    expect(await emails(route.executionId)).toBe(1);
+  });
 });
+
+/** As if the delay the run waits on ran out a minute ago */
+async function runOut(executionId: string, delayStepId: string) {
+  await prisma.workflowStepExecution.updateMany({
+    where: {executionId, stepId: delayStepId},
+    data: {output: {resumeAt: new Date(Date.now() - 60_000).toISOString()}},
+  });
+}

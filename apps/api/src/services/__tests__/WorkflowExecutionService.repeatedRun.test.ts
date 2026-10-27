@@ -8,6 +8,10 @@ import {WorkflowExecutionService} from '../WorkflowExecutionService';
 
 vi.mock('../QueueService', () => ({
   QueueService: {
+    // Runs the queueing it is given, which here is a mock too
+    queueWithoutWaiting: vi.fn(async (add: Promise<unknown>) => {
+      await add.catch(() => undefined);
+    }),
     queueWorkflowDelayEnd: vi.fn(async () => ({id: 'mock-delay-end-job-id'})),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
@@ -159,14 +163,43 @@ describe('WorkflowExecutionService - a repeated run of the same steps', () => {
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
   });
 
-  it('resumes a waiting run once when two copies of its job run at the same time', async () => {
+  it('resumes a waiting run once when two copies of an old job for it run at the same time', async () => {
     const route = await createRoute({type: WorkflowStepType.DELAY, config: {amount: 1, unit: 'hours'}}, SEND);
     await route.run();
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
+    // The delay ran out a minute ago
+    await prisma.workflowStepExecution.updateMany({
+      where: {executionId: route.executionId, stepId: route.steps[0]},
+      data: {output: {resumeAt: new Date(Date.now() - 60_000).toISOString()}},
+    });
 
-    // Two copies of an old process-step job for the step after the delay
-    await Promise.all([route.run(route.steps[1]), route.run(route.steps[1])]);
+    // Two copies of a process-step job from before delays ended through their own job
+    await Promise.all([
+      WorkflowExecutionService.resumeLegacyStep(route.executionId),
+      WorkflowExecutionService.resumeLegacyStep(route.executionId),
+    ]);
 
+    expect(await emails(route.executionId)).toBe(1);
+  });
+
+  it('never pulls a run that waits further along back out of its wait', async () => {
+    const route = await createRoute(SEND, {type: WorkflowStepType.DELAY, config: {amount: 1, unit: 'hours'}}, SEND);
+    await route.run();
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
+    const execution = await prisma.workflowExecution.findUniqueOrThrow({
+      where: {id: route.executionId},
+      include: {contact: true, workflow: true},
+    });
+    const first = await prisma.workflowStep.findUniqueOrThrow({
+      where: {id: route.steps[0]},
+      include: {outgoingTransitions: {include: {toStep: true}}},
+    });
+
+    // A late copy that read the run RUNNING moves on from the first email it finds done
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (WorkflowExecutionService as any).processNextSteps(execution, first, {});
+
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
     expect(await emails(route.executionId)).toBe(1);
   });
 });
