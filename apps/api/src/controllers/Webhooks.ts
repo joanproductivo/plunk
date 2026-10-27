@@ -724,11 +724,16 @@ export class Webhooks {
           await CampaignService.markStatsDirty(email.campaignId);
         }
 
-        // Track event (this will trigger workflows). Not for a bounce or complaint of an
-        // address that is not the contact's: their workflows, segments and webhooks would read
-        // it as the contact's own.
+        // Track the event in the worker, which starts and resumes the workflows listening for
+        // it: a campaign's notifications arrive by the thousand, and running every workflow
+        // inside the request held a database connection per notification SNS sent at once.
+        // Not for a bounce or complaint of an address that is not the contact's: their
+        // workflows, segments and webhooks would read it as the contact's own.
         if (!unsubscribes || contactIsAffected) {
-          await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
+          await QueueService.queueEventTracking(
+            {projectId: email.projectId, eventName, contactId: email.contactId, emailId: email.id, data: eventData},
+            typeof req.body.MessageId === 'string' ? req.body.MessageId : undefined,
+          );
         }
       } catch (error) {
         signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but tracking the event failed:`, error);

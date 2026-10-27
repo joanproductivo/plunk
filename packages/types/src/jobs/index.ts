@@ -10,3 +10,4 @@ export * from './workflow.js';
 export * from './import.js';
 export * from './maintenance.js';
 export * from './segment.js';
+export * from './event.js';
