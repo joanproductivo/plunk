@@ -27,7 +27,6 @@ import {CardVerificationService} from '../services/CardVerificationService.js';
 import {ContactService} from '../services/ContactService.js';
 import {hasRecipientOverride, recipientAddress} from '../services/EmailHeaderService.js';
 import {EventService} from '../services/EventService.js';
-import {FailureAlertService} from '../services/FailureAlertService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {MeterService} from '../services/MeterService.js';
 import {NtfyService} from '../services/NtfyService.js';
@@ -37,11 +36,13 @@ import {ReputationCheck} from '../services/ReputationCheck.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {
   affectedAddresses,
+  keepsSendStatus,
   matchEmail,
   noteSnsRejection,
   parseSnsMessage,
   readSesNotification,
   recordReject,
+  reportSubscriptionRemoved,
   reportUnreadable,
   sentAddress,
   suppressUnmatched,
@@ -209,17 +210,10 @@ export class Webhooks {
         }
       }
 
-      // Someone removed this endpoint's subscription from one of our topics: no SES event will
-      // arrive from it again, and nothing else would show it. Signed and from our own account, so
-      // it is not something an outsider can post.
+      // Someone removed this endpoint's subscription from one of our topics. Signed and from our
+      // own account, so it is not something an outsider can post.
       if (req.body.Type === 'UnsubscribeConfirmation') {
-        const topic = String(req.body.TopicArn);
-        signale.error(`[WEBHOOK] SNS subscription to ${topic} was removed`);
-        await FailureAlertService.recordForAll({
-          sourceKey: 'sns:subscription',
-          label: 'SES events subscription removed',
-          error: `This server was unsubscribed from ${topic}: the events it published (bounces, complaints, deliveries) no longer arrive. Subscribe the webhook to it again.`,
-        });
+        await reportSubscriptionRemoved(String(req.body.TopicArn));
         return res.status(200).json({success: true});
       }
 
@@ -666,16 +660,30 @@ export class Webhooks {
       // to matter -- one complaint in five, measured. Applying the Open blindly left the row
       // reading `OPENED` with `complainedAt` set, and anything that selects complaints by status
       // then silently missed it. `undefined` leaves the column alone.
-      // A row failed before its send was recorded (possibly sent, found by its tags) keeps FAILED:
-      // whether it counts as sent is the send path's to say, so only the event's marks are written.
-      const keepsStatus = email.status === EmailStatus.FAILED && !email.sentAt;
+      // A row whose send is not recorded -- failed as possibly sent, or still PENDING or SENDING
+      // long after SES took it, both found by their tags -- keeps its status: whether it counts as
+      // sent is the send path's to say, so only the event's marks are written.
+      const keepsStatus = keepsSendStatus(email);
       const status = keepsStatus ? undefined : nextStatus(email.status, updateData.status as EmailStatus | undefined);
+
+      // With no first-seen timestamp either (an address on the account's suppression list), its
+      // SNS message is claimed instead, so a copy neither unsubscribes nor tracks it again
+      if (unsubscribes && keepsStatus && !suppression && snsMessageId && !claimedMessage) {
+        const claim = await SnsMessages.claim(snsMessageId);
+        if (claim !== 'new') {
+          signale.info(`[WEBHOOK] SNS message ${snsMessageId} was already handled or is being handled`);
+          return res.status(claim === 'seen' ? 200 : 503).json({success: claim === 'seen'});
+        }
+        claimedMessage = snsMessageId;
+      }
 
       // Whether this copy of the event is the one that records it. SNS is at-least-once, so the
       // same bounce or complaint arrives again -- sometimes several copies at once -- and only
       // the copy that claims it may alert, enforce or start workflows. Other events are new
       // every time.
       let isNew = true;
+      // The row was deleted (its contact was) after it was matched
+      let gone = false;
 
       if (unsubscribes) {
         // Everything that records a bounce or complaint, written together: if any of it fails,
@@ -685,19 +693,23 @@ export class Webhooks {
           async tx => {
             // Claimed by its first-seen timestamp, or -- for an address already on the
             // suppression list, which records none -- by moving the email to its status. A row
-            // that keeps its status has nothing to claim that by, so each copy counts.
+            // that keeps its status was claimed by its SNS message above.
             const claimed = suppression
               ? await tx.email.updateMany({
                   where: {id: email.id, [suppression.field]: null},
                   data: {[suppression.field]: now},
                 })
               : keepsStatus
-                ? {count: 1}
+                ? {count: await tx.email.count({where: {id: email.id}})}
                 : await tx.email.updateMany({
                     // Never over a bounce or complaint already recorded, which this would downgrade
                     where: {id: email.id, status: {notIn: [EmailStatus.BOUNCED, EmailStatus.COMPLAINED]}},
                     data: {status: updateData.status as EmailStatus},
                   });
+            if (claimed.count === 0 && !(await tx.email.findUnique({where: {id: email.id}, select: {id: true}}))) {
+              gone = true;
+              return;
+            }
             isNew = claimed.count === 1;
 
             // Only the copy that records the event unsubscribes: an old bounce delivered again --
@@ -736,6 +748,12 @@ export class Webhooks {
         );
       } else {
         await prisma.email.update({where: {id: email.id}, data: {...updateData, status}});
+      }
+
+      // A bounce or complaint of an email deleted meanwhile is one of no email
+      if (gone) {
+        await suppressUnmatched(eventType, body, mail);
+        return res.status(200).json({success: true});
       }
 
       // The reputation check after a bounce or complaint that counts, for a copy as well: the

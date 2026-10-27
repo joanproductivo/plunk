@@ -7,7 +7,7 @@ import {QueueService} from '../../services/QueueService';
 import {ReputationCheck} from '../../services/ReputationCheck';
 import {getAwsAccountId} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
-import {post} from './snsWebhook';
+import {OWN_TOPIC, post, postSns} from './snsWebhook';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 vi.mock('../../services/SESService', async importOriginal => ({
@@ -131,24 +131,84 @@ describe('Webhooks - events without a stored messageId', () => {
       },
     );
 
-    it('still suppresses the address of a row that stays SENDING past the wait, leaving the row alone', async () => {
-      const email = await emailRow({status: EmailStatus.SENDING});
+    it.each([EmailStatus.PENDING, EmailStatus.SENDING])(
+      'records the bounce on a row still %s past the wait, leaving its status and messageId to the send path',
+      async status => {
+        const email = await emailRow({status});
 
-      const captured = await post(
-        event('Bounce', {
-          tags: {plunk_email_id: email.id, plunk_project_id: projectId},
-          timestamp: HOUR_AGO(),
-          extra: permanent,
-        }),
-      );
+        const captured = await post(
+          event('Bounce', {
+            tags: {plunk_email_id: email.id, plunk_project_id: projectId},
+            timestamp: HOUR_AGO(),
+            extra: permanent,
+          }),
+        );
+
+        expect(captured.status).toBe(200);
+        const row = await prisma.email.findUniqueOrThrow({where: {id: email.id}});
+        expect(row).toMatchObject({status, messageId: null});
+        expect(row.bouncedAt).not.toBeNull();
+        expect(await subscribed()).toBe(false);
+        expect(await suppressed()).toHaveLength(1);
+        // The email's own, not one of no email
+        expect(await unmatchedAlerts()).toEqual([]);
+      },
+    );
+
+    it('handles a copy of a bounce of an address already on the account list once, on such a row', async () => {
+      const email = await emailRow({status: EmailStatus.FAILED});
+      const track = vi.mocked(QueueService.queueEventTracking);
+      const bounce = event('Bounce', {
+        tags: {plunk_email_id: email.id, plunk_project_id: projectId},
+        extra: {bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'}},
+      });
+      const message = {
+        Type: 'Notification',
+        TopicArn: OWN_TOPIC,
+        MessageId: `sns-copy-${email.id}`,
+        Message: JSON.stringify(bounce),
+      };
+
+      expect((await postSns(message)).status).toBe(200);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(await subscribed()).toBe(false);
+      expect(track).toHaveBeenCalledTimes(1);
+
+      // Subscribed again since: the copy must not take them off the list again
+      await prisma.contact.update({where: {id: contact.id}, data: {subscribed: true}});
+      expect((await postSns(message)).status).toBe(200);
+
+      expect(await subscribed()).toBe(true);
+      expect(track).toHaveBeenCalledTimes(1);
+      expect(await prisma.email.findUniqueOrThrow({where: {id: email.id}})).toMatchObject({
+        status: EmailStatus.FAILED,
+        bouncedAt: null,
+      });
+    });
+
+    it('treats a bounce of a row deleted after it was matched as one of no email', async () => {
+      const email = await emailRow({status: EmailStatus.SENT, sentAt: new Date(), messageId: 'ses-deleted-row'});
+      const transaction = appPrisma.$transaction.bind(appPrisma);
+      vi.spyOn(appPrisma, '$transaction').mockImplementationOnce((async (...args: unknown[]) => {
+        await prisma.email.delete({where: {id: email.id}});
+        return (transaction as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+
+      const captured = await post({
+        ...event('Bounce', {tags: {plunk_email_id: email.id, plunk_project_id: projectId}, extra: permanent}),
+        mail: {
+          messageId: 'ses-deleted-row',
+          timestamp: new Date().toISOString(),
+          source: 'hello@plunk.test',
+          destination: [contact.email],
+          tags: {plunk_email_id: [email.id], plunk_project_id: [projectId]},
+        },
+      });
 
       expect(captured.status).toBe(200);
-      expect(await prisma.email.findUniqueOrThrow({where: {id: email.id}})).toMatchObject({
-        status: EmailStatus.SENDING,
-        messageId: null,
-      });
       expect(await subscribed()).toBe(false);
       expect(await suppressed()).toHaveLength(1);
+      expect(await unmatchedAlerts()).toHaveLength(1);
     });
 
     it('does not take the row of another project for the tagged one', async () => {
@@ -164,8 +224,32 @@ describe('Webhooks - events without a stored messageId', () => {
       expect(await subscribed()).toBe(true);
     });
 
-    it('does not take a row sent to another address than the one SES names', async () => {
+    it('takes the row of a contact who changed address since, and suppresses the address it went to', async () => {
       const email = await emailRow({status: EmailStatus.FAILED});
+      const old = contact.email.toLowerCase();
+      await prisma.contact.update({where: {id: contact.id}, data: {email: 'moved@example.com'}});
+
+      const captured = await post(
+        event('Bounce', {
+          tags: {plunk_email_id: email.id, plunk_project_id: projectId},
+          destination: old,
+          extra: permanent,
+        }),
+      );
+
+      expect(captured.status).toBe(200);
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).bouncedAt).not.toBeNull();
+      // The address is no longer the contact's
+      expect(await subscribed()).toBe(true);
+      expect((await suppressed()).map(row => row.email)).toEqual([old]);
+    });
+
+    it('does not take a row sent to a custom recipient other than the one SES names', async () => {
+      const email = await emailRow({status: EmailStatus.FAILED});
+      await prisma.email.update({
+        where: {id: email.id},
+        data: {headers: {'X-Plunk-Recipient-Override': 'custom@example.com'}},
+      });
 
       await post(
         event('Bounce', {

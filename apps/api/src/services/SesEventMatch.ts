@@ -97,6 +97,19 @@ export async function reportUnreadable(reason: string): Promise<void> {
 }
 
 /**
+ * This endpoint's subscription to one of the installation's topics was removed: no SES event will
+ * arrive from it again, and nothing else would show it, so every project hears about it.
+ */
+export async function reportSubscriptionRemoved(topic: string): Promise<void> {
+  signale.error(`[WEBHOOK] SNS subscription to ${topic} was removed`);
+  await FailureAlertService.recordForAll({
+    sourceKey: 'sns:subscription',
+    label: 'SES events subscription removed',
+    error: `This server was unsubscribed from ${topic}: the events it published (bounces, complaints, deliveries) no longer arrive. Subscribe the webhook to it again.`,
+  });
+}
+
+/**
  * How long after SES accepted an email an event for it may still find no row. The send path
  * stamps the messageId right after SES answers and retries the stamp for about four minutes if
  * the database is down, and the recovery sweep records it after that; until then, a 503 has SNS
@@ -178,12 +191,27 @@ function withinRetryWindow(mail: SesMail): boolean {
 }
 
 /**
+ * Whether an event leaves the status of its email as it is: its send is not recorded -- failed as
+ * possibly sent, or still PENDING or SENDING long after SES took it (see matchEmail) -- and whether
+ * it counts as sent is the send path's to say. Only the event's marks are written.
+ */
+export function keepsSendStatus(email: {status: EmailStatus; sentAt: Date | null}): boolean {
+  return (
+    email.status === EmailStatus.PENDING ||
+    email.status === EmailStatus.SENDING ||
+    (email.status === EmailStatus.FAILED && !email.sentAt)
+  );
+}
+
+/**
  * The email an event is about: by the messageId the send path stored, or else by the email id SES
  * repeats from the tags -- when recording the send failed, or it was failed as possibly sent. A
- * row found that way must be of the tagged project and have been sent to the address SES names.
+ * row found that way must be of the tagged project, and the tag is enough: a contact may have
+ * changed address since. Only a workflow email to a custom recipient must have gone to it.
  *
- * - Still PENDING or SENDING: its send is being recorded, so the event waits for it (within the
- *   window; after it, the row is left to the send path and the event treated as unmatched).
+ * - Still PENDING or SENDING: its send is being recorded, so the event waits for it within the
+ *   window. After it, the event is applied to the row without touching its status (and its
+ *   bounce or complaint suppresses the address), which is left to the send path.
  * - Otherwise its messageId is stored, and only that: whether it counts as sent is the send
  *   path's to say.
  *
@@ -200,17 +228,18 @@ export async function matchEmail(mail: SesMail): Promise<EventMatch> {
   const tags = sesTags(mail);
   if (tags.emailId) {
     const email = await prisma.email.findUnique({where: {id: tags.emailId}, include: EMAIL_INCLUDE});
-    const sentTo = email && recipientAddress(email.headers, email.contact.email).trim().toLowerCase();
+    // A workflow's custom recipient, or '' for the contact
+    const override = email ? recipientAddress(email.headers, '').trim().toLowerCase() : '';
     if (
       !email ||
       email.projectId !== tags.projectId ||
-      !mail.destination?.some(address => bareAddress(address) === sentTo)
+      (override && !mail.destination?.some(address => bareAddress(address) === override))
     ) {
       return {kind: 'unmatched'};
     }
 
     if (email.status === EmailStatus.PENDING || email.status === EmailStatus.SENDING) {
-      return withinRetryWindow(mail) ? {kind: 'retry'} : {kind: 'unmatched'};
+      return withinRetryWindow(mail) ? {kind: 'retry'} : {kind: 'email', email};
     }
 
     if (!email.messageId) {
