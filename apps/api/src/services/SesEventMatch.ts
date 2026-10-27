@@ -1,13 +1,22 @@
+import type {Prisma} from '@plunk/db';
+import {EmailStatus} from '@plunk/db';
+import {isMailboxSimulatorAddress} from '@plunk/shared';
 import signale from 'signale';
 import {z} from 'zod';
 
+import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 
+import {recipientAddress} from './EmailHeaderService.js';
 import {FailureAlertService} from './FailureAlertService.js';
+import type {SesMessageTags} from './SESService.js';
+import {SES_TAG} from './SESService.js';
+import {SuppressionService} from './SuppressionService.js';
 
 /**
- * Plunk Lite: reading what SNS delivers to the SES webhook, and the trouble with it that no single
- * email shows -- a message that cannot be read, a run of rejected deliveries.
+ * Plunk Lite: reading what SNS delivers to the SES webhook, matching each event with the email it is
+ * about, and the trouble with it that no single email shows -- an event with no email, a message
+ * that cannot be read, a run of rejected deliveries.
  */
 
 /** The SES notifications the webhook handles; anything else is acknowledged and left alone */
@@ -83,6 +92,221 @@ export async function reportUnreadable(reason: string): Promise<void> {
     label: 'Unreadable SES events',
     error: `A signed SES notification from this installation's topic could not be read (${reason}), so the bounce, complaint or delivery it reported was not recorded.`,
   });
+}
+
+/**
+ * How long after SES accepted an email an event for it may still find no row. The send path
+ * stamps the messageId right after SES answers and retries the stamp for about four minutes if
+ * the database is down, and the recovery sweep records it after that; until then, a 503 has SNS
+ * deliver the event again instead of losing it.
+ */
+const UNMATCHED_EVENT_RETRY_MS = 30 * 60 * 1000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SES_KINDS: SesMessageTags['kind'][] = ['email', 'test', 'alert'];
+
+/**
+ * The tags Plunk sent the email with (see SES_TAG), each only when it has the expected shape: the
+ * ids any UUID (a campaign's emails have version 5 ones), the kind one of the known ones.
+ */
+export function sesTags(mail: SesMail): Partial<SesMessageTags> {
+  const tag = (name: string) => {
+    const values = mail.tags?.[name];
+    const value: unknown = Array.isArray(values) ? values[0] : undefined;
+    return typeof value === 'string' ? value : undefined;
+  };
+  const id = (name: string) => {
+    const value = tag(name);
+    return value && UUID_RE.test(value) ? value : undefined;
+  };
+  const kind = tag(SES_TAG.kind) as SesMessageTags['kind'] | undefined;
+  return {
+    emailId: id(SES_TAG.emailId),
+    projectId: id(SES_TAG.projectId),
+    kind: kind && SES_KINDS.includes(kind) ? kind : undefined,
+  };
+}
+
+/** An address as SES writes it, bare or as `Name <address>`: lowercased, without the name */
+function bareAddress(address: string): string {
+  return (address.match(/<([^>]+)>/)?.[1] ?? address).trim().toLowerCase();
+}
+
+/**
+ * The address SES was given for the email; `fallback` when the event does not say (an old
+ * notification). Plunk gives SES one address per email.
+ */
+export function sentAddress(mail: SesMail, fallback: string): string {
+  return bareAddress(mail.destination?.[0] ?? fallback);
+}
+
+/**
+ * The addresses a bounce or complaint is about, lowercased. SES lists them in
+ * `bouncedRecipients` / `complainedRecipients`; when it does not, the event is about the address
+ * the email was sent to.
+ */
+export function affectedAddresses(
+  eventType: string,
+  body: {bounce?: {bouncedRecipients?: unknown}; complaint?: {complainedRecipients?: unknown}},
+  sentTo: string,
+): string[] {
+  const listed = eventType === 'Complaint' ? body.complaint?.complainedRecipients : body.bounce?.bouncedRecipients;
+  const addresses = Array.isArray(listed)
+    ? (listed as {emailAddress?: unknown}[])
+        .map(recipient => (typeof recipient?.emailAddress === 'string' ? bareAddress(recipient.emailAddress) : ''))
+        .filter(Boolean)
+    : [];
+
+  return addresses.length > 0 ? addresses : [bareAddress(sentTo)];
+}
+
+const EMAIL_INCLUDE = {contact: true, project: true, campaign: {select: {name: true}}} as const;
+export type MatchedEmail = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
+
+/**
+ * What an event is about: its email; nothing yet, so SNS should deliver it again (`retry`); or no
+ * email at all (`unmatched`), whose bounce or complaint `suppressUnmatched` still acts on.
+ */
+export type EventMatch = {kind: 'email'; email: MatchedEmail} | {kind: 'retry'} | {kind: 'unmatched'};
+
+function withinRetryWindow(mail: SesMail): boolean {
+  // A timestamp in the future (a skewed clock) is not trusted beyond a minute
+  const age = Date.now() - Date.parse(mail.timestamp ?? '');
+  return Number.isFinite(age) && age > -60_000 && age < UNMATCHED_EVENT_RETRY_MS;
+}
+
+/**
+ * The email an event is about: by the messageId the send path stored, or else by the email id SES
+ * repeats from the tags -- when recording the send failed, or it was failed as possibly sent. A
+ * row found that way must be of the tagged project and have been sent to the address SES names.
+ *
+ * - Still PENDING or SENDING: its send is being recorded, so the event waits for it (within the
+ *   window; after it, the row is left to the send path and the event treated as unmatched).
+ * - Otherwise its messageId is stored, and only that: whether it counts as sent is the send
+ *   path's to say.
+ *
+ * Without a row, an email that had tags is gone (a deleted contact) or never had one (a test
+ * send, an alert), and waiting will not change that. An untagged one, sent before tags existed,
+ * waits within the window as it always did.
+ */
+export async function matchEmail(mail: SesMail): Promise<EventMatch> {
+  const byMessageId = await prisma.email.findUnique({where: {messageId: mail.messageId}, include: EMAIL_INCLUDE});
+  if (byMessageId) {
+    return {kind: 'email', email: byMessageId};
+  }
+
+  const tags = sesTags(mail);
+  if (tags.emailId) {
+    const email = await prisma.email.findUnique({where: {id: tags.emailId}, include: EMAIL_INCLUDE});
+    const sentTo = email && recipientAddress(email.headers, email.contact.email).trim().toLowerCase();
+    if (
+      !email ||
+      email.projectId !== tags.projectId ||
+      !mail.destination?.some(address => bareAddress(address) === sentTo)
+    ) {
+      return {kind: 'unmatched'};
+    }
+
+    if (email.status === EmailStatus.PENDING || email.status === EmailStatus.SENDING) {
+      return withinRetryWindow(mail) ? {kind: 'retry'} : {kind: 'unmatched'};
+    }
+
+    if (!email.messageId) {
+      const stamped = await prisma.email.updateMany({
+        where: {id: email.id, messageId: null},
+        data: {messageId: mail.messageId},
+      });
+      // Deleted in between: no email to record the event on
+      if (stamped.count === 0 && !(await prisma.email.findUnique({where: {id: email.id}, select: {id: true}}))) {
+        return {kind: 'unmatched'};
+      }
+    }
+    return {kind: 'email', email: {...email, messageId: email.messageId ?? mail.messageId}};
+  }
+
+  if (tags.kind === 'test' || tags.kind === 'alert') {
+    return {kind: 'unmatched'};
+  }
+  return withinRetryWindow(mail) ? {kind: 'retry'} : {kind: 'unmatched'};
+}
+
+/**
+ * The project an event without an email belongs to: the tagged one, or else the one project with
+ * the sender's domain verified. Undefined when neither says.
+ */
+async function unmatchedProject(tags: Partial<SesMessageTags>, mail: SesMail): Promise<string | undefined> {
+  if (tags.projectId) {
+    return (await prisma.project.findUnique({where: {id: tags.projectId}, select: {id: true}}))?.id;
+  }
+
+  const domain = bareAddress(mail.source ?? '').split('@')[1];
+  if (!domain) {
+    return undefined;
+  }
+  const domains = await prisma.domain.findMany({
+    where: {domain, verified: true},
+    select: {projectId: true},
+    distinct: ['projectId'],
+    take: 2,
+  });
+  return domains.length === 1 ? domains[0]!.projectId : undefined;
+}
+
+/**
+ * A permanent bounce or a complaint whose email cannot be found (its contact was deleted, it was a
+ * test send or an alert, or its messageId was never stored) still takes the address off the
+ * project's list: it is suppressed and any contact with it unsubscribed. The project hears about
+ * it, except for its own test sends and alerts. Other events of no email are only logged.
+ *
+ * Throws if recording fails, so SNS delivers the event again.
+ */
+export async function suppressUnmatched(
+  eventType: SesEventType,
+  body: {bounce?: {bounceType?: unknown; bouncedRecipients?: unknown}; complaint?: {complainedRecipients?: unknown}},
+  mail: SesMail,
+): Promise<void> {
+  const tags = sesTags(mail);
+  const suppresses = eventType === 'Complaint' || (eventType === 'Bounce' && body.bounce?.bounceType === 'Permanent');
+  if (!suppresses) {
+    signale.info(`[WEBHOOK] ${eventType} event for unknown messageId ${mail.messageId}, nothing to record`);
+    return;
+  }
+
+  // Mail to the SES mailbox simulator never leaves AWS, and is never suppressed
+  const addresses = affectedAddresses(eventType, body, sentAddress(mail, '')).filter(
+    address => address && !isMailboxSimulatorAddress(address),
+  );
+  const projectId = addresses.length > 0 ? await unmatchedProject(tags, mail) : undefined;
+  if (!projectId) {
+    // Error level: an event that matches no email and no project is lost, and SES gives up after
+    // its retries. A run of these means the send path is not stamping `messageId`.
+    signale.error(`[WEBHOOK] ${eventType} event dropped — no email or project found for messageId ${mail.messageId}`);
+    return;
+  }
+
+  const reason = eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE';
+  await prisma.$transaction(
+    async tx => {
+      await SuppressionService.record(tx, projectId, addresses, reason, null);
+      await tx.contact.updateMany({
+        where: {projectId, email: {in: addresses}},
+        data: {subscribed: false, snoozedUntil: null},
+      });
+    },
+    {maxWait: 10_000, timeout: 10_000},
+  );
+  signale.warn(
+    `[WEBHOOK] ${eventType} for ${addresses.join(', ')} matched no email, suppressed in project ${projectId}`,
+  );
+
+  if (tags.kind !== 'test' && tags.kind !== 'alert') {
+    await FailureAlertService.record(projectId, {
+      sourceKey: 'sns:unmatched',
+      label: 'SES events without an email',
+      error: `A ${reason === 'COMPLAINT' ? 'complaint' : 'permanent bounce'} matched no email of the project (SES message ${mail.messageId}): the address was suppressed and its contacts unsubscribed.`,
+      contactEmail: addresses[0],
+    });
+  }
 }
 
 /** Why the webhook turned an SNS delivery away */

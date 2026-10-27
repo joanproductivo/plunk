@@ -13,10 +13,10 @@ import {Keys} from '../../services/keys';
 import {NtfyService} from '../../services/NtfyService';
 import {eventTrackingQueue, QueueService} from '../../services/QueueService';
 import {SecurityService} from '../../services/SecurityService';
+import {affectedAddresses} from '../../services/SesEventMatch';
 import {getAwsAccountId} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
 import {processEventTracking} from '../../jobs/event-tracking-processor';
-import {affectedAddresses} from '../Webhooks';
 import {FOREIGN_TOPIC, notification, OWN_TOPIC, post, postSns} from './snsWebhook';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -392,16 +392,6 @@ describe('Webhooks - SES event notifications', () => {
       expect(updated?.deliveredAt).toBeNull();
     });
 
-    it('404s an event for a messageId it does not know', async () => {
-      const event = notification('Delivery', 'ses-never-sent');
-      // Sent long enough ago that the send path has had every chance to store the messageId
-      event.mail.timestamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-
-      const captured = await post(event);
-
-      expect(captured.status).toBe(404);
-    });
-
     it('asks SNS to retry an event for an email sent moments ago whose messageId is not stored yet', async () => {
       const captured = await post(notification('Bounce', 'ses-not-stamped-yet', {bounce: {bounceType: 'Permanent'}}));
 
@@ -764,6 +754,23 @@ describe('Webhooks - SES event notifications', () => {
       expect(updated?.status).toBe(EmailStatus.BOUNCED);
       // Nor is the bounce tracked as the contact's: their workflows and webhooks would read it so
       expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(0);
+    });
+
+    it('suppresses the address the email went to, not the one the contact moved to since', async () => {
+      vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const email = await sentEmail('ses-moved-bounce');
+      const old = (await prisma.contact.findUniqueOrThrow({where: {id: contactId}})).email;
+      await prisma.contact.update({where: {id: contactId}, data: {email: 'moved@example.com'}});
+
+      await post({
+        ...notification('Bounce', 'ses-moved-bounce', {bounce: {bounceType: 'Permanent'}}),
+        mail: {messageId: 'ses-moved-bounce', timestamp: new Date().toISOString(), destination: [old]},
+      });
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).bouncedAt).not.toBeNull();
+      expect((await prisma.contact.findUniqueOrThrow({where: {id: contactId}})).subscribed).toBe(true);
+      const suppressed = await prisma.plunkLiteSuppression.findMany({where: {projectId}});
+      expect(suppressed.map(row => row.email)).toEqual([old.toLowerCase()]);
     });
 
     it('unsubscribes the contact when the bounced address listed by SES is theirs', async () => {
