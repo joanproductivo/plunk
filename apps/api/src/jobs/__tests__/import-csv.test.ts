@@ -57,6 +57,21 @@ describe('splitImportRecord: a file where only status speaks', () => {
   });
 });
 
+describe('splitImportRecord: statuses that suppress the address', () => {
+  it('suppresses bounced, cleaned and complained, whatever their case', () => {
+    expect(splitImportRecord({email: 'a@example.com', status: ' Bounced '}).suppression).toBe('BOUNCE');
+    expect(splitImportRecord({email: 'a@example.com', status: 'cleaned'}).suppression).toBe('BOUNCE');
+    expect(splitImportRecord({email: 'a@example.com', status: 'COMPLAINED'}).suppression).toBe('COMPLAINT');
+    expect(splitImportRecord({email: 'a@example.com', status: 'unsubscribed'}).suppression).toBeUndefined();
+  });
+
+  it('does not take a status named like an object property for one', () => {
+    for (const status of ['constructor', '__proto__', 'hasOwnProperty', 'toString', 'valueOf']) {
+      expect(splitImportRecord({email: 'a@example.com', status}).suppression).toBeUndefined();
+    }
+  });
+});
+
 describe('parseImportDate', () => {
   const now = new Date('2026-10-26T12:00:00Z');
   const parse = (value: string) => parseImportDate(value, now)?.toISOString() ?? null;
