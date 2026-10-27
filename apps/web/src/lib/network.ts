@@ -58,14 +58,27 @@ export class network {
    */
   public static async upload<T>(method: 'POST' | 'PUT' | 'PATCH', path: string, formData: FormData): Promise<T> {
     // DO NOT set Content-Type - browser will set it automatically with boundary
-    const response = await fetch(network.url(path), {
-      method,
-      body: formData,
-      headers: network.projectHeaders(),
-      credentials: 'include',
-    });
+    let response: Response;
+    try {
+      response = await fetch(network.url(path), {
+        method,
+        body: formData,
+        headers: network.projectHeaders(),
+        credentials: 'include',
+      });
+    } catch {
+      // Also what a body too large for the proxy looks like: nginx's 413 carries no CORS headers, so
+      // the browser hides it from the dashboard and the request fails as a network error
+      throw new Error('Couldn’t reach the server. The file may be too large, or the connection dropped.');
+    }
 
-    const res = (await response.json()) as ApiResponse;
+    // A body too large for the proxy, on the API's own origin, is turned away by nginx with an HTML page
+    const res = (await response.json().catch(() => null)) as ApiResponse | null;
+    if (!res) {
+      throw new Error(
+        response.status === 413 ? 'The file is too large to upload' : `Upload failed (HTTP ${response.status})`,
+      );
+    }
     network.throwIfError(response, res);
 
     return res as T;

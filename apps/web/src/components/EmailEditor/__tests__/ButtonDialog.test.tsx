@@ -9,6 +9,18 @@ import type {ButtonAttrs} from '../EmailButton';
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
 
+const FILE_URL = 'https://files.example.com/files/p/1-0123456789abcdef-guide.pdf';
+
+// The file dialog's part is its own test's: here it only hands back a file
+vi.mock('../FileDialog', () => ({
+  FileDialog: ({open, onPick}: {open: boolean; onPick: (url: string, name: string) => void}) =>
+    open ? (
+      <button type="button" onClick={() => onPick(FILE_URL, 'guide.pdf')}>
+        Pick guide
+      </button>
+    ) : null,
+}));
+
 const BRAND_BUTTON: ButtonStyle = {...BUTTON_DEFAULTS, backgroundColor: '#0a7c3e', shape: 'pill'};
 
 let root: Root;
@@ -83,5 +95,20 @@ describe('ButtonDialog', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({...BRAND_BUTTON, text: 'Shop now'}));
     expect(setItem).not.toHaveBeenCalled();
+  });
+
+  it('links the button to an uploaded file, when storage is configured', async () => {
+    const linkToFile = () =>
+      [...document.querySelectorAll('button')].find(b => b.textContent?.includes('Link to a file'));
+    await render({});
+    expect(linkToFile()).toBeUndefined();
+
+    await act(async () => {
+      root.render(<ButtonDialog open onOpenChange={vi.fn()} onSubmit={vi.fn()} initial={null} canUpload />);
+    });
+    await act(async () => linkToFile()!.click());
+    await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Pick guide')!.click());
+
+    expect(document.querySelector<HTMLInputElement>('#button-href')!.value).toBe(FILE_URL);
   });
 });

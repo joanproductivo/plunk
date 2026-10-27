@@ -5,7 +5,7 @@ import {useEffect, useRef, useState} from 'react';
 import {OptionSelect} from './BlockFields';
 import type {VideoAttrs} from './EmailVideo';
 import type {BlockDialogProps} from './useBlockDialog';
-import {useImageUpload} from './useImageUpload';
+import {useUpload} from './useUpload';
 import {composeVideoPoster, VideoNotFoundError, type VideoPoster} from './videoPoster';
 
 const SIZES: Record<VideoSize, string> = {small: 'Small', medium: 'Medium', large: 'Large'};
@@ -56,7 +56,7 @@ function VideoForm({
   const [poster, setPoster] = useState<Poster | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const upload = useImageUpload();
+  const upload = useUpload('image');
 
   // The latest onSubmit, which knows where the block is now, for when an upload ends
   const submitRef = useRef(onSubmit);

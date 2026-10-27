@@ -11,7 +11,6 @@ import {
   Heading3,
   Image,
   Italic,
-  Link,
   List,
   ListOrdered,
   PaintBucket,
@@ -29,6 +28,8 @@ import {
 import {Button, Input} from '@plunk/ui';
 import {useCallback, useEffect, useState} from 'react';
 
+import {LinkPopover} from './LinkPopover';
+
 interface ToolbarProps {
   editor: Editor | null;
   onInsertVariable: () => void;
@@ -43,7 +44,7 @@ interface ToolbarProps {
   onVideo: () => void;
   /** Wraps the selected blocks in a box, or opens the settings of the box the cursor is in. */
   onBox: () => void;
-  canUploadImages: boolean;
+  canUpload: boolean;
 }
 
 export function Toolbar({
@@ -55,10 +56,8 @@ export function Toolbar({
   onSpacer,
   onVideo,
   onBox,
-  canUploadImages,
+  canUpload,
 }: ToolbarProps) {
-  const [showLinkInput, setShowLinkInput] = useState(false);
-  const [linkUrl, setLinkUrl] = useState('');
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [selectedColor, setSelectedColor] = useState('#000000');
   const [customColor, setCustomColor] = useState('');
@@ -82,27 +81,6 @@ export function Toolbar({
   }, [editor]);
 
   // Define all callbacks BEFORE conditional return (Rules of Hooks)
-  const addLink = useCallback(() => {
-    if (!editor) return;
-    if (linkUrl) {
-      // If updating an existing link, extend selection to cover the entire link first
-      if (editor.isActive('link')) {
-        editor.chain().focus().extendMarkRange('link').setLink({href: linkUrl}).run();
-      } else {
-        editor.chain().focus().setLink({href: linkUrl}).run();
-      }
-      setLinkUrl('');
-      setShowLinkInput(false);
-    }
-  }, [editor, linkUrl]);
-
-  const removeLink = useCallback(() => {
-    if (!editor) return;
-    editor.chain().focus().unsetLink().run();
-    setLinkUrl('');
-    setShowLinkInput(false);
-  }, [editor]);
-
   const setColor = useCallback(
     (color: string) => {
       if (!editor) return;
@@ -186,18 +164,6 @@ export function Toolbar({
     editor.chain().focus().setTextAlign('justify').run();
   }, [editor]);
   const handleToggleColorPicker = useCallback(() => setShowColorPicker(!showColorPicker), [showColorPicker]);
-  const handleToggleLinkInput = useCallback(() => {
-    if (!editor) return;
-    if (editor.isActive('link')) {
-      // Get the current link URL and show the input to edit it
-      const previousUrl = editor.getAttributes('link').href || '';
-      setLinkUrl(previousUrl);
-      setShowLinkInput(true);
-    } else {
-      setShowLinkInput(!showLinkInput);
-      setLinkUrl('');
-    }
-  }, [editor, showLinkInput]);
 
   // Tailwind color palette organized by hue
   const colorGroups = [
@@ -524,57 +490,7 @@ export function Toolbar({
       </div>
 
       {/* Link */}
-      <div className="relative pr-2 border-r border-neutral-200">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onMouseDown={e => e.preventDefault()}
-          onClick={handleToggleLinkInput}
-          data-active={editor.isActive('link')}
-          className="h-8 w-8 data-[active=true]:bg-neutral-200"
-        >
-          <Link className="h-4 w-4" />
-        </Button>
-        {showLinkInput && (
-          <div className="absolute top-10 right-0 bg-white border border-neutral-200 rounded-lg shadow-md p-2 z-50 min-w-max">
-            <div className="flex gap-2 mb-2">
-              <input
-                type="url"
-                value={linkUrl}
-                onChange={e => setLinkUrl(e.target.value)}
-                placeholder="https://example.com"
-                className="px-2 py-1 text-sm border border-neutral-200 rounded w-64"
-                onKeyDown={e => {
-                  if (e.key === 'Enter') {
-                    addLink();
-                  } else if (e.key === 'Escape') {
-                    setShowLinkInput(false);
-                    setLinkUrl('');
-                  }
-                }}
-                autoFocus
-              />
-              <Button type="button" size="sm" onMouseDown={e => e.preventDefault()} onClick={addLink}>
-                {editor.isActive('link') ? 'Update' : 'Add'}
-              </Button>
-            </div>
-            {editor.isActive('link') && (
-              <div className="flex justify-end">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="destructive"
-                  onMouseDown={e => e.preventDefault()}
-                  onClick={removeLink}
-                >
-                  Remove link
-                </Button>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+      <LinkPopover editor={editor} canUpload={canUpload} />
 
       {/* Image and blocks */}
       <div className="flex gap-0.5 pr-2 border-r border-neutral-200">
@@ -584,9 +500,9 @@ export function Toolbar({
           size="icon"
           onMouseDown={e => e.preventDefault()}
           onClick={onInsertImage}
-          disabled={!canUploadImages}
+          disabled={!canUpload}
           className="h-8 w-8"
-          title={canUploadImages ? 'Insert image' : 'Storage not configured'}
+          title={canUpload ? 'Insert image' : 'Storage not configured'}
         >
           {/* eslint-disable-next-line jsx-a11y/alt-text */}
           <Image className="h-4 w-4" />
@@ -597,15 +513,11 @@ export function Toolbar({
           size="icon"
           onMouseDown={e => e.preventDefault()}
           onClick={onVideo}
-          disabled={!canUploadImages}
+          disabled={!canUpload}
           data-active={editor.isActive('video')}
           className="h-8 w-8 data-[active=true]:bg-neutral-200"
           title={
-            !canUploadImages
-              ? 'Storage not configured'
-              : editor.isActive('video')
-                ? 'Edit video'
-                : 'Insert YouTube video'
+            !canUpload ? 'Storage not configured' : editor.isActive('video') ? 'Edit video' : 'Insert YouTube video'
           }
         >
           <Video className="h-4 w-4" />
