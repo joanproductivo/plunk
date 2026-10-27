@@ -255,15 +255,16 @@ describe('deleteUnsentCampaignEmails', () => {
     expect(await prisma.email.findUnique({where: {id: sending.id}})).not.toBeNull();
   });
 
-  it('never deletes a row a worker claims while the delete waits for it', async () => {
-    const claimed = await makeEmail();
+  /**
+   * Claim an email as a worker that read the campaign as sending before the cancel does, while the
+   * cleanup runs: it picks the row while still PENDING and waits for the claim to commit. Returns
+   * what the cleanup deleted.
+   */
+  async function cleanUpWhileClaiming(emailId: string): Promise<number> {
     let deleting: Promise<number> | undefined;
-
-    // A worker that read the campaign as sending before the cancel claims its email; the cleanup
-    // picks the row while it is still PENDING and waits for the claim to commit
     await prisma.$transaction(async tx => {
       await tx.email.updateMany({
-        where: {id: claimed.id, status: EmailStatus.PENDING},
+        where: {id: emailId, status: EmailStatus.PENDING},
         data: {status: EmailStatus.SENDING},
       });
       deleting = deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
@@ -279,9 +280,37 @@ describe('deleteUnsentCampaignEmails', () => {
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     });
+    return deleting!;
+  }
 
-    expect(await deleting).toBe(0);
+  it('never deletes a row a worker claims while the delete waits for it', async () => {
+    const claimed = await makeEmail();
+
+    expect(await cleanUpWhileClaiming(claimed.id)).toBe(0);
     expect((await prisma.email.findUnique({where: {id: claimed.id}}))?.status).toBe(EmailStatus.SENDING);
+  });
+
+  it('goes on past a batch that a claimed row cut short', async () => {
+    const contact = await factories.createContact({projectId, email: `bulk-${Date.now()}@plunk.test`});
+    await prisma.email.createMany({
+      data: Array.from({length: 1100}, () => ({
+        projectId,
+        contactId: contact.id,
+        campaignId,
+        subject: 'Bulk',
+        body: '<p>x</p>',
+        from: 'hello@plunk.test',
+        sourceType: EmailSourceType.CAMPAIGN,
+        status: EmailStatus.PENDING,
+      })),
+    });
+    // The first row the cleanup's first batch reads, so that batch deletes one row short of full
+    const [first] = await prisma.$queryRaw<{id: string}[]>`
+      SELECT "id" FROM "emails" WHERE "campaignId" = ${campaignId} AND "sentAt" IS NULL LIMIT 1
+    `;
+
+    expect(await cleanUpWhileClaiming(first.id)).toBe(1099);
+    expect(await prisma.email.count({where: {campaignId}})).toBe(1);
   });
 
   it('leaves rows created after the cancellation alone', async () => {
@@ -346,7 +375,7 @@ describe('deleteUnsentCampaignEmails', () => {
 
     expect(deleted).toBe(1100);
     expect(await prisma.email.count({where: {campaignId}})).toBe(0);
-    // One full batch, then the remainder ends the loop.
-    expect(progress).toEqual([1000]);
+    // A full batch, the remainder, and then an empty batch ends the loop.
+    expect(progress).toEqual([1000, 1100]);
   });
 });

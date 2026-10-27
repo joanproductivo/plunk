@@ -684,6 +684,11 @@ export class CampaignService {
    * a new send, finalization) waits for the transaction to end. The row is read again after the
    * lock rather than by the locking statement, so the comparison of `sentAt` is Prisma's, not a
    * raw timestamp's.
+   *
+   * This relies on a campaign's batches running one after the other. Postgres lets a new FOR
+   * SHARE in ahead of an UPDATE already waiting for the row, so many guards overlapping on one
+   * campaign can hold a cancel off for seconds (measured: about 5 s with ten at once). Running a
+   * campaign's batches in parallel means revisiting this lock.
    */
   private static async holdsCurrentSend(
     tx: Prisma.TransactionClient,

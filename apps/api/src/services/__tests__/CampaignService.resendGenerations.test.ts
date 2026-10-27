@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {CampaignAudienceType, CampaignStatus, EmailStatus} from '@plunk/db';
 import type {CampaignBatchJobData} from '@plunk/types';
 
+import {prisma as appPrisma} from '../../database/prisma';
 import {deleteUnsentCampaignEmails} from '../../jobs/campaign-cancel-cleanup-processor';
 import {type EmailJob, processEmailJob} from '../../jobs/email-processor';
 import {CampaignService} from '../CampaignService';
@@ -243,6 +244,21 @@ describe('CampaignService - re-sending a cancelled campaign', () => {
     expect(await prisma.email.count({where: {campaignId: campaign.id}})).toBe(0);
     expect(incrementUsage).not.toHaveBeenCalled();
     expect(queueEmail).not.toHaveBeenCalled();
+  });
+
+  it('waits as long as a lone query would for a pooled connection before creating an email', async () => {
+    const campaign = await sendingCampaign(1);
+    const contact = (await prisma.contact.findFirst({where: {projectId}}))!;
+    const transaction = vi.spyOn(appPrisma, '$transaction');
+
+    await EmailService.sendCampaignEmail(
+      {projectId, contactId: contact.id, campaignId: campaign.id, subject: 's', body: 'b', from: 'hello@plunk.test'},
+      async () => true,
+    );
+
+    // The pool_timeout of the deployments' DATABASE_URL; Prisma's 2 s default would fail the batch
+    // on every short pool spike
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({maxWait: 20_000}));
   });
 
   it('does not let an email that failed during the cleanup into the draft', async () => {

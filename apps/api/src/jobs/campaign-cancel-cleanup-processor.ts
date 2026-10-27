@@ -41,8 +41,8 @@ const BATCH_PAUSE_MS = 50;
  * row from a later send -- are the difference between clearing a queue and destroying
  * delivery history.
  *
- * `onBatch` is called after each full batch so the worker can report progress without
- * this function knowing about jobs.
+ * `onBatch` is called after each batch that deleted rows, so the worker can report
+ * progress without this function knowing about jobs.
  */
 export async function deleteUnsentCampaignEmails(
   campaignId: string,
@@ -75,9 +75,9 @@ export async function deleteUnsentCampaignEmails(
     // SENDING) while this statement waits on its lock is re-checked by Postgres against
     // the DELETE's own conditions only; the subselect's answer, read before the claim,
     // stands. With `id IN` alone the claimed row would be deleted, and the email would go
-    // out with no record left to keep the campaign cancelled. A row skipped that way ends
-    // the pass early, and the revert finds it departed: the campaign stays cancelled, as
-    // it does when a worker was mid-send at the cancel.
+    // out with no record left to keep the campaign cancelled. A row skipped that way is
+    // found departed by the revert: the campaign stays cancelled, as it does when a worker
+    // was mid-send at the cancel.
     const deleted = await prisma.$executeRaw`
       DELETE FROM "emails"
       WHERE "id" IN (
@@ -92,7 +92,10 @@ export async function deleteUnsentCampaignEmails(
 
     totalDeleted += deleted;
 
-    if (deleted < BATCH_SIZE) {
+    // Only an empty batch means the campaign is drained: one the re-check above has cut
+    // short does not, and the rows past it would be left behind. A row it skipped is
+    // excluded by the subselect from then on, so this always ends.
+    if (deleted === 0) {
       return totalDeleted;
     }
 
