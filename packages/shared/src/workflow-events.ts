@@ -9,6 +9,7 @@ const EXECUTION_SCOPED_EVENTS = new Set([
   'email.open',
   'email.click',
   'email.bounce',
+  'email.softbounce',
   'email.complaint',
 ]);
 

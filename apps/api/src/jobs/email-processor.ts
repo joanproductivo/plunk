@@ -509,6 +509,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       headers: outboundHeaders,
       tracking: shouldTrack,
       attachments: email.attachments as {filename: string; content: string; contentType: string}[] | null,
+      tags: {emailId, projectId: email.projectId, kind: 'email'},
     });
     accepted = {messageId: result.messageId, subject: formattedEmail.subject};
 

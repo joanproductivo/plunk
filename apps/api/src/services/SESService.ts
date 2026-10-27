@@ -1,3 +1,4 @@
+import type {EventType} from '@aws-sdk/client-ses';
 import {SES} from '@aws-sdk/client-ses';
 import {STS} from '@aws-sdk/client-sts';
 import signale from 'signale';
@@ -136,6 +137,32 @@ export const getAwsAccountId = (): Promise<string> => {
   return awsAccountId;
 };
 
+/**
+ * Plunk Lite: the SES message tags each email is sent with. SES repeats them in every event it
+ * publishes for the email (`mail.tags`), so the webhook can tell which email and project an event
+ * is about even when the email's messageId was never stored.
+ */
+export const SES_TAG = {emailId: 'plunk_email_id', projectId: 'plunk_project_id', kind: 'plunk_kind'} as const;
+
+/** What an email sent through SES is: one of the project's emails, a campaign's test send, or an alert */
+export interface SesMessageTags {
+  emailId?: string;
+  projectId: string;
+  kind: 'email' | 'test' | 'alert';
+}
+
+/** The tags as SES takes them, which allows only letters, digits, `_` and `-` in a value */
+function toSesTags(tags: SesMessageTags): {Name: string; Value: string}[] {
+  const values: [string, string | undefined][] = [
+    [SES_TAG.emailId, tags.emailId],
+    [SES_TAG.projectId, tags.projectId],
+    [SES_TAG.kind, tags.kind],
+  ];
+  return values
+    .filter((tag): tag is [string, string] => Boolean(tag[1]))
+    .map(([Name, Value]) => ({Name, Value: Value.replace(/[^A-Za-z0-9_-]/g, '_')}));
+}
+
 interface SendRawEmailParams {
   from: {
     name: string;
@@ -164,6 +191,7 @@ interface SendRawEmailParams {
       }[]
     | null;
   tracking?: boolean;
+  tags?: SesMessageTags;
 }
 
 /**
@@ -192,6 +220,7 @@ export async function sendRawEmail({
   headers,
   attachments,
   tracking = true,
+  tags,
 }: SendRawEmailParams): Promise<{messageId: string}> {
   // Generate unique boundaries for multipart messages
   const altBoundary = `----=_AltPart_${Math.random().toString(36).substring(2)}`;
@@ -324,6 +353,7 @@ ${breakLongLines(attachment.content, 76)}`;
       // The address alone: the display name travels in the From header above, and Source
       // only names the sending identity and where bounces go.
       Source: from.email,
+      ...(tags && {Tags: toSesTags(tags)}),
     },
     // The request timeout stops once SES's answer starts arriving; this bounds the whole send,
     // the answer's body included. An abort mid-answer reports no error status, so it is failed
@@ -423,37 +453,68 @@ export const deleteIdentity = async (domain: string): Promise<void> => {
 };
 
 /**
- * Check at startup that the configuration sets Plunk sends through exist in SES.
- * A missing set otherwise only shows up as a failed send, with an AWS error that
- * doesn't name the env var. The no-tracking set is only checked when it was
- * configured explicitly, since that is the only case in which it is used.
- * Never throws: a failed check is logged and the API keeps starting.
+ * The SES events the webhook needs from a configuration set: without bounces and complaints no
+ * address is ever suppressed, and without deliveries the check of the event pipeline reads every
+ * email as lost (Plunk Lite)
  */
-export const verifyConfigurationSets = async (): Promise<void> => {
+const REQUIRED_EVENT_TYPES: EventType[] = ['bounce', 'complaint', 'delivery'];
+
+/**
+ * Check at startup that the configuration sets Plunk sends through exist in SES and publish the
+ * events the webhook needs to an SNS topic (Plunk Lite). A missing set otherwise only shows up as a
+ * failed send, with an AWS error that doesn't name the env var, and a set without its SNS
+ * destination never shows up at all. The no-tracking set is only checked when it was configured
+ * explicitly, since that is the only case in which it is used.
+ *
+ * Returns what is wrong, one sentence per set; undefined when SES could not be asked. Never throws:
+ * a failed check is logged and the API keeps starting.
+ */
+export const verifyConfigurationSets = async (): Promise<string[] | undefined> => {
   const sets: {envVar: string; name: string}[] = [{envVar: 'SES_CONFIGURATION_SET', name: SES_CONFIGURATION_SET}];
   if (TRACKING_TOGGLE_ENABLED) {
     sets.push({envVar: 'SES_CONFIGURATION_SET_NO_TRACKING', name: SES_CONFIGURATION_SET_NO_TRACKING});
   }
 
+  const problems: string[] = [];
   for (const {envVar, name} of sets) {
     try {
-      await ses.describeConfigurationSet({ConfigurationSetName: name});
+      const {EventDestinations: destinations = []} = await ses.describeConfigurationSet({
+        ConfigurationSetName: name,
+        ConfigurationSetAttributeNames: ['eventDestinations'],
+      });
+      const publishing = destinations.some(
+        destination =>
+          destination.Enabled &&
+          destination.SNSDestination?.TopicARN &&
+          REQUIRED_EVENT_TYPES.every(type => destination.MatchingEventTypes?.includes(type)),
+      );
+      if (!publishing) {
+        problems.push(
+          `Configuration set "${name}" from ${envVar} has no enabled SNS event destination publishing ${REQUIRED_EVENT_TYPES.join(', ')} events: no bounce or complaint of its emails reaches Plunk.`,
+        );
+      }
     } catch (error) {
       const errorName = error instanceof Error ? error.name : undefined;
 
       if (errorName === 'ConfigurationSetDoesNotExistException') {
-        signale.error(
-          `[SES] Configuration set "${name}" from ${envVar} does not exist in ${AWS_SES_REGION}. Emails sent through it will fail until it is created or ${envVar} is corrected.`,
+        problems.push(
+          `Configuration set "${name}" from ${envVar} does not exist in ${AWS_SES_REGION}: emails sent through it fail until it is created or ${envVar} is corrected.`,
         );
       } else if (errorName === 'AccessDenied' || errorName === 'AccessDeniedException') {
         // Older IAM policies predate this check, so a missing permission is not a misconfiguration
         signale.info('[SES] Skipped configuration set check: grant ses:DescribeConfigurationSet to enable it');
-        return;
+        return undefined;
       } else {
         signale.warn(`[SES] Could not verify configuration set "${name}" from ${envVar}:`, error);
+        return undefined;
       }
     }
   }
+
+  for (const problem of problems) {
+    signale.error(`[SES] ${problem}`);
+  }
+  return problems;
 };
 
 /**

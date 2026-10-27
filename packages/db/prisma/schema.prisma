@@ -959,3 +959,20 @@ model PlunkLiteSuppression {
   @@id([projectId, email])
   @@map("plunk_lite_suppressions")
 }
+
+/// Plunk Lite: what the reputation rates still count of a project's deleted emails. Deleting a
+/// contact deletes its emails, and AWS keeps counting their bounces and complaints, so before they
+/// go each email the rates count adds to its hour here (see DeletedEmailCounts), and a project's
+/// rates add these up. No relation to Project, like the other tables of Plunk Lite; deleting the
+/// project deletes its rows explicitly.
+model PlunkLiteDeletedEmailCount {
+  projectId  String
+  /// The hour the emails were created in, which is what the rates window by
+  hour       DateTime
+  sent       Int      @default(0)
+  bounced    Int      @default(0)
+  complained Int      @default(0)
+
+  @@id([projectId, hour])
+  @@map("plunk_lite_deleted_email_counts")
+}

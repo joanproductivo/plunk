@@ -1,6 +1,7 @@
 import {Controller, Post} from '@overnightjs/core';
 import type {Prisma} from '@plunk/db';
 import {EmailSourceType, EmailStatus} from '@plunk/db';
+import {isMailboxSimulatorAddress} from '@plunk/shared';
 import type {Request, Response} from 'express';
 import {simpleParser} from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
@@ -19,20 +20,38 @@ import {
 } from '../app/constants.js';
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
+import {AwsAlarmService} from '../services/AwsAlarmService.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
 import {CampaignService} from '../services/CampaignService.js';
 import {CardVerificationService} from '../services/CardVerificationService.js';
 import {ContactService} from '../services/ContactService.js';
-import {recipientAddress} from '../services/EmailHeaderService.js';
+import {hasRecipientOverride, recipientAddress} from '../services/EmailHeaderService.js';
 import {EventService} from '../services/EventService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {MeterService} from '../services/MeterService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {QueueService} from '../services/QueueService.js';
+import {ReputationCheck} from '../services/ReputationCheck.js';
 import {SecurityService} from '../services/SecurityService.js';
+import {
+  affectedAddresses,
+  keepsSendStatus,
+  matchEmail,
+  noteSnsRejection,
+  parseSnsMessage,
+  readSesNotification,
+  recordReject,
+  reportSubscriptionRemoved,
+  reportUnreadable,
+  sentAddress,
+  suppressUnmatched,
+} from '../services/SesEventMatch.js';
+import {SnsMessages} from '../services/SnsMessages.js';
+import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+import {SES_EVENT_TRANSACTION} from '../utils/database.js';
 
 /**
  * How much a status is allowed to outrank the one already on the row.
@@ -91,36 +110,6 @@ export function isAutomaticOpen(open?: {isBotEvent?: unknown} | null, enabled = 
 }
 
 /**
- * The addresses a bounce or complaint is about, lowercased. SES lists them in
- * `bouncedRecipients` / `complainedRecipients`; when it does not, the event is about the address
- * the email was sent to.
- */
-export function affectedAddresses(
-  eventType: string,
-  body: {bounce?: {bouncedRecipients?: unknown}; complaint?: {complainedRecipients?: unknown}},
-  sentTo: string,
-): string[] {
-  const listed = eventType === 'Complaint' ? body.complaint?.complainedRecipients : body.bounce?.bouncedRecipients;
-  const addresses = Array.isArray(listed)
-    ? (listed as {emailAddress?: unknown}[])
-        .map(recipient => (typeof recipient?.emailAddress === 'string' ? recipient.emailAddress : ''))
-        // An address can come as `Name <address>`
-        .map(address => (address.match(/<([^>]+)>/)?.[1] ?? address).trim().toLowerCase())
-        .filter(Boolean)
-    : [];
-
-  return addresses.length > 0 ? addresses : [sentTo.trim().toLowerCase()];
-}
-
-/**
- * How long after SES accepted an email an event for it may still find no row. The send path
- * stamps the messageId right after SES answers and retries the stamp for about four minutes if
- * the database is down, and the recovery sweep records it after that; until then, a 503 has SNS
- * deliver the event again instead of losing it.
- */
-const UNMATCHED_EVENT_RETRY_MS = 30 * 60 * 1000;
-
-/**
  * Webhooks Controller
  * Handles incoming webhooks from external services (AWS SNS/SES)
  */
@@ -134,9 +123,11 @@ export class Webhooks {
   @Post('sns')
   @CatchAsync
   public async receiveSNSWebhook(req: Request, res: Response) {
+    // The SNS message this request claimed, settled once it is answered (see SnsMessages)
+    let claimedMessage: string | undefined;
     try {
       // Verify SNS message signature before processing anything
-      const signature = await SecurityService.verifySnsSignature(req.body as Record<string, string>);
+      const signature = await SnsSignature.verify(req.body as Record<string, string>);
       if (signature === 'unavailable') {
         // AWS's signing certificate could not be fetched. Nothing says the message is forged,
         // so a 5xx has SNS deliver it again rather than losing it.
@@ -148,6 +139,7 @@ export class Webhooks {
         // until someone notices that no engagement has been recorded for days. Every event
         // for every project drops here, and nothing else in the system counts the misses.
         signale.error('[WEBHOOK] SNS signature verification failed — request rejected. All SES events are being dropped.');
+        await noteSnsRejection('signature');
         return res.status(403).json({success: false, message: 'Invalid SNS signature'});
       }
 
@@ -161,6 +153,7 @@ export class Webhooks {
       }
       if (topicOrigin === 'foreign') {
         signale.warn(`[WEBHOOK] SNS message rejected — topic is not in this AWS account: ${String(req.body.TopicArn)}`);
+        await noteSnsRejection('topic');
         return res.status(403).json({success: false, message: 'Untrusted SNS topic'});
       }
 
@@ -218,6 +211,13 @@ export class Webhooks {
         }
       }
 
+      // Someone removed this endpoint's subscription from one of our topics. Signed and from our
+      // own account, so it is not something an outsider can post.
+      if (req.body.Type === 'UnsubscribeConfirmation') {
+        await reportSubscriptionRemoved(String(req.body.TopicArn));
+        return res.status(200).json({success: true});
+      }
+
       // Handle SNS notification messages - parse the Message field
       if (req.body.Type !== 'Notification') {
         signale.warn('[WEBHOOK] Unknown SNS message type:', req.body.Type);
@@ -225,10 +225,45 @@ export class Webhooks {
       }
 
       // Parse the nested SES event from the Message field
-      const body = JSON.parse(req.body.Message);
+      const body = parseSnsMessage(req.body.Message);
+      if (body === undefined) {
+        await reportUnreadable('the message is not JSON');
+        return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
+
+      // The account's CloudWatch alarms come through the same webhook
+      if (AwsAlarmService.isAlarm(body, req.body.TopicArn)) {
+        await AwsAlarmService.handle(body);
+        return res.status(200).json({success: true});
+      }
+
+      const notification = readSesNotification(body);
+      if (notification.kind === 'other') {
+        signale.warn(`[WEBHOOK] Ignoring an SES notification of type ${String(notification.type)}`);
+        return res.status(200).json({success: true});
+      }
+      if (notification.kind === 'invalid') {
+        await reportUnreadable(notification.reason);
+        return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
+
+      const snsMessageId: string | undefined =
+        typeof req.body.MessageId === 'string' && req.body.MessageId ? req.body.MessageId : undefined;
+      if (snsMessageId && SnsMessages.deduplicates(notification.eventType)) {
+        const claim = await SnsMessages.claim(snsMessageId);
+        if (claim === 'seen') {
+          signale.info(`[WEBHOOK] SNS message ${snsMessageId} was already handled, ignoring the copy`);
+          return res.status(200).json({success: true});
+        }
+        if (claim === 'busy') {
+          // Another copy is being handled: if it fails, this one is delivered again
+          return res.status(503).json({success: false, message: 'Already being handled'});
+        }
+        claimedMessage = snsMessageId;
+      }
 
       // Check if this is an inbound email notification (SES Receiving)
-      if (body.notificationType === 'Received') {
+      if (notification.eventType === 'Received') {
         signale.info('[WEBHOOK] Received inbound email notification from SES');
 
         try {
@@ -322,22 +357,25 @@ export class Webhooks {
                 continue; // Skip this project but continue processing for other projects
               }
 
-              // Find or create a contact for the sender in this project
-              let contact;
-              if (senderEmail) {
-                contact = await ContactService.upsert(
-                  domainRecord.projectId,
-                  senderEmail,
-                  undefined, // No additional data
-                  true, // Subscribe by default for inbound email senders
-                );
+              // An email row needs a contact, and the sender is the only one there could be
+              if (!senderEmail) {
+                signale.warn(`[WEBHOOK] Inbound email to ${recipientEmail} has no sender, skipping it`);
+                continue;
               }
+
+              // Find or create a contact for the sender in this project
+              const contact = await ContactService.upsert(
+                domainRecord.projectId,
+                senderEmail,
+                undefined, // No additional data
+                true, // Subscribe by default for inbound email senders
+              );
 
               // Create an Email record for tracking with parsed content
               const inboundEmail = await prisma.email.create({
                 data: {
                   projectId: domainRecord.projectId,
-                  contactId: contact!.id,
+                  contactId: contact.id,
                   subject: body.mail?.commonHeaders?.subject || '(No subject)',
                   body: htmlBody || '', // Store HTML body in the body field
                   from: recipientEmail, // The recipient address that received the email
@@ -385,7 +423,7 @@ export class Webhooks {
               await EventService.trackEvent(
                 domainRecord.projectId,
                 'email.received',
-                contact?.id,
+                contact.id,
                 inboundEmail.id, // Link the event to the inbound email record
                 eventData,
               );
@@ -405,40 +443,24 @@ export class Webhooks {
       }
 
       // Handle outbound email event notifications (existing logic)
-      const eventType = body.eventType as 'Bounce' | 'Delivery' | 'Open' | 'Complaint' | 'Click';
-      const messageId = body.mail?.messageId;
-
-      if (!messageId) {
-        signale.warn('[WEBHOOK] No messageId found in SNS notification');
-        return res.status(400).json({success: false, error: 'No messageId found'});
+      const {eventType, mail} = notification;
+      const match = await matchEmail(mail);
+      if (match.kind === 'retry') {
+        // An email sent moments ago may not have its send recorded yet: ask SNS to deliver the
+        // event again
+        signale.warn(`[WEBHOOK] ${eventType} event for unknown messageId ${mail.messageId}, asking SNS to retry`);
+        return res.status(503).json({success: false, error: 'Email not found yet'});
       }
-
-      // Look up email by SES messageId
-      const email = await prisma.email.findUnique({
-        where: {messageId},
-        include: {
-          contact: true,
-          project: true,
-        },
-      });
-
-      if (!email) {
-        // An email sent moments ago may not have its messageId stored yet: ask SNS to deliver
-        // the event again. Test sends and alerts have no row at all, and land here too until
-        // the window passes.
-        // A timestamp in the future (a skewed clock) is not trusted beyond a minute
-        const age = Date.now() - Date.parse(body.mail?.timestamp ?? '');
-        if (Number.isFinite(age) && age > -60_000 && age < UNMATCHED_EVENT_RETRY_MS) {
-          signale.warn(`[WEBHOOK] ${eventType} event for unknown messageId ${messageId}, asking SNS to retry`);
-          return res.status(503).json({success: false, error: 'Email not found yet'});
-        }
-
-        // Error level for the same reason as a signature failure: an event that matches no
-        // email row is silently lost, and SES gives up after its retries. A run of these
-        // means the send path is not stamping `messageId`, which is invisible from outside.
-        signale.error(`[WEBHOOK] ${eventType} event dropped — no email found for messageId: ${messageId}`);
-        return res.status(404).json({success: false, error: 'Email not found'});
+      if (match.kind === 'unmatched') {
+        await suppressUnmatched(eventType, body, mail);
+        return res.status(200).json({success: true});
       }
+      const {email} = match;
+
+      // The address the email went to, as SES was given it: the contact's at the time, or a
+      // workflow's custom recipient. The contact may have changed address since.
+      const contactAddress = email.contact.email.toLowerCase();
+      const sentTo = sentAddress(mail, recipientAddress(email.headers, email.contact.email));
 
       // Mail addressed to the SES mailbox simulator is a rehearsal of bounce handling, not a
       // reputation event: it never leaves AWS, and AWS keeps it out of its own bounce rates,
@@ -446,12 +468,12 @@ export class Webhooks {
       // exactly like any other below -- status transition, activity feed, tracked event,
       // contact suppression -- but it raises no operator alert and runs no enforcement, so a
       // sender testing their integration cannot warn or disable their own project. The rates
-      // themselves exclude these emails at the source; see SecurityService.calculateRates.
-      const isSimulated = email.simulated;
+      // themselves exclude these emails at the source; see ReputationPolicy.rates and RATED_EMAIL.
+      const isSimulated = email.simulated || isMailboxSimulatorAddress(sentTo);
 
       const now = new Date();
       const updateData: Prisma.EmailUpdateInput = {};
-      const eventName = `email.${eventType.toLowerCase()}`;
+      let eventName = `email.${eventType.toLowerCase()}`;
 
       // The first-seen timestamp this event records, if it records one, and whether it counts
       // toward the rate enforcement checks. Claimed below only if the row does not hold it yet:
@@ -546,7 +568,9 @@ export class Webhooks {
               `[WEBHOOK] Transient bounce received for ${email.contact.email} from ${email.project.name} (not counted toward bounce rate)`,
             );
             // Don't update email status or unsubscribe contact
-            // Just track the event for visibility
+            // Just track the event for visibility, under its own name: a workflow or webhook
+            // listening for `email.bounce` acts on an address that is gone, which this one is not
+            eventName = 'email.softbounce';
             eventData = {
               ...baseEventData,
               bounceType,
@@ -603,6 +627,11 @@ export class Webhooks {
           };
           break;
 
+        case 'Reject':
+          // Not a bounce: the content was refused, not the address, so nothing is suppressed
+          await recordReject(email, body.reject?.reason);
+          return res.status(200).json({success: true});
+
         default:
           signale.warn(`[WEBHOOK] Unknown event type: ${eventType}`);
           return res.status(200).json({success: true});
@@ -611,13 +640,20 @@ export class Webhooks {
       // The addresses a bounce or complaint is about. The contact is only unsubscribed -- and
       // the event only tracked against them -- when the email went to them: a workflow email sent
       // to a custom recipient bounces for that recipient, not the contact, and that address is
-      // kept off future sends by the account's suppression list. An email without a custom
-      // recipient had the contact as its only recipient, so its bounce is theirs even when SES
-      // names another address -- the DSN's Final-Recipient, for an alias or a forward.
-      const contactAddress = email.contact.email.toLowerCase();
-      const sentTo = recipientAddress(email.headers, email.contact.email).trim().toLowerCase();
+      // kept off future sends by the account's suppression list. An email that went to the
+      // contact had them as its only recipient, so its bounce is theirs even when SES names
+      // another address -- the DSN's Final-Recipient, for an alias or a forward. One sent to an
+      // address the contact has since left is not theirs any more.
       const affected = unsubscribes ? affectedAddresses(eventType, body, sentTo) : [];
       const contactIsAffected = unsubscribes && (sentTo === contactAddress || affected.includes(contactAddress));
+      // The address kept off later sends: the contact's when the event is theirs, or the one the
+      // email went to when the contact has left it. Not a workflow's custom recipient, which is
+      // rarely a contact and which the account's suppression list at SES already keeps off.
+      const suppressedAddress = contactIsAffected
+        ? email.contact.email
+        : !hasRecipientOverride(email.headers) && sentTo !== contactAddress
+          ? sentTo
+          : undefined;
 
       // `status` is dropped from the update when it would walk backwards over a suppression. SES
       // publishes through SNS, which does not guarantee ordering, so the ordinary sequence
@@ -625,13 +661,30 @@ export class Webhooks {
       // to matter -- one complaint in five, measured. Applying the Open blindly left the row
       // reading `OPENED` with `complainedAt` set, and anything that selects complaints by status
       // then silently missed it. `undefined` leaves the column alone.
-      const status = nextStatus(email.status, updateData.status as EmailStatus | undefined);
+      // A row whose send is not recorded -- failed as possibly sent, or still PENDING or SENDING
+      // long after SES took it, both found by their tags -- keeps its status: whether it counts as
+      // sent is the send path's to say, so only the event's marks are written.
+      const keepsStatus = keepsSendStatus(email);
+      const status = keepsStatus ? undefined : nextStatus(email.status, updateData.status as EmailStatus | undefined);
+
+      // With no first-seen timestamp either (an address on the account's suppression list), its
+      // SNS message is claimed instead, so a copy neither unsubscribes nor tracks it again
+      if (unsubscribes && keepsStatus && !suppression && snsMessageId && !claimedMessage) {
+        const claim = await SnsMessages.claim(snsMessageId);
+        if (claim !== 'new') {
+          signale.info(`[WEBHOOK] SNS message ${snsMessageId} was already handled or is being handled`);
+          return res.status(claim === 'seen' ? 200 : 503).json({success: claim === 'seen'});
+        }
+        claimedMessage = snsMessageId;
+      }
 
       // Whether this copy of the event is the one that records it. SNS is at-least-once, so the
       // same bounce or complaint arrives again -- sometimes several copies at once -- and only
       // the copy that claims it may alert, enforce or start workflows. Other events are new
       // every time.
       let isNew = true;
+      // The row was deleted (its contact was) after it was matched
+      let gone = false;
 
       if (unsubscribes) {
         // Everything that records a bounce or complaint, written together: if any of it fails,
@@ -640,17 +693,24 @@ export class Webhooks {
         await prisma.$transaction(
           async tx => {
             // Claimed by its first-seen timestamp, or -- for an address already on the
-            // suppression list, which records none -- by moving the email to its status
+            // suppression list, which records none -- by moving the email to its status. A row
+            // that keeps its status was claimed by its SNS message above.
             const claimed = suppression
               ? await tx.email.updateMany({
                   where: {id: email.id, [suppression.field]: null},
                   data: {[suppression.field]: now},
                 })
-              : await tx.email.updateMany({
-                  // Never over a bounce or complaint already recorded, which this would downgrade
-                  where: {id: email.id, status: {notIn: [EmailStatus.BOUNCED, EmailStatus.COMPLAINED]}},
-                  data: {status: updateData.status as EmailStatus},
-                });
+              : keepsStatus
+                ? {count: await tx.email.count({where: {id: email.id}})}
+                : await tx.email.updateMany({
+                    // Never over a bounce or complaint already recorded, which this would downgrade
+                    where: {id: email.id, status: {notIn: [EmailStatus.BOUNCED, EmailStatus.COMPLAINED]}},
+                    data: {status: updateData.status as EmailStatus},
+                  });
+            if (claimed.count === 0 && !(await tx.email.findUnique({where: {id: email.id}, select: {id: true}}))) {
+              gone = true;
+              return;
+            }
             isNew = claimed.count === 1;
 
             // Only the copy that records the event unsubscribes: an old bounce delivered again --
@@ -661,31 +721,49 @@ export class Webhooks {
                 where: {id: email.contactId},
                 data: {subscribed: false, snoozedUntil: null},
               });
+            }
 
-              // And kept off every later send, whatever resubscribes the contact in passing. Only
-              // the contact's own address: a workflow's custom recipient is rarely a contact, and
-              // the account's suppression list at SES already keeps it from being mailed. Not for a
-              // bounce SES could not classify: the address may well be fine, and SES leaves it off
-              // its own list too.
-              if (!isSimulated && (eventType === 'Complaint' || body.bounce?.bounceType === 'Permanent')) {
-                await SuppressionService.record(
-                  tx,
-                  email.projectId,
-                  [email.contact.email],
-                  eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE',
-                  email.id,
-                );
-              }
+            // And kept off every later send, whatever resubscribes the contact in passing. Not for
+            // a bounce SES could not classify: the address may well be fine, and SES leaves it off
+            // its own list too.
+            if (
+              isNew &&
+              suppressedAddress &&
+              !isSimulated &&
+              (eventType === 'Complaint' || body.bounce?.bounceType === 'Permanent')
+            ) {
+              await SuppressionService.record(
+                tx,
+                email.projectId,
+                [suppressedAddress],
+                eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE',
+                email.id,
+              );
             }
 
             await tx.email.update({where: {id: email.id}, data: {...updateData, status}});
           },
-          // A burst of events can queue for a connection; the default two-second wait would
-          // answer 500 and lean on SNS's retries
-          {maxWait: 10_000, timeout: 10_000},
+          SES_EVENT_TRANSACTION,
         );
       } else {
         await prisma.email.update({where: {id: email.id}, data: {...updateData, status}});
+      }
+
+      // A bounce or complaint of an email deleted meanwhile is one of no email
+      if (gone) {
+        await suppressUnmatched(eventType, body, mail);
+        return res.status(200).json({success: true});
+      }
+
+      // The reputation check after a bounce or complaint that counts, for a copy as well: the
+      // first one may have stopped right after recording it, before the check was queued. The
+      // check reads the rates as they are, so running it again counts nothing twice, and a
+      // project reactivated from the dashboard only counts what it sent since. It is queued, once
+      // for a burst, and never throws here.
+      if (suppression?.enforces && !isSimulated) {
+        // Only one metric moved, so only that metric's thresholds may disable the project.
+        // One notification is one event type, so it can never be both.
+        await ReputationCheck.afterEvent(email, eventType === 'Complaint' ? 'complaint' : 'bounce');
       }
 
       // A copy of a bounce or complaint that is already recorded: the suppression stands, and
@@ -693,19 +771,6 @@ export class Webhooks {
       if (!isNew) {
         signale.info(`[WEBHOOK] ${eventType} for email ${email.id} already recorded, ignoring the copy`);
         return res.status(200).json({success: true});
-      }
-
-      // Check security limits only for a suppression the project has not been charged for
-      // yet. Re-running enforcement on a copy could only re-disable a project over history it
-      // has already been judged against -- which is what happened to projects that were
-      // manually re-enabled. The check logs its own failures rather than throwing.
-      if (suppression?.enforces && !isSimulated) {
-        // Only one metric moved, so only that metric's thresholds may disable the project.
-        // One notification is one event type, so it can never be both.
-        await SecurityService.checkAndEnforceSecurityLimits(
-          email.projectId,
-          eventType === 'Complaint' ? 'complaint' : 'bounce',
-        );
       }
 
       // Operator notification for a new suppression, naming the address it is about, sent
@@ -747,7 +812,7 @@ export class Webhooks {
         if (!unsubscribes || contactIsAffected) {
           await QueueService.queueEventTracking(
             {projectId: email.projectId, eventName, contactId: email.contactId, emailId: email.id, data: eventData},
-            typeof req.body.MessageId === 'string' ? req.body.MessageId : undefined,
+            snsMessageId,
           );
         }
       } catch (error) {
@@ -770,6 +835,11 @@ export class Webhooks {
       // before the suppression was fully recorded, and a redelivery is safe: the first-seen
       // timestamps and the enforcement are gated on what the row already holds.
       return res.status(500).json({success: false, message: 'Failed to process SNS notification'});
+    } finally {
+      // After the answer, whatever it was: its status says whether the message was handled
+      if (claimedMessage) {
+        await SnsMessages.settle(claimedMessage, res.statusCode < 300);
+      }
     }
   }
 

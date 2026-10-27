@@ -7,6 +7,7 @@ import type {ReactNode} from 'react';
 import {useState} from 'react';
 import {toast} from 'sonner';
 import {network} from '../lib/network';
+import {canReactivate, ReactivateProjectButton} from './ReactivateProjectButton';
 
 type Tone = 'critical' | 'warning' | 'neutral';
 
@@ -64,7 +65,7 @@ const DISABLED_COPY: Record<string, {body: string; action: string; href: string}
     href: '/settings?tab=billing',
   },
   EMAIL_REPUTATION: {
-    body: 'Your bounce or complaint rate got too high. Clean your contact list, then contact support to re-enable sending.',
+    body: 'Your bounce or complaint rate got too high. Those addresses are already suppressed: check where they came from, then reactivate the project.',
     action: 'Review deliverability',
     href: '/settings?tab=security',
   },
@@ -132,18 +133,28 @@ function securityNotice(metrics: ProjectSecurityMetrics): Notice | null {
   };
 }
 
-function disabledNotice(reason: string | null | undefined): Notice {
+function disabledNotice(project: {disabled: boolean; disabledReason?: string | null}): Notice {
+  const reason = project.disabledReason;
   const copy = (reason && DISABLED_COPY[reason]) || DISABLED_FALLBACK;
+  const link = (
+    <Button asChild size="sm" variant="outline">
+      <Link href={copy.href}>{copy.action}</Link>
+    </Button>
+  );
   return {
     tone: 'critical',
     icon: Ban,
     title: 'Sending is paused for this project',
     body: copy.body,
     note: 'You can still view your data, but nothing can be created, changed or sent.',
-    action: (
-      <Button asChild size="sm" variant="outline">
-        <Link href={copy.href}>{copy.action}</Link>
-      </Button>
+    // Plunk Lite: a project disabled for its reputation can be reactivated from here
+    action: canReactivate(project) ? (
+      <div className="flex flex-wrap gap-2">
+        {link}
+        <ReactivateProjectButton />
+      </div>
+    ) : (
+      link
     ),
   };
 }
@@ -208,7 +219,7 @@ export function HomeNotice({project, securityMetrics, emailVerificationRequired,
 
   let notice: Notice | null = null;
   if (project.disabled) {
-    notice = disabledNotice(project.disabledReason);
+    notice = disabledNotice(project);
   } else if (security?.tone === 'critical') {
     notice = security;
   } else if (emailVerificationRequired) {

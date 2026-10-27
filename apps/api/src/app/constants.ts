@@ -136,6 +136,26 @@ export const PLUNK_ENABLED = PLUNK_API_KEY !== '' && PLUNK_FROM_ADDRESS !== '';
 // Useful for self-hosters who want to manage project status manually
 export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') === 'true';
 
+/**
+ * A percentage from the environment, strictly between 0 and 100. Anything else stops the process at
+ * startup, rather than leaving a threshold that never or always trips (Plunk Lite). Exported for
+ * lot E1 (E1.6), whose variables reuse it.
+ */
+export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string): number {
+  const raw = validateEnv(key, defaultValue);
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0 || value >= 100) {
+    throw new Error(`${key} must be a percentage between 0 and 100 (exclusive), got "${raw}"`);
+  }
+  return value;
+}
+
+// Plunk Lite: the 7-day bounce and complaint rates (%) that disable a project, with
+// AUTO_PROJECT_DISABLE. Above Plunk's critical alerts (5% and 0.1%) and below the rates at which
+// AWS pauses the whole SES account (10% and 0.5%).
+export const PLUNK_LITE_DISABLE_BOUNCE_PERCENT = parsePercent('PLUNK_LITE_DISABLE_BOUNCE_PERCENT', '8');
+export const PLUNK_LITE_DISABLE_COMPLAINT_PERCENT = parsePercent('PLUNK_LITE_DISABLE_COMPLAINT_PERCENT', '0.4');
+
 // Self-hosting Configuration (optional)
 // Controls whether new user signups are allowed (default: false)
 export const DISABLE_SIGNUPS = process.env.DISABLE_SIGNUPS === 'true';

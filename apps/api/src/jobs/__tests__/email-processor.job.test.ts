@@ -110,6 +110,21 @@ describe('processEmailJob', () => {
     expect(sendRawEmail).toHaveBeenCalledTimes(1);
   });
 
+  it('tags the send with the email and its project, and leaves out SES headers the caller set', async () => {
+    const email = await pendingEmail({sourceType: EmailSourceType.TRANSACTIONAL});
+    // As `/v1/send` stores them
+    await prisma.email.update({
+      where: {id: email.id},
+      data: {headers: {'X-SES-CONFIGURATION-SET': 'no-events', 'X-SES-MESSAGE-TAGS': 'plunk_kind=test'}},
+    });
+
+    await processEmailJob(makeJob(email.id));
+
+    const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+    expect(params.tags).toEqual({emailId: email.id, projectId, kind: 'email'});
+    expect(Object.keys(params.headers ?? {}).filter(name => name.toLowerCase().startsWith('x-ses-'))).toEqual([]);
+  });
+
   describe('before SES accepts the email', () => {
     it('puts it back to pending and rethrows while attempts remain', async () => {
       const email = await pendingEmail();

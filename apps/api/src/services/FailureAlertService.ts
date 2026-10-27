@@ -1,3 +1,4 @@
+import {Prisma} from '@plunk/db';
 import {escapeHtml, FAILURE_ALERTS_OPEN_MAX, isFailureNotice} from '@plunk/shared';
 import type {AlertSettings, FailureAlert} from '@plunk/types';
 import signale from 'signale';
@@ -9,13 +10,17 @@ import {HttpException} from '../exceptions/index.js';
 
 import {DomainService} from './DomainService.js';
 import {sendRawEmail} from './SESService.js';
-import {failureSourceFor} from './failureSources.js';
+import {sourceKeyOf} from './failureSources.js';
 
 /** One failure, as the place it happened knows it */
 export interface FailureReport {
   /**
-   * `workflow:<id>`, `campaign:<id>`, `transactional` or `project` for failures; `security:warning`,
-   * `security:critical` or `domain:<id>` for conditions the project should hear about
+   * `workflow:<id>`, `campaign:<id>` or `transactional` for failures. For conditions the project
+   * should hear about: `project` (disabled), `project:reactivated`, `brake:campaign:<id>` and
+   * `brake:workflow:<id>` (stopped for their bounces), `security:warning`, `security:critical`,
+   * `security:check` (the reputation not being checked), `domain:<id>`, `sns:<what>` (the SES event
+   * pipeline), `ses:<what>` (the SES account: its quota, a pause) and `aws:alarm:<name>`. Each kind
+   * is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -48,20 +53,105 @@ const REPUTATION_REPEAT_SECONDS = 86400;
 
 type ReputationLevel = 'warning' | 'critical';
 
+const SECURITY_PATH = '/settings?tab=security';
+
+/** A kind of source: what an alert calls it and where the dashboard shows it */
+interface SourceKind {
+  name: {en: (label: string) => string; es: (label: string) => string};
+  /** From what follows the kind in the key: an id, an alarm's name */
+  path: (rest: string) => string;
+}
+
+/**
+ * The kinds of source, by the leading parts of their keys: `campaign:<id>`, `aws:alarm:<name>`. A key
+ * is read as the longest kind it starts with, so `security:critical` has its own name and
+ * `security:warning` is a `security` one.
+ */
+const SOURCE_KINDS: Record<string, SourceKind> = {
+  'workflow': {
+    name: {en: label => `Workflow "${label}"`, es: label => `Workflow «${label}»`},
+    path: id => `/workflows/${encodeURIComponent(id)}?tab=executions`,
+  },
+  'campaign': {
+    name: {en: label => `Campaign "${label}"`, es: label => `Campaña «${label}»`},
+    path: id => `/campaigns/${encodeURIComponent(id)}`,
+  },
+  // A campaign or workflow stopped for its bounces or complaints (SourceBrakeService)
+  'brake:campaign': {
+    name: {en: label => `Campaign "${label}" stopped`, es: label => `Campaña «${label}» detenida`},
+    path: id => `/campaigns/${encodeURIComponent(id)}`,
+  },
+  'brake:workflow': {
+    name: {en: label => `Workflow "${label}" disabled`, es: label => `Workflow «${label}» desactivado`},
+    path: id => `/workflows/${encodeURIComponent(id)}`,
+  },
+  'project': {name: {en: () => 'Project disabled', es: () => 'Proyecto desactivado'}, path: () => SECURITY_PATH},
+  'project:reactivated': {
+    name: {en: () => 'Project reactivated', es: () => 'Proyecto reactivado'},
+    path: () => SECURITY_PATH,
+  },
+  'security': {name: {en: label => label, es: () => 'Reputación de envío: aviso'}, path: () => SECURITY_PATH},
+  'security:critical': {
+    name: {en: label => label, es: () => 'Reputación de envío: crítico'},
+    path: () => SECURITY_PATH,
+  },
+  // The check after bounces and complaints could not run: nothing would stop the project
+  'security:check': {
+    name: {en: label => label, es: () => 'Comprobación de la reputación de envío'},
+    path: () => SECURITY_PATH,
+  },
+  'domain': {
+    name: {en: label => `Domain "${label}"`, es: label => `Dominio «${label}»`},
+    path: () => '/settings?tab=domains',
+  },
+  // The SES event pipeline: SNS delivers every bounce, complaint and delivery to the webhook
+  'sns:unmatched': {name: {en: label => label, es: () => 'Eventos de SES sin email'}, path: () => SECURITY_PATH},
+  'sns:subscription': {
+    name: {en: label => label, es: () => 'Suscripción de eventos de SES eliminada'},
+    path: () => SECURITY_PATH,
+  },
+  'sns:invalid': {name: {en: label => label, es: () => 'Eventos de SES ilegibles'}, path: () => SECURITY_PATH},
+  'sns:events': {name: {en: label => label, es: () => 'Los eventos de SES no llegan'}, path: () => SECURITY_PATH},
+  'sns:config': {
+    name: {en: label => label, es: () => 'Configuration sets de SES'},
+    path: () => SECURITY_PATH,
+  },
+  // The SES account itself: its daily quota, a pause of its sending (`ses:<what>`). The emails it
+  // holds back wait in the activity.
+  'ses': {name: {en: () => 'Amazon SES', es: () => 'Amazon SES'}, path: () => '/activity'},
+  // A CloudWatch alarm of the AWS account, by its name
+  'aws:alarm': {
+    name: {en: label => `AWS alarm "${label}"`, es: label => `Alarma de AWS «${label}»`},
+    path: () => SECURITY_PATH,
+  },
+};
+
+const TRANSACTIONAL: SourceKind = {
+  name: {en: () => 'Transactional emails', es: () => 'Emails transaccionales'},
+  path: () => '/activity',
+};
+
+/**
+ * The kinds of source alerted on even while the project is disabled: its own suspension, and the
+ * reputation and SES conditions that led to it or came after. The SES account keeps working, since
+ * `disabled` is Plunk's own mark, and in a self-hosted installation it is the owner's account.
+ */
+const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'brake'];
+
+function sourceKind(sourceKey: string): {kind: SourceKind; rest: string} {
+  const parts = sourceKey.split(':');
+  for (let length = parts.length; length > 0; length--) {
+    const kind = SOURCE_KINDS[parts.slice(0, length).join(':')];
+    if (kind) {
+      return {kind, rest: parts.slice(length).join(':')};
+    }
+  }
+  return {kind: TRANSACTIONAL, rest: ''};
+}
+
 const COPY = {
   en: {
-    source: (sourceKey: string, label: string) =>
-      sourceKey.startsWith('workflow:')
-        ? `Workflow "${label}"`
-        : sourceKey.startsWith('campaign:')
-          ? `Campaign "${label}"`
-          : sourceKey.startsWith('security:')
-            ? label
-            : sourceKey.startsWith('domain:')
-              ? `Domain "${label}"`
-              : sourceKey === 'project'
-                ? 'The project'
-                : 'Transactional emails',
+    source: (sourceKey: string, label: string) => sourceKind(sourceKey).kind.name.en(label),
     subject: (project: string, source: string) => `[${project}] Failed: ${source}`,
     noticeSubject: (project: string, source: string) => `[${project}] Needs attention: ${source}`,
     times: (count: number, since: string) => `Failed ${count} ${count === 1 ? 'time' : 'times'} since ${since}.`,
@@ -72,22 +162,10 @@ const COPY = {
     review: 'Review it in Plunk',
     footer: 'You get at most one alert per source an hour. Change who gets these in Settings → Alerts.',
     test: 'This is a test alert: nothing has failed.',
+    disabled: 'Nothing is sent from the project until it is reactivated, in Settings → Security.',
   },
   es: {
-    source: (sourceKey: string, label: string) =>
-      sourceKey.startsWith('workflow:')
-        ? `Workflow «${label}»`
-        : sourceKey.startsWith('campaign:')
-          ? `Campaña «${label}»`
-          : sourceKey === 'security:critical'
-            ? 'Reputación de envío: crítico'
-            : sourceKey.startsWith('security:')
-              ? 'Reputación de envío: aviso'
-              : sourceKey.startsWith('domain:')
-                ? `Dominio «${label}»`
-                : sourceKey === 'project'
-                  ? 'El proyecto'
-                  : 'Emails transaccionales',
+    source: (sourceKey: string, label: string) => sourceKind(sourceKey).kind.name.es(label),
     subject: (project: string, source: string) => `[${project}] Ha fallado: ${source}`,
     noticeSubject: (project: string, source: string) => `[${project}] Requiere atención: ${source}`,
     times: (count: number, since: string) => `Ha fallado ${count} ${count === 1 ? 'vez' : 'veces'} desde ${since}.`,
@@ -98,6 +176,7 @@ const COPY = {
     review: 'Revisarlo en Plunk',
     footer: 'Recibes como mucho un aviso por origen cada hora. Elige quién los recibe en Settings → Alerts.',
     test: 'Este es un aviso de prueba: no ha fallado nada.',
+    disabled: 'El proyecto no envía nada hasta que se reactive, en Settings → Security.',
   },
 } as const;
 
@@ -115,9 +194,13 @@ export class FailureAlertService {
   /**
    * Records a failure under its source and alerts the project if it is the source's turn. True when
    * it was, so the alert is on its way; false when the source was alerted on within the hour, or
-   * the failure could not be recorded.
+   * the failure could not be recorded. With `alert` off it is only recorded, for the banner.
    */
-  public static async record(projectId: string, report: FailureReport): Promise<boolean> {
+  public static async record(
+    projectId: string,
+    report: FailureReport,
+    {alert = true}: {alert?: boolean} = {},
+  ): Promise<boolean> {
     try {
       const error = report.error.slice(0, ERROR_MAX);
       // A source reviewed since its last failure opens again: its count starts over and it gets
@@ -139,6 +222,9 @@ export class FailureAlertService {
           "lastError" = EXCLUDED."lastError",
           "lastContactEmail" = EXCLUDED."lastContactEmail"
         RETURNING "id", "sourceKey", "label", "count", "lastError", "lastContactEmail", "firstAt", "lastAt"`;
+      if (!alert) {
+        return false;
+      }
 
       // One alert per source an hour: of failures arriving together, the one that moves
       // `notifiedAt` sends it.
@@ -179,6 +265,43 @@ export class FailureAlertService {
     }
   }
 
+  /**
+   * A condition of the whole installation rather than of one project -- the SES event pipeline, an
+   * alarm of the AWS account -- recorded in every project that can act on it, each alerting as
+   * `record` does. Disabled projects are left out unless `includeDisabled`. Never throws.
+   */
+  public static async recordForAll(
+    report: FailureReport,
+    {includeDisabled = false, alert = true}: {includeDisabled?: boolean; alert?: boolean} = {},
+  ): Promise<void> {
+    try {
+      const projects = await prisma.project.findMany({
+        where: includeDisabled ? {} : {disabled: false},
+        select: {id: true},
+      });
+      for (const project of projects) {
+        await this.record(project.id, report, {alert});
+      }
+    } catch (lookupError) {
+      signale.warn(`[ALERTS] Could not record ${report.sourceKey} in the projects:`, lookupError);
+    }
+  }
+
+  /**
+   * A condition that is over, in one project or in every one: its source is marked reviewed up to
+   * its last failure, so the banner drops it until it is recorded again. Never throws.
+   */
+  public static async resolve(sourceKey: string, projectId?: string): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+        UPDATE "plunk_lite_failures" SET "reviewedAt" = "lastAt"
+        WHERE "sourceKey" = ${sourceKey} AND ("reviewedAt" IS NULL OR "reviewedAt" < "lastAt")
+          ${projectId ? Prisma.sql`AND "projectId" = ${projectId}` : Prisma.empty}`;
+    } catch (resolveError) {
+      signale.warn(`[ALERTS] Could not resolve ${sourceKey} in ${projectId ?? 'the projects'}:`, resolveError);
+    }
+  }
+
   /** An email SES did not take, under the workflow, campaign or API call that sent it */
   public static async recordEmail(
     email: {
@@ -191,16 +314,8 @@ export class FailureAlertService {
     error: string,
   ): Promise<void> {
     try {
-      const workflow = email.workflowExecutionId
-        ? (
-            await prisma.workflowExecution.findUnique({
-              where: {id: email.workflowExecutionId},
-              select: {workflow: {select: {id: true, name: true}}},
-            })
-          )?.workflow
-        : null;
       await this.record(email.projectId, {
-        ...failureSourceFor({...email, workflow}),
+        ...(await sourceKeyOf(email)),
         error,
         contactEmail: email.contact.email,
       });
@@ -396,7 +511,8 @@ export class FailureAlertService {
 
   /**
    * Emails the project's alert addresses about a source; false when there is no one to tell. A
-   * disabled project sends nothing: its account must not be used to report its own suspension.
+   * disabled project only sends the alerts in ALERTED_WHILE_DISABLED, its suspension among them,
+   * and never a test.
    *
    * Sent with `sendRawEmail` from the project's own domain, like a campaign's test send: Plunk's
    * platform emails (`sendPlatformEmail`) need PLUNK_API_KEY, which these installations do not set.
@@ -414,7 +530,8 @@ export class FailureAlertService {
       this.getSettings(projectId),
       prisma.project.findUnique({where: {id: projectId}, select: {name: true, disabled: true, language: true}}),
     ]);
-    if (!settings || !project || project.disabled) {
+    const alertedWhileDisabled = !test && ALERTED_WHILE_DISABLED.includes(failure.sourceKey.split(':')[0]!);
+    if (!settings || !project || (project.disabled && !alertedWhileDisabled)) {
       return false;
     }
 
@@ -460,6 +577,7 @@ export class FailureAlertService {
           // Out-of-office replies to an hourly alert would come back every hour
           headers: {'Auto-Submitted': 'auto-generated', 'X-Auto-Response-Suppress': 'All'},
           tracking: false,
+          tags: {projectId, kind: 'alert'},
         });
       } catch (error) {
         rejected.push(`${recipient}: ${error instanceof Error ? error.message : String(error)}`);
@@ -504,6 +622,9 @@ export class FailureAlertService {
     if (failure.lastContactEmail) {
       lines.push(`<p>${escapeHtml(copy.contact)}: ${escapeHtml(failure.lastContactEmail)}</p>`);
     }
+    if (failure.sourceKey === 'project') {
+      lines.push(`<p>${escapeHtml(copy.disabled)}</p>`);
+    }
     lines.push(
       `<p><a href="${escapeHtml(DASHBOARD_URI + this.reviewPath(failure.sourceKey))}">${escapeHtml(copy.review)}</a></p>`,
       `<p style="color:#737373;font-size:12px">${escapeHtml(copy.footer)}</p>`,
@@ -513,20 +634,7 @@ export class FailureAlertService {
 
   /** Where the dashboard shows a source's failures, as a path of the dashboard */
   private static reviewPath(sourceKey: string): string {
-    const [kind, id] = sourceKey.split(':');
-    switch (kind) {
-      case 'workflow':
-        return `/workflows/${encodeURIComponent(id ?? '')}?tab=executions`;
-      case 'campaign':
-        return `/campaigns/${encodeURIComponent(id ?? '')}`;
-      case 'project':
-        return '/settings';
-      case 'security':
-        return '/settings?tab=security';
-      case 'domain':
-        return '/settings?tab=domains';
-      default:
-        return '/activity';
-    }
+    const {kind, rest} = sourceKind(sourceKey);
+    return kind.path(rest);
   }
 }

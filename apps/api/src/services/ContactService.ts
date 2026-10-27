@@ -13,7 +13,9 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION} from '../utils/database.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
+import {DeletedEmailCounts} from './DeletedEmailCounts.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -345,15 +347,16 @@ export class ContactService {
   }
 
   /**
-   * Delete a contact
+   * Delete a contact. Its emails go first, still counted in the project's rates (DeletedEmailCounts).
    */
   public static async delete(projectId: string, contactId: string): Promise<void> {
     // First verify contact exists and belongs to project
     await this.get(projectId, contactId);
 
-    await prisma.contact.delete({
-      where: {id: contactId},
-    });
+    await prisma.$transaction(async tx => {
+      await DeletedEmailCounts.deleteEmails(tx, projectId, [contactId]);
+      await tx.contact.delete({where: {id: contactId}});
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -1262,15 +1265,13 @@ export class ContactService {
   }
 
   /**
-   * Bulk delete contacts
+   * Bulk delete contacts. Their emails go first, still counted in the project's rates (DeletedEmailCounts).
    */
   public static async bulkDelete(projectId: string, contactIds: string[]): Promise<{deleted: number}> {
-    const result = await prisma.contact.deleteMany({
-      where: {
-        id: {in: contactIds},
-        projectId,
-      },
-    });
+    const result = await prisma.$transaction(async tx => {
+      await DeletedEmailCounts.deleteEmails(tx, projectId, contactIds);
+      return tx.contact.deleteMany({where: {id: {in: contactIds}, projectId}});
+    }, LONG_TRANSACTION);
 
     return {deleted: result.count};
   }

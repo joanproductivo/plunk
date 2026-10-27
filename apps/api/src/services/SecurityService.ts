@@ -1,5 +1,3 @@
-import crypto from 'crypto';
-
 import {ProjectDisabledEmail, sendPlatformEmail} from '@plunk/email';
 import React from 'react';
 import signale from 'signale';
@@ -11,6 +9,8 @@ import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+import type {DisableVerdict, RateData} from './ReputationPolicy.js';
+import {ReputationPolicy} from './ReputationPolicy.js';
 import {getAwsAccountId} from './SESService.js';
 import {
   AUTO_PROJECT_DISABLE,
@@ -28,11 +28,14 @@ import {
 /**
  * Security thresholds for bounce and complaint rates
  * These limits protect AWS SES reputation and prevent account suspension. The critical ones sit
- * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate -- so a
- * project is stopped before SES has to act on the whole account. The dashboard repeats them
- * (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
+ * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate. The dashboard
+ * repeats them (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
+ *
+ * Plunk Lite: past a critical one the project is alerted, and the campaign or workflow sending is
+ * stopped (SourceBrakeService); the project is only disabled past the higher rates of
+ * ReputationPolicy.
  */
-const SECURITY_THRESHOLDS = {
+export const SECURITY_THRESHOLDS = {
   // Minimum emails required before enforcing rate-based limits (prevents false positives)
   MIN_EMAILS_FOR_ENFORCEMENT: 100,
 
@@ -125,18 +128,10 @@ async function clearPhishingHistory(projectId: string): Promise<void> {
   await redis.del(key);
 }
 
-interface RateData {
-  total: number;
-  bounces: number;
-  complaints: number;
-  bounceRate: number;
-  complaintRate: number;
-}
-
 /**
  * The two things a reputation threshold can measure, and the two events that move them.
  */
-type SecurityMetric = 'bounce' | 'complaint';
+export type SecurityMetric = 'bounce' | 'complaint';
 
 interface SecurityStatus {
   projectId: string;
@@ -151,57 +146,6 @@ interface SecurityStatus {
   // Which metrics have at least one critical violation. Internal: enforcement uses it to
   // act only on the metric the triggering event moved; never sent to the dashboard.
   criticalByMetric: Record<SecurityMetric, boolean>;
-}
-
-const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
-const snsSigningCertCache = new Map<string, string>();
-
-/** The outcome of checking an SNS message signature */
-export type SnsSignatureCheck = 'valid' | 'invalid' | 'unavailable';
-
-/** AWS's signing certificate could not be fetched: the network failed, or SNS answered with a 5xx */
-class SigningCertUnavailableError extends Error {}
-
-async function fetchSigningCert(certUrl: string): Promise<string> {
-  const cached = snsSigningCertCache.get(certUrl);
-  if (cached) return cached;
-
-  // Anything that keeps an answer from arriving -- the network, the timeout (which runs from
-  // the request to the last byte of the body), a 5xx -- is unavailable. A 4xx is an answer: the
-  // certificate does not exist, so the signature cannot be valid.
-  const signal = AbortSignal.timeout(5000);
-  let response: Response;
-  try {
-    response = await fetch(certUrl, {signal});
-  } catch (error) {
-    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
-  }
-  if (response.status >= 500) {
-    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.status}`);
-  }
-  if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
-
-  let pem: string;
-  try {
-    pem = await response.text();
-  } catch (error) {
-    throw new SigningCertUnavailableError(`Failed to read SNS signing cert: ${String(error)}`);
-  }
-
-  snsSigningCertCache.set(certUrl, pem);
-  return pem;
-}
-
-function buildSnsStringToSign(message: Record<string, string>): string {
-  const fields =
-    message['Type'] === 'Notification'
-      ? ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type']
-      : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
-
-  return fields
-    .filter(key => message[key] !== undefined)
-    .map(key => `${key}\n${message[key]}\n`)
-    .join('');
 }
 
 /**
@@ -238,46 +182,6 @@ export class SecurityService {
     } catch (error) {
       signale.error('[SNS] Could not look up the AWS account to check the topic against:', error);
       return 'unknown';
-    }
-  }
-
-  /**
-   * Verify an AWS SNS message signature: 'invalid' if the cert URL is untrusted or the
-   * signature doesn't match, 'unavailable' if AWS's certificate could not be fetched.
-   */
-  public static async verifySnsSignature(body: Record<string, string>): Promise<SnsSignatureCheck> {
-    try {
-      const certUrl = body['SigningCertURL'];
-      const signature = body['Signature'];
-
-      if (!certUrl || !signature) {
-        signale.warn('[SNS] Missing SigningCertURL or Signature');
-        return 'invalid';
-      }
-
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(certUrl);
-      } catch {
-        signale.warn('[SNS] Unparseable SigningCertURL');
-        return 'invalid';
-      }
-
-      if (parsedUrl.protocol !== 'https:' || !SNS_CERT_HOST_RE.test(parsedUrl.hostname)) {
-        signale.warn(`[SNS] Untrusted SigningCertURL host: ${parsedUrl.hostname}`);
-        return 'invalid';
-      }
-
-      const pem = await fetchSigningCert(certUrl);
-      const stringToSign = buildSnsStringToSign(body);
-      const algorithm = body['SignatureVersion'] === '2' ? 'RSA-SHA256' : 'RSA-SHA1';
-
-      const verifier = crypto.createVerify(algorithm);
-      verifier.update(stringToSign, 'utf8');
-      return verifier.verify(pem, signature, 'base64') ? 'valid' : 'invalid';
-    } catch (err) {
-      signale.error('[SNS] Signature verification error:', err);
-      return err instanceof SigningCertUnavailableError ? 'unavailable' : 'invalid';
     }
   }
 
@@ -338,98 +242,86 @@ export class SecurityService {
   }
 
   /**
-   * Check security status after a new bounce or complaint, and auto-disable the project if
-   * that event pushed its own metric past a critical threshold.
+   * Check security status after new bounces or complaints, and auto-disable the project if one of
+   * them pushed its own metric past disabling it (Plunk Lite: ReputationPolicy; past a critical
+   * threshold short of that, it is alerted). `triggers` are the metrics the events since the last
+   * check moved (Plunk Lite: a check runs once for a burst of them).
    *
-   * Only violations of the `trigger` metric can disable. The complaint rate is complaints
+   * Only violations of a triggering metric can disable. The complaint rate is complaints
    * over total sent, so a bounce cannot raise it (and every send only lowers it); the same
    * holds the other way round. A critical violation of the other metric was therefore
    * already there when its own last event arrived, and was judged then. Acting on it again
    * here is what re-disabled projects on their next bounce after a manual re-enable.
+   *
+   * Plunk Lite: throws when the rates cannot be read or the project cannot be disabled, so the job
+   * running it tries again -- a check that failed has not found the project healthy.
    */
-  public static async checkAndEnforceSecurityLimits(projectId: string, trigger: SecurityMetric): Promise<void> {
-    try {
-      // Invalidate cache to get fresh data
-      await this.invalidateCache(projectId);
+  public static async checkAndEnforceSecurityLimits(projectId: string, triggers: SecurityMetric[]): Promise<void> {
+    const status = await this.calculateSecurityStatus(projectId);
+    // Fresh for the dashboard too
+    await redis.setex(Keys.Security.rates(projectId), this.CACHE_TTL, JSON.stringify(status)).catch(error => {
+      signale.warn(`[SECURITY] Could not cache the security status of project ${projectId}:`, error);
+    });
+    const verdict = await ReputationPolicy.disableByMetric(projectId);
+    const isCritical = triggers.some(trigger => status.criticalByMetric[trigger]);
 
-      // Get current security status
-      const status = await this.getSecurityStatus(projectId);
-      const shouldDisable = status.criticalByMetric[trigger];
+    // If project should be disabled, disable it (only if auto-disable is enabled)
+    if (AUTO_PROJECT_DISABLE && triggers.some(trigger => verdict[trigger])) {
+      await this.disableProject(projectId, status, verdict);
+    } else if (isCritical) {
+      // Log critical violations but don't disable: auto-disable is off, or the rates are short of it
+      const project = await prisma.project.findUnique({
+        where: {id: projectId},
+        select: {name: true},
+      });
 
-      // If project should be disabled, disable it (only if auto-disable is enabled)
-      if (shouldDisable && AUTO_PROJECT_DISABLE) {
-        await this.disableProject(projectId, status);
-      } else if (shouldDisable && !AUTO_PROJECT_DISABLE) {
-        // Log critical violations but don't auto-disable (self-hosted mode)
-        const project = await prisma.project.findUnique({
-          where: {id: projectId},
-          select: {name: true},
-        });
-
-        if (project) {
-          signale.error(
-            `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations but auto-disable is turned off:`,
-            status.violations,
-          );
-          signale.info(
-            `[SECURITY] 24-hour stats: ${status.twentyFourHour.bounces} bounces, ${status.twentyFourHour.complaints} complaints out of ${status.twentyFourHour.total} emails`,
-          );
-          signale.info(
-            `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
-          );
-          signale.info(
-            `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
-          );
-          if (status.isNewProject) {
-            signale.info(
-              `[SECURITY] Project is under ${SECURITY_THRESHOLDS.NEW_PROJECT_AGE_DAYS} days old — stricter ceilings apply`,
-            );
-          }
-
-          await FailureAlertService.recordReputation(projectId, 'critical', status.violations);
-
-          // Send notification about critical security violations
-          await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
-        }
-      } else if (status.shouldDisable) {
-        // Critical, but only on the metric this event did not move: already judged, not re-enforced.
-        signale.warn(
-          `[SECURITY] Project ${projectId} has critical violations unrelated to this ${trigger}; not enforcing:`,
+      if (project) {
+        signale.error(
+          `[SECURITY] Project ${projectId} (${project.name}) has CRITICAL security violations, not disabled (auto-disable ${AUTO_PROJECT_DISABLE ? 'on' : 'off'}):`,
           status.violations,
         );
-      } else if (status.warnings.length > 0) {
-        // Log warnings for monitoring
-        signale.warn(`[SECURITY] Project ${projectId} has security warnings:`, status.warnings);
-
-        // Get project name for notification
-        const project = await prisma.project.findUnique({
-          where: {id: projectId},
-          select: {name: true},
-        });
-
-        if (project) {
-          await FailureAlertService.recordReputation(projectId, 'warning', status.warnings);
-
-          // Send notification about security warning
-          await NtfyService.notifySecurityWarning(project.name, projectId, status.warnings);
+        signale.info(
+          `[SECURITY] 24-hour stats: ${status.twentyFourHour.bounces} bounces, ${status.twentyFourHour.complaints} complaints out of ${status.twentyFourHour.total} emails`,
+        );
+        signale.info(
+          `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
+        );
+        signale.info(
+          `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
+        );
+        if (status.isNewProject) {
+          signale.info(
+            `[SECURITY] Project is under ${SECURITY_THRESHOLDS.NEW_PROJECT_AGE_DAYS} days old — stricter ceilings apply`,
+          );
         }
-      }
-    } catch (error) {
-      // Log error but don't throw - we don't want security checks to break the webhook
-      signale.error(`[SECURITY] Failed to check security limits for project ${projectId}:`, error);
-    }
-  }
 
-  /**
-   * Invalidate cached security data for a project
-   * Should be called after bounce/complaint events
-   */
-  public static async invalidateCache(projectId: string): Promise<void> {
-    try {
-      const cacheKey = Keys.Security.rates(projectId);
-      await redis.del(cacheKey);
-    } catch (error) {
-      signale.error(`[SECURITY] Failed to invalidate cache for project ${projectId}:`, error);
+        await FailureAlertService.recordReputation(projectId, 'critical', status.violations);
+
+        // Send notification about critical security violations
+        await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
+      }
+    } else if (status.shouldDisable) {
+      // Critical, but only on a metric these events did not move: already judged, not re-enforced.
+      signale.warn(
+        `[SECURITY] Project ${projectId} has critical violations unrelated to this ${triggers.join(' and ')}; not enforcing:`,
+        status.violations,
+      );
+    } else if (status.warnings.length > 0) {
+      // Log warnings for monitoring
+      signale.warn(`[SECURITY] Project ${projectId} has security warnings:`, status.warnings);
+
+      // Get project name for notification
+      const project = await prisma.project.findUnique({
+        where: {id: projectId},
+        select: {name: true},
+      });
+
+      if (project) {
+        await FailureAlertService.recordReputation(projectId, 'warning', status.warnings);
+
+        // Send notification about security warning
+        await NtfyService.notifySecurityWarning(project.name, projectId, status.warnings);
+      }
     }
   }
 
@@ -530,64 +422,6 @@ export class SecurityService {
   }
 
   /**
-   * Calculate bounce and complaint rates for a project
-   */
-  private static async calculateRates(projectId: string, startDate?: Date): Promise<RateData> {
-    const where = {
-      projectId,
-      // Mail to the SES mailbox simulator is excluded from both sides of every rate: it
-      // never leaves AWS, and AWS itself keeps it out of bounce rates, complaint rates,
-      // sending quotas and reputation metrics. Counting a deliberate
-      // `bounce@simulator.amazonses.com` test here would let a sender rehearsing their
-      // bounce handling warn or auto-disable their own project. Excluding it from the
-      // denominator as well as the numerator is the part that is easy to miss: dropping
-      // only the bounces would leave the test sends inflating the denominator and quietly
-      // understating the real bounce rate.
-      //
-      // Nothing else changes for these emails -- the webhook fires, the activity feed
-      // shows the bounce, the contact is still suppressed.
-      simulated: false,
-      // Only emails SES was given count, as only those count for AWS: a campaign creates its
-      // rows well ahead of the send, and counting the ones still queued (or never sent) would
-      // understate the rate exactly while a large send is going out
-      sentAt: {not: null},
-      ...(startDate && {
-        createdAt: {
-          gte: startDate,
-        },
-      }),
-    };
-
-    // Get counts in parallel for performance
-    const [total, bounces, complaints] = await Promise.all([
-      prisma.email.count({where}),
-      prisma.email.count({
-        where: {
-          ...where,
-          bouncedAt: {not: null},
-        },
-      }),
-      prisma.email.count({
-        where: {
-          ...where,
-          complainedAt: {not: null},
-        },
-      }),
-    ]);
-
-    const bounceRate = total > 0 ? (bounces / total) * 100 : 0;
-    const complaintRate = total > 0 ? (complaints / total) * 100 : 0;
-
-    return {
-      total,
-      bounces,
-      complaints,
-      bounceRate,
-      complaintRate,
-    };
-  }
-
-  /**
    * Calculate security status without caching
    */
   private static async calculateSecurityStatus(projectId: string): Promise<SecurityStatus> {
@@ -606,9 +440,9 @@ export class SecurityService {
 
     // Get 24-hour, 7-day and all-time rates in parallel
     const [twentyFourHour, sevenDay, allTime] = await Promise.all([
-      this.calculateRates(projectId, oneDayAgo),
-      this.calculateRates(projectId, sevenDaysAgo),
-      this.calculateRates(projectId),
+      ReputationPolicy.rates({projectId, since: oneDayAgo}),
+      ReputationPolicy.rates({projectId, since: sevenDaysAgo}),
+      ReputationPolicy.rates({projectId}),
     ]);
 
     const violations: string[] = [];
@@ -766,94 +600,94 @@ export class SecurityService {
   }
 
   /**
-   * Disable a project due to security violations
+   * Disable a project due to security violations. Throws if the project cannot be read or
+   * disabled (Plunk Lite), so its check runs again; what follows the disable never throws.
    */
-  private static async disableProject(projectId: string, status: SecurityStatus): Promise<void> {
-    try {
-      // Check if already disabled to avoid duplicate logs
-      const project = await prisma.project.findUnique({
-        where: {id: projectId},
-        select: {id: true, disabled: true, name: true},
-      });
+  private static async disableProject(
+    projectId: string,
+    status: SecurityStatus,
+    verdict: DisableVerdict,
+  ): Promise<void> {
+    // Check if already disabled to avoid duplicate logs
+    const project = await prisma.project.findUnique({
+      where: {id: projectId},
+      select: {id: true, disabled: true, name: true},
+    });
 
-      if (!project) {
-        signale.error(`[SECURITY] Project ${projectId} not found`);
-        return;
-      }
+    if (!project) {
+      signale.error(`[SECURITY] Project ${projectId} not found`);
+      return;
+    }
 
-      if (project.disabled) {
-        // Already disabled, just log the current violations
-        signale.warn(
-          `[SECURITY] Project ${projectId} (${project.name}) already disabled. Current violations:`,
-          status.violations,
-        );
-        return;
-      }
+    // Disable the project, only if it still is enabled: a project disabled meanwhile, for its
+    // content or its billing, keeps that reason, and only one check alerts about it
+    const disabled = project.disabled
+      ? {count: 0}
+      : await prisma.project.updateMany({
+          where: {id: projectId, disabled: false},
+          data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
+        });
 
-      // Disable the project
-      await prisma.project.update({
-        where: {id: projectId},
-        data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
-      });
-
-      // Log critical security event
-      signale.error(
-        `[SECURITY] Project ${projectId} (${project.name}) has been automatically disabled due to security violations:`,
+    if (disabled.count !== 1) {
+      // Already disabled, just log the current violations
+      signale.warn(
+        `[SECURITY] Project ${projectId} (${project.name}) already disabled. Current violations:`,
         status.violations,
       );
-      signale.info(
-        `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
-      );
-      signale.info(
-        `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
-      );
+      return;
+    }
 
-      // Cancel all pending jobs for this project
-      try {
-        await QueueService.cancelAllProjectJobs(projectId);
-        signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
-      } catch (error) {
-        signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
-      }
+    // Log critical security event
+    signale.error(
+      `[SECURITY] Project ${projectId} (${project.name}) has been automatically disabled due to security violations:`,
+      verdict.violations,
+    );
+    signale.info(
+      `[SECURITY] 7-day stats: ${status.sevenDay.bounces} bounces, ${status.sevenDay.complaints} complaints out of ${status.sevenDay.total} emails`,
+    );
+    signale.info(
+      `[SECURITY] All-time stats: ${status.allTime.bounces} bounces, ${status.allTime.complaints} complaints out of ${status.allTime.total} emails`,
+    );
 
-      await FailureAlertService.record(projectId, {
-        sourceKey: 'project',
-        label: 'Project disabled',
-        error: status.violations.join('; '),
-      });
-
-      // Send urgent notification about project suspension
-      await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, status.violations);
-
-      // Send email notification to project members
-      try {
-        const members = await MembershipService.getMembers(projectId);
-        const emails = members.map(m => m.email);
-        if (emails.length > 0) {
-          const metrics = (Object.keys(status.criticalByMetric) as SecurityMetric[]).filter(
-            m => status.criticalByMetric[m],
-          );
-          // Bounce/complaint rates are visible in the dashboard, so the email names them.
-          // Thresholds and the new-project 24h window stay internal.
-          const template = React.createElement(ProjectDisabledEmail, {
-            projectName: project.name,
-            projectId,
-            reason: 'reputation',
-            metrics: metrics.length > 0 ? metrics : ['bounce', 'complaint'],
-            sevenDay: status.sevenDay,
-            allTime: status.allTime,
-            dashboardUrl: DASHBOARD_URI,
-            landingUrl: LANDING_URI,
-          });
-          await Promise.all(
-            emails.map(email => sendPlatformEmail(email, 'Project Disabled', template)),
-          );
-        }
-      } catch (emailError) {
-        signale.error(`[SECURITY] Failed to send project disabled email:`, emailError);
-      }
+    // Cancel all pending jobs for this project
+    try {
+      await QueueService.cancelAllProjectJobs(projectId);
+      signale.info(`[SECURITY] Cancelled all pending jobs for project ${projectId}`);
     } catch (error) {
-      signale.error(`[SECURITY] Failed to disable project ${projectId}:`, error);
+      signale.error(`[SECURITY] Failed to cancel pending jobs for project ${projectId}:`, error);
+    }
+
+    await FailureAlertService.record(projectId, {
+      sourceKey: 'project',
+      label: 'Project disabled',
+      error: verdict.violations.join('; '),
+    });
+
+    // Send urgent notification about project suspension
+    await NtfyService.notifyProjectDisabledForSecurity(project.name, projectId, verdict.violations);
+
+    // Send email notification to project members
+    try {
+      const members = await MembershipService.getMembers(projectId);
+      const emails = members.map(m => m.email);
+      if (emails.length > 0) {
+        const metrics = (['bounce', 'complaint'] as SecurityMetric[]).filter(m => verdict[m]);
+        // Bounce/complaint rates are visible in the dashboard, so the email names them.
+        // Thresholds and the new-project 24h window stay internal.
+        const template = React.createElement(ProjectDisabledEmail, {
+          projectName: project.name,
+          projectId,
+          reason: 'reputation',
+          metrics: metrics.length > 0 ? metrics : ['bounce', 'complaint'],
+          sevenDay: status.sevenDay,
+          allTime: status.allTime,
+          dashboardUrl: DASHBOARD_URI,
+          landingUrl: LANDING_URI,
+        });
+        await Promise.all(emails.map(email => sendPlatformEmail(email, 'Project Disabled', template)));
+      }
+    } catch (emailError) {
+      signale.error(`[SECURITY] Failed to send project disabled email:`, emailError);
     }
   }
 

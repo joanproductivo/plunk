@@ -237,14 +237,15 @@ export class AnalyticsService {
           WHERE ${emailScope(query)}
         `,
         // Transient bounces never touch the email row, so they only exist as events.
-        // Counted per email, since SES retries and reports each attempt.
+        // Counted per email, since SES retries and reports each attempt. Tracked as
+        // `email.softbounce` now, and as an `email.bounce` marked transient before.
         prisma.$queryRaw<{count: bigint}[]>`
           SELECT COUNT(DISTINCT ev."emailId") AS count
           FROM "events" ev
           WHERE ev."projectId" = ${query.projectId}
-            AND ev."name" = 'email.bounce'
+            AND ev."name" IN ('email.softbounce', 'email.bounce')
             AND ev."createdAt" >= ${utc(query.from)} AND ev."createdAt" < ${utc(query.to)}
-            AND ev."data"->>'transientBounce' = 'true'
+            AND (ev."name" = 'email.softbounce' OR ev."data"->>'transientBounce' = 'true')
             ${eventStreamFilter(query.stream)}
         `,
         prisma.$queryRaw<(CountRow & {domain: string})[]>`
@@ -526,6 +527,7 @@ export class AnalyticsService {
           COUNT(DISTINCT ev."contactId") FILTER (WHERE ev."name" = 'contact.unsubscribed') AS unsubscribed,
           COUNT(DISTINCT ev."contactId") FILTER (
             WHERE ev."name" = 'email.complaint'
+              -- Transient bounces were tracked as email.bounce before email.softbounce existed
               OR (ev."name" = 'email.bounce' AND ev."data"->>'transientBounce' IS NULL)
           ) AS suppressed
         FROM "events" ev

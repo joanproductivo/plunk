@@ -62,9 +62,10 @@ import {
   segmentCountQueue,
   emailRecoverySweepQueue,
   snoozeSweepQueue,
+  plunkLiteChecksQueue,
 } from './services/QueueService.js';
 import * as S3Service from './services/S3Service.js';
-import {verifyConfigurationSets} from './services/SESService.js';
+import {checkConfigurationSets} from './services/SesEventMatch.js';
 import {useJsonBodyParsers} from './middleware/bodyParsers.js';
 import {requestIdMiddleware} from './middleware/requestId.js';
 import {databaseRequestLogger} from './middleware/requestLogger.js';
@@ -549,8 +550,9 @@ void prisma.$connect().then(async () => {
     }
   }
 
-  // Not awaited: a slow SES response must not hold up scheduling the background jobs below
-  void verifyConfigurationSets();
+  // Not awaited: a slow SES response must not hold up scheduling the background jobs below.
+  // Plunk Lite: a set that does not publish its bounces and complaints is told to every project.
+  void checkConfigurationSets();
 
   // Set up repeatable job for domain verification (BullMQ)
   // Run every 5 minutes to check domain verification status with AWS SES
@@ -694,4 +696,19 @@ void prisma.$connect().then(async () => {
   );
 
   signale.info('[BACKGROUND-JOB] Email recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
+
+  // Plunk Lite: every 15 minutes, whether SES events reach the webhook. One grouped query over the
+  // emails of the last six hours, by the `createdAt` index; it only records and alerts.
+  await plunkLiteChecksQueue.add(
+    'sns-health',
+    {},
+    {
+      repeat: {
+        pattern: '*/15 * * * *', // Every 15 minutes
+      },
+      jobId: 'sns-health-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] SES events check scheduled (BullMQ repeatable job, runs every 15 minutes)');
 });

@@ -2,7 +2,9 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {EmailStatus, EmailSourceType} from '@plunk/db';
 import {SecurityService} from '../SecurityService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
+import {sendRawEmail} from '../SESService';
 
 const flags = vi.hoisted(() => ({autoProjectDisable: true}));
 
@@ -23,6 +25,12 @@ vi.mock('../NtfyService.js', () => ({
     notifySecurityWarning: vi.fn(),
     notifyProjectDisabledForSecurity: vi.fn(),
   },
+}));
+
+// The alerts to the project's addresses (Plunk Lite) go out through SES
+vi.mock('../SESService.js', async () => ({
+  ...(await vi.importActual('../SESService.js')),
+  sendRawEmail: vi.fn(async () => ({messageId: 'mock-message-id'})),
 }));
 
 // Mock email sending for project disabled notifications
@@ -215,10 +223,10 @@ describe('SecurityService', () => {
 
   describe('checkAndEnforceSecurityLimits', () => {
     it('should disable project when critical thresholds are exceeded', async () => {
-      // New project, 20K emails with 30 bounces — exceeds new project 24h critical ceiling
-      await createEmails(20000, {bouncedCount: 30});
+      // Plunk Lite: 30 bounces in 300 emails (10%) is past disabling: 8%, with 25 bounces in 200
+      await createEmails(300, {bouncedCount: 30});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
@@ -233,6 +241,24 @@ describe('SecurityService', () => {
       expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: 'security:critical'}})).toBe(0);
     });
 
+    it('emails the alert addresses when it disables the project', async () => {
+      await factories.createDomain({projectId, domain: 'example.com'});
+      await prisma.plunkLiteAlertSettings.create({
+        data: {projectId, recipients: ['ops@example.org'], fromEmail: 'alerts@example.com'},
+      });
+      await createEmails(300, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      expect(sendRawEmail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: ['ops@example.org'],
+          content: expect.objectContaining({subject: expect.stringMatching(/Needs attention: Project disabled$/)}),
+        }),
+      );
+    });
+
     it('records a critical rate as a reputation alert when auto-disable is off', async () => {
       flags.autoProjectDisable = false;
       const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
@@ -240,7 +266,7 @@ describe('SecurityService', () => {
       // Critical 7-day bounce rate
       await createEmails(100, {bouncedCount: 11});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({where: {id: projectId}, select: {disabled: true}});
       expect(project?.disabled).toBe(false);
@@ -261,7 +287,7 @@ describe('SecurityService', () => {
       });
       await createEmails(400, {bouncedCount: 12});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
@@ -291,59 +317,174 @@ describe('SecurityService', () => {
       return project?.disabled;
     }
 
-    async function createReportedScenario() {
-      // Old enough to sit outside the 7-day window: only the all-time complaint rate trips.
-      const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
-      await createEmails(4003, {bouncedCount: 19, complainedCount: 6, createdAt: longAgo});
+    it('does not disable on a bounce when only the complaint rate is past disabling', async () => {
+      // 5 complaints in 1,000 emails: 0.5%, past 0.4%
+      await createEmails(1000, {complainedCount: 5});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
+      expect(await isDisabled()).toBe(false);
+    });
+
+    it('disables on a complaint when the complaint rate is past disabling', async () => {
+      await createEmails(1000, {complainedCount: 5});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
+
+      expect(await isDisabled()).toBe(true);
+    });
+
+    it('disables on a bounce when the bounce rate is past disabling', async () => {
+      await createEmails(300, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
+      expect(await isDisabled()).toBe(true);
+    });
+
+    it('does not disable on a complaint when only the bounce rate is past disabling', async () => {
+      await createEmails(300, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
+
+      expect(await isDisabled()).toBe(false);
+    });
+
+    it('keeps the reason of a project disabled for something else while the rates were read', async () => {
+      await createEmails(300, {bouncedCount: 30});
+      // Read as enabled, then disabled for its content before the disable is written
+      const findUnique = appPrisma.project.findUnique.bind(appPrisma.project);
+      vi.spyOn(appPrisma.project, 'findUnique').mockImplementation((async (args: {select?: {disabled?: boolean}}) => {
+        const project = await findUnique(args as never);
+        if (args.select?.disabled) {
+          await prisma.project.update({
+            where: {id: projectId},
+            data: {disabled: true, disabledReason: 'PHISHING_DETECTED'},
+          });
+          return {...project, disabled: false};
+        }
+        return project;
+      }) as never);
+
+      try {
+        await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+      } finally {
+        vi.restoreAllMocks();
+      }
+
+      expect(await prisma.project.findUniqueOrThrow({where: {id: projectId}})).toMatchObject({
+        disabled: true,
+        disabledReason: 'PHISHING_DETECTED',
+      });
+      expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: 'project'}})).toBe(0);
+    });
+
+    it('disables on a burst that moved both, for either of them', async () => {
+      await createEmails(1000, {complainedCount: 5});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce', 'complaint']);
+
+      expect(await isDisabled()).toBe(true);
+    });
+  });
+
+  /**
+   * Plunk Lite: a project is only disabled as a last resort, past 8% bounces or 0.4% complaints in 7
+   * days. Plunk's other criticals -- the 7-day ones short of that, the all-time rates, the ceilings
+   * for new projects -- alert, and stop the campaign or workflow sending (SourceBrakeService).
+   */
+  describe('disabling as a last resort', () => {
+    async function isDisabled() {
+      return (await prisma.project.findUniqueOrThrow({where: {id: projectId}})).disabled;
     }
 
-    it('does not disable on a bounce when only the complaint rate is critical', async () => {
-      await createReportedScenario();
+    async function criticalAlert() {
+      return prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'security:critical'}});
+    }
 
-      const status = await SecurityService.getSecurityStatus(projectId);
-      expect(status.shouldDisable).toBe(true);
-      expect(status.violations.some(v => v.includes('All-time complaint rate'))).toBe(true);
+    beforeEach(async () => {
+      const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      await prisma.project.update({where: {id: projectId}, data: {createdAt: oldDate}});
+    });
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+    it('only alerts at a 7% bounce rate', async () => {
+      await createEmails(400, {bouncedCount: 28});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
+      expect(await isDisabled()).toBe(false);
+      expect((await criticalAlert())?.lastError).toContain('7-day bounce rate');
+    });
+
+    it('disables at 9% with 30 bounces, saying why', async () => {
+      await createEmails(334, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
+      expect(await isDisabled()).toBe(true);
+      const alert = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId, sourceKey: 'project'}});
+      expect(alert.lastError).toMatch(/^7-day bounce rate \(8\.98%, 30 of 334 emails\) reached 8%$/);
+    });
+
+    it('does not disable at 9% with fewer than 25 bounces', async () => {
+      await createEmails(220, {bouncedCount: 20});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
 
       expect(await isDisabled()).toBe(false);
     });
 
-    it('disables on a complaint when the complaint rate is critical', async () => {
-      await createReportedScenario();
+    it('disables on 5 complaints however few emails went out', async () => {
+      // 5 complaints in 150 emails: no minimum of emails, as there is for bounces
+      await createEmails(150, {complainedCount: 5});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
-
-      expect(await isDisabled()).toBe(true);
-    });
-
-    it('disables on a bounce when the bounce rate is critical', async () => {
-      // Critical 7-day bounce rate
-      await createEmails(100, {bouncedCount: 11});
-
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
 
       expect(await isDisabled()).toBe(true);
     });
 
-    it('does not disable on a complaint when only the bounce rate is critical', async () => {
-      await createEmails(100, {bouncedCount: 11});
+    it('does not disable on 4 complaints, however high the rate', async () => {
+      await createEmails(50, {complainedCount: 4});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
 
       expect(await isDisabled()).toBe(false);
     });
 
-    it('gates the new-project bounce ceiling on bounces too', async () => {
+    it('only alerts on an all-time rate, however high', async () => {
+      const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      await createEmails(1000, {bouncedCount: 50, complainedCount: 6, createdAt: longAgo});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce', 'complaint']);
+
+      expect(await isDisabled()).toBe(false);
+      expect((await criticalAlert())?.lastError).toContain('All-time bounce rate');
+    });
+
+    it('only alerts on the 24-hour and 7-day ceilings of a new project', async () => {
       await prisma.project.update({where: {id: projectId}, data: {createdAt: new Date()}});
-      // Trips the 24-hour new-project bounce ceiling while the bounce rate stays healthy.
-      await createEmails(20000, {bouncedCount: 30});
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      // 25 bounces today and 60 in the week, out of 30,000: past all the bounce ceilings, 0.3%
+      await createEmails(20000, {bouncedCount: 25});
+      await createEmails(10000, {bouncedCount: 35, createdAt: threeDaysAgo});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+
       expect(await isDisabled()).toBe(false);
+      const {lastError} = (await criticalAlert())!;
+      expect(lastError).toContain('24-hour bounce count (new project)');
+      expect(lastError).toContain('7-day bounce count (new project)');
+    });
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
-      expect(await isDisabled()).toBe(true);
+    it('only alerts on the complaint ceilings of a new project', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {createdAt: new Date()}});
+      // 25 complaints in 20,000: past both complaint ceilings, 0.125%, short of 0.4%
+      await createEmails(20000, {complainedCount: 25});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
+
+      expect(await isDisabled()).toBe(false);
+      expect((await criticalAlert())?.lastError).toContain('7-day complaint count (new project)');
     });
   });
 

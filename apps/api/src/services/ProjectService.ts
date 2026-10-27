@@ -1,5 +1,5 @@
 import {Keys} from './keys.js';
-import {wrapRedis} from '../database/redis.js';
+import {redis, wrapRedis} from '../database/redis.js';
 import {prisma} from '../database/prisma.js';
 
 export class ProjectService {
@@ -27,5 +27,17 @@ export class ProjectService {
         },
       });
     });
+  }
+
+  /**
+   * Drops a project from the caches above, by its id and both keys, so a change to it -- being
+   * reactivated (Plunk Lite) -- applies to the next request rather than when the cache expires
+   */
+  public static async invalidate(project: {id: string; secret: string; public: string}): Promise<void> {
+    await redis.del(
+      Keys.Project.id(project.id),
+      Keys.Project.secret(project.secret),
+      Keys.Project.public(project.public),
+    );
   }
 }

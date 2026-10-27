@@ -114,6 +114,25 @@ describe('AnalyticsService - open and click rates against tracked emails', () =>
     expect(providers[0]).toMatchObject({sent: 2, tracked: 1, openRate: 100});
   });
 
+  it('counts soft bounces per email, under their own event and as the email.bounce they were before', async () => {
+    const [legacy, current, hard] = [
+      await send(EmailSourceType.CAMPAIGN),
+      await send(EmailSourceType.CAMPAIGN),
+      await send(EmailSourceType.CAMPAIGN),
+    ];
+    const event = (emailId: string, name: string, data: Record<string, unknown>) =>
+      prisma.event.create({data: {projectId, contactId, emailId, name, data}});
+    await event(legacy.id, 'email.bounce', {bounceType: 'Transient', transientBounce: true});
+    await event(current.id, 'email.softbounce', {bounceType: 'Transient', transientBounce: true});
+    // SES retries, and reports each attempt
+    await event(current.id, 'email.softbounce', {bounceType: 'Transient', transientBounce: true});
+    await event(hard.id, 'email.bounce', {bounceType: 'Permanent'});
+
+    const {softBounces} = await AnalyticsService.getDeliverability(query(ENABLED));
+
+    expect(softBounces).toBe(2);
+  });
+
   it('marks campaigns sent as transactional as untracked when only marketing mail is tracked', async () => {
     const started = async (type: TemplateType) => {
       const campaign = await factories.createCampaign({projectId, type});

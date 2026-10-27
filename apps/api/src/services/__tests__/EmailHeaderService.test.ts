@@ -224,6 +224,20 @@ describe('buildEmailHeaders', () => {
       const suppressKeys = Object.keys(headers).filter(k => k.toLowerCase() === 'x-auto-response-suppress');
       expect(suppressKeys).toHaveLength(1);
     });
+
+    it("drops the caller's SES instructions, whatever their case, and keeps the rest", () => {
+      // What `/v1/send` stores as the email's headers
+      const headers = buildEmailHeaders({
+        emailClass: 'transactional',
+        customHeaders: {
+          'X-SES-CONFIGURATION-SET': 'no-events',
+          'x-ses-message-tags': 'plunk_email_id=00000000-0000-4000-8000-000000000000',
+          'X-Order-Id': '42',
+        },
+      });
+
+      expect(headers).toEqual({'X-Order-Id': '42'});
+    });
   });
 
   describe('caller-supplied List-Unsubscribe (bring your own list management)', () => {

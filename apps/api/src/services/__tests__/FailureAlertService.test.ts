@@ -40,6 +40,28 @@ describe('FailureAlertService', () => {
   /** The alert runs after `record` returns; give it time to reach SES */
   const settle = () => new Promise(resolve => setTimeout(resolve, 100));
 
+  /**
+   * The emails sent to this test's project, in order. Only its own: an alert recorded by an earlier
+   * test, in another project, can still be on its way to SES.
+   */
+  const alerts = () =>
+    vi
+      .mocked(sendRawEmail)
+      .mock.calls.map(([params]) => params)
+      .filter(params => params.tags?.projectId === projectId);
+
+  /** SES rejects the first email to this test's project, whatever else is on its way */
+  const rejectFirst = (message: string) => {
+    let rejected = false;
+    vi.mocked(sendRawEmail).mockImplementation(async params => {
+      if (!rejected && params.tags?.projectId === projectId) {
+        rejected = true;
+        throw new Error(message);
+      }
+      return {messageId: 'mock-message-id'};
+    });
+  };
+
   const row = () => prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId, sourceKey: WORKFLOW}});
 
   describe('recording', () => {
@@ -85,7 +107,7 @@ describe('FailureAlertService', () => {
       const reopened = await row();
       expect(reopened).toMatchObject({count: 1, lastError: 'again'});
       expect(reopened.firstAt.getTime()).toBeGreaterThan(before.getTime());
-      expect(sendRawEmail).toHaveBeenCalledTimes(2); // one per address
+      expect(alerts()).toHaveLength(2); // one per address
     });
 
     it("does not review another project's failures", async () => {
@@ -108,13 +130,13 @@ describe('FailureAlertService', () => {
       await Promise.all([fail(), fail(), fail()]);
       await settle();
 
-      expect(sendRawEmail).toHaveBeenCalledTimes(2);
-      const recipients = vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.to);
+      expect(alerts()).toHaveLength(2);
+      const recipients = alerts().map(params => params.to);
       expect(recipients).toEqual(expect.arrayContaining([['ops@example.org'], ['boss@example.org']]));
 
       await fail();
       await settle();
-      expect(sendRawEmail).toHaveBeenCalledTimes(2);
+      expect(alerts()).toHaveLength(2);
     });
 
     it('alerts again once the hour has passed, with the count so far', async () => {
@@ -130,17 +152,17 @@ describe('FailureAlertService', () => {
       await fail();
       await settle();
 
-      expect(sendRawEmail).toHaveBeenCalledTimes(2);
-      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].content.html).toContain('Failed 3 times');
+      expect(alerts()).toHaveLength(2);
+      expect(alerts()[0]!.content.html).toContain('Failed 3 times');
     });
 
     it('keeps emailing the other addresses when one is rejected', async () => {
-      vi.mocked(sendRawEmail).mockRejectedValueOnce(new Error('Email address is not verified.'));
+      rejectFirst('Email address is not verified.');
 
       await fail();
       await settle();
 
-      expect(sendRawEmail).toHaveBeenCalledTimes(2);
+      expect(alerts()).toHaveLength(2);
     });
 
     it('says what failed in the subject', async () => {
@@ -148,7 +170,7 @@ describe('FailureAlertService', () => {
       await fail('x', 'transactional');
       await settle();
 
-      const subjects = vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.content.subject);
+      const subjects = alerts().map(params => params.content.subject);
       expect(subjects).toContain(
         '[' + (await prisma.project.findUniqueOrThrow({where: {id: projectId}})).name + '] Failed: Workflow "Welcome"',
       );
@@ -166,7 +188,7 @@ describe('FailureAlertService', () => {
       });
       await fail();
       await settle();
-      expect(sendRawEmail).toHaveBeenCalledTimes(1);
+      expect(alerts()).toHaveLength(1);
     });
 
     it('sends at most ten alerts an hour per project, however many sources fail', async () => {
@@ -176,7 +198,7 @@ describe('FailureAlertService', () => {
       }
       await settle();
 
-      expect(sendRawEmail).toHaveBeenCalledTimes(10);
+      expect(alerts()).toHaveLength(10);
       expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(12);
     });
 
@@ -189,35 +211,61 @@ describe('FailureAlertService', () => {
       });
       await settle();
 
-      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      const params = alerts()[0]!;
       expect(params.content.subject).toContain('Ha fallado: Workflow «<b>Welcome</b>»');
       expect(params.content.html).not.toContain('<script>');
       expect(params.content.html).toContain('&lt;script&gt;');
       expect(params.content.html).toContain('Ha fallado 1 vez');
       expect(params.headers).toMatchObject({'Auto-Submitted': 'auto-generated'});
       expect(params.tracking).toBe(false);
+      expect(params.tags).toEqual({projectId, kind: 'alert'});
     });
 
     it('records but sends nothing without addresses, for a disabled project, or with no verified domain', async () => {
       await prisma.plunkLiteAlertSettings.deleteMany({where: {projectId}});
       await fail();
       await settle();
-      expect(sendRawEmail).not.toHaveBeenCalled();
+      expect(alerts()).toEqual([]);
 
       await prisma.plunkLiteAlertSettings.create({
         data: {projectId, recipients: ['ops@example.org'], fromEmail: 'alerts@example.com'},
       });
       await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
       await fail('x', 'transactional');
+      await fail('x', 'campaign:22222222-2222-4222-8222-222222222222');
       await settle();
-      expect(sendRawEmail).not.toHaveBeenCalled();
+      expect(alerts()).toEqual([]);
 
       await prisma.project.update({where: {id: projectId}, data: {disabled: false}});
       await prisma.domain.updateMany({where: {projectId}, data: {verified: false}});
       await fail('x', 'project');
       await settle();
-      expect(sendRawEmail).not.toHaveBeenCalled();
-      expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(3);
+      expect(alerts()).toEqual([]);
+      expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(4);
+    });
+
+    it('tells a disabled project about its suspension and its reputation, from its own SES account', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {disabled: true, language: 'es'}});
+
+      await fail('7-day bounce rate too high', 'project');
+      await fail('7-day bounce rate', 'security:critical');
+      await fail('No events', 'sns:events');
+      await settle();
+
+      const subjects = alerts().map(params => params.content.subject);
+      expect(subjects.filter(subject => subject.endsWith('Requiere atención: Proyecto desactivado'))).toHaveLength(2);
+      expect(subjects.filter(subject => subject.includes('Reputación de envío: crítico'))).toHaveLength(2);
+      expect(subjects).toHaveLength(6);
+      const params = alerts()[0]!;
+      expect(params.content.html).toContain('El proyecto no envía nada hasta que se reactive');
+      expect(params.content.html).toContain('/settings?tab=security');
+    });
+
+    it('sends no test alert from a disabled project', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {disabled: true}});
+
+      await expect(FailureAlertService.sendTest(projectId)).rejects.toThrow('A disabled project cannot send alerts');
+      expect(alerts()).toEqual([]);
     });
   });
 
@@ -231,10 +279,7 @@ describe('FailureAlertService', () => {
       await fail();
       await settle();
 
-      expect(vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.from.email)).toEqual([
-        `alerts@${other.domain}`,
-        `alerts@${other.domain}`,
-      ]);
+      expect(alerts().map(params => params.from.email)).toEqual([`alerts@${other.domain}`, `alerts@${other.domain}`]);
     });
 
     it("does not take another project's domain of the same name for the sender's", async () => {
@@ -247,7 +292,7 @@ describe('FailureAlertService', () => {
       await fail();
       await settle();
 
-      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].from.email).toBe('alerts@example.com');
+      expect(alerts()[0]!.from.email).toBe('alerts@example.com');
     });
   });
 
@@ -263,7 +308,7 @@ describe('FailureAlertService', () => {
 
       const [open] = await FailureAlertService.listOpen(projectId);
       expect(open).toMatchObject({label: 'Sending reputation: warning', reviewPath: '/settings?tab=security'});
-      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      const params = alerts()[0]!;
       expect(params.content.subject).toMatch(/\] Needs attention: Sending reputation: warning$/);
       expect(params.content.html).toContain('Seen 1 time');
       expect(params.content.html).toContain('Details: 7-day bounce rate');
@@ -286,7 +331,7 @@ describe('FailureAlertService', () => {
       await FailureAlertService.recordReputation(projectId, 'warning', [complaint]);
       expect(await reputation()).toMatchObject({count: 2});
       await settle();
-      expect(sendRawEmail).toHaveBeenCalledTimes(4);
+      expect(alerts()).toHaveLength(4);
 
       // A day later, the same conditions are recorded again
       await redis.del(`plunk-lite:alerts:reputation:${projectId}:warning`);
@@ -301,7 +346,7 @@ describe('FailureAlertService', () => {
       await FailureAlertService.recordReputation(projectId, 'warning', [warning(12), complaint]);
       expect(await reputation()).toMatchObject({count: 3});
       await settle();
-      expect(sendRawEmail).toHaveBeenCalledTimes(2);
+      expect(alerts()).toHaveLength(2);
 
       // Past the hour, the next event sends it
       await prisma.plunkLiteFailure.updateMany({
@@ -310,8 +355,8 @@ describe('FailureAlertService', () => {
       });
       await FailureAlertService.recordReputation(projectId, 'warning', [warning(13), complaint]);
       await settle();
-      expect(sendRawEmail).toHaveBeenCalledTimes(4);
-      expect(vi.mocked(sendRawEmail).mock.calls[3]![0].content.html).toContain('All-time complaint rate');
+      expect(alerts()).toHaveLength(4);
+      expect(alerts()[3]!.content.html).toContain('All-time complaint rate');
       // And from then on, those conditions are no news
       await FailureAlertService.recordReputation(projectId, 'warning', [warning(13), complaint]);
       expect(await reputation()).toMatchObject({count: 4});
@@ -327,7 +372,7 @@ describe('FailureAlertService', () => {
         'security:critical',
         'security:warning',
       ]);
-      const subjects = vi.mocked(sendRawEmail).mock.calls.map(([params]) => params.content.subject);
+      const subjects = alerts().map(params => params.content.subject);
       expect(subjects.some(subject => subject.endsWith('Requiere atención: Reputación de envío: crítico'))).toBe(true);
       expect(subjects.some(subject => subject.endsWith('Requiere atención: Reputación de envío: aviso'))).toBe(true);
     });
@@ -344,21 +389,86 @@ describe('FailureAlertService', () => {
         reviewPath: '/settings?tab=domains',
       });
       expect(open!.lastError).toContain('SES reports the domain as Failed');
-      expect(vi.mocked(sendRawEmail).mock.calls[0]![0].content.subject).toMatch(
-        /\] Needs attention: Domain "news\.example\.com"$/,
-      );
+      expect(alerts()[0]!.content.subject).toMatch(/\] Needs attention: Domain "news\.example\.com"$/);
+    });
+  });
+
+  describe('the SES event pipeline', () => {
+    it('alerts on it as needing attention, with a link to the security settings, in the project language', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
+      await FailureAlertService.record(projectId, {
+        sourceKey: 'sns:unmatched',
+        label: 'SES events without an email',
+        error: 'A bounce matched no email',
+      });
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({sourceKey: 'sns:unmatched', reviewPath: '/settings?tab=security'});
+      const params = alerts()[0]!;
+      expect(params.content.subject).toMatch(/\] Requiere atención: Eventos de SES sin email$/);
+      expect(params.content.html).toContain('Detectado 1 vez');
+      expect(params.content.html).toContain('/settings?tab=security');
+    });
+
+    it('records it in every project that is not disabled', async () => {
+      const {project: other} = await factories.createUserWithProject();
+      const {project: disabled} = await factories.createUserWithProject({}, {disabled: true});
+
+      await FailureAlertService.recordForAll({
+        sourceKey: 'sns:subscription',
+        label: 'SES events subscription removed',
+        error: 'Unsubscribed',
+      });
+
+      const recorded = await prisma.plunkLiteFailure.findMany({
+        where: {sourceKey: 'sns:subscription', projectId: {in: [projectId, other.id, disabled.id]}},
+      });
+      expect(recorded.map(failure => failure.projectId).sort()).toEqual([projectId, other.id].sort());
+      // Its alerts go out after `recordForAll` returns: they must not reach the next test
+      await settle();
+    });
+  });
+
+  describe('Plunk Lite conditions', () => {
+    const CAMPAIGN = '33333333-3333-4333-8333-333333333333';
+
+    it.each([
+      [`brake:campaign:${CAMPAIGN}`, 'Promo', 'Campaña «Promo» detenida', `/campaigns/${CAMPAIGN}`],
+      ['brake:workflow:w1', 'Welcome', 'Workflow «Welcome» desactivado', '/workflows/w1'],
+      ['project:reactivated', 'Project reactivated', 'Proyecto reactivado', '/settings?tab=security'],
+      [
+        'security:check',
+        'Sending reputation check',
+        'Comprobación de la reputación de envío',
+        '/settings?tab=security',
+      ],
+      ['sns:events', 'SES events not arriving', 'Los eventos de SES no llegan', '/settings?tab=security'],
+      ['sns:config', 'SES configuration sets', 'Configuration sets de SES', '/settings?tab=security'],
+      ['ses:paused', 'SES', 'Amazon SES', '/activity'],
+      ['ses:daily-quota', 'SES', 'Amazon SES', '/activity'],
+    ])('names %s and links to where it is reviewed, as needing attention', async (sourceKey, label, name, path) => {
+      await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
+      await FailureAlertService.record(projectId, {sourceKey, label, error: 'Details'});
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({sourceKey, reviewPath: path});
+      const params = alerts()[0]!;
+      expect(params.content.subject).toMatch(new RegExp(`\\] Requiere atención: ${name}$`));
     });
   });
 
   describe('sources', () => {
-    it('records a project disabled for its content, without emailing from the disabled project', async () => {
+    it('records a project disabled for its content, and emails the alert addresses about it', async () => {
       await SecurityService.disableProjectForPhishing(projectId, 'Subject', 99);
       await settle();
 
       expect(await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: 'project'}})).toMatchObject({
         label: 'Project disabled',
       });
-      expect(sendRawEmail).not.toHaveBeenCalled();
+      expect(alerts()).toHaveLength(2);
+      expect(alerts()[0]!.content.subject).toMatch(/Needs attention: Project disabled$/);
     });
 
     it('records a campaign batch that ran out of attempts under the campaign', async () => {
@@ -397,7 +507,7 @@ describe('FailureAlertService', () => {
 
   describe('test alert', () => {
     it('reports what SES says, and allows one a minute', async () => {
-      vi.mocked(sendRawEmail).mockRejectedValueOnce(new Error('Email address is not verified.'));
+      rejectFirst('Email address is not verified.');
       await expect(FailureAlertService.sendTest(projectId)).rejects.toThrow('Email address is not verified.');
 
       await expect(FailureAlertService.sendTest(projectId)).rejects.toMatchObject({code: 429});
@@ -411,7 +521,7 @@ describe('FailureAlertService', () => {
         code: 403,
         message: 'The domain of alerts@example.com is not verified',
       });
-      expect(sendRawEmail).not.toHaveBeenCalled();
+      expect(alerts()).toEqual([]);
     });
 
     it('needs addresses first', async () => {

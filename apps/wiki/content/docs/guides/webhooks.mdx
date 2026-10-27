@@ -31,7 +31,8 @@ Plunk automatically tracks a set of internal events that you can use as workflow
 | `email.delivery`  | An email was delivered to the recipient                                                                  |
 | `email.open`      | A contact opened an email. By default, opens SES marks as automated are left out                         |
 | `email.click`     | A contact clicked a link in an email                                                                     |
-| `email.bounce`    | An email bounced (hard or soft bounce)                                                                   |
+| `email.bounce`    | An email bounced permanently, or SES could not classify the bounce                                       |
+| `email.softbounce` | An email bounced temporarily (mailbox full, out-of-office); the contact stays subscribed                |
 | `email.complaint` | A contact marked an email as spam                                                                        |
 | `email.received`  | An email was received at your verified domain (requires [inbound email setup](/guides/receiving-emails)) |
 
@@ -330,7 +331,7 @@ Permanent bounce:
 }
 ```
 
-Transient (soft) bounce:
+Transient (soft) bounce, tracked as `email.softbounce` so that what listens for `email.bounce` does not act on it:
 
 ```json
 {
@@ -359,7 +360,7 @@ Transient (soft) bounce:
 <Callout title="Bounce rate impact" type="warn">
   Permanent and undetermined bounces unsubscribe the contact and count toward your project's bounce rate; only
   permanent ones can trigger automatic disabling. `OnAccountSuppressionList` bounces unsubscribe but do not count.
-  `Transient` bounces are tracked for visibility only. A bounce of a workflow email sent to a custom recipient does not
+  `Transient` bounces are tracked for visibility only, as `email.softbounce`. A bounce of a workflow email sent to a custom recipient does not
   unsubscribe the contact and is not tracked on them.
 </Callout>
 

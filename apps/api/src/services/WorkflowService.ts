@@ -6,11 +6,14 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION} from '../utils/database.js';
 import type {ListSort} from '../utils/listSort.js';
 
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {WorkflowEmailLinks} from './WorkflowEmailLinks.js';
+import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
 import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
@@ -277,6 +280,11 @@ export class WorkflowService {
       return updatedWorkflow;
     });
 
+    // Plunk Lite: a workflow enabled again has its brake count from now on
+    if (data.enabled === true && !workflow.enabled) {
+      await WorkflowEnabledAt.note(workflowId);
+    }
+
     // Invalidate workflow cache if enabled status changed or workflow is enabled
     if (data.enabled !== undefined || updated.enabled) {
       await EventService.invalidateWorkflowCache(projectId);
@@ -327,9 +335,10 @@ export class WorkflowService {
       );
     }
 
-    await prisma.workflow.delete({
-      where: {id: workflowId},
-    });
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachWorkflows(tx, projectId, [workflowId]);
+      await tx.workflow.delete({where: {id: workflowId}});
+    }, LONG_TRANSACTION);
 
     // Invalidate workflow cache if workflow was enabled
     if (workflow.enabled) {
@@ -358,7 +367,8 @@ export class WorkflowService {
    * - 409 if any selected workflow has active (RUNNING / WAITING) executions.
    *
    * Deleting a workflow cascades its steps, transitions and executions exactly
-   * as the single `delete()` does (Prisma relations). After the transaction
+   * as the single `delete()` does (Prisma relations), and keeps their emails
+   * the same way (WorkflowEmailLinks). After the transaction
    * commits, the enabled-workflow cache is invalidated once if any deleted
    * workflow was enabled, matching the single-delete side effect.
    */
@@ -408,12 +418,13 @@ export class WorkflowService {
           );
         }
 
+        await WorkflowEmailLinks.detachWorkflows(tx, projectId, uniqueIds);
         const result = await tx.workflow.deleteMany({
           where: {id: {in: uniqueIds}, projectId},
         });
 
         return {deleted: result.count, hadEnabled: owned.some(w => w.enabled)};
-      });
+      }, LONG_TRANSACTION);
 
       // Invalidate workflow cache if any deleted workflow was enabled.
       if (hadEnabled) {
@@ -756,12 +767,15 @@ export class WorkflowService {
     }
 
     // Delete all affected steps (Prisma will cascade delete the transitions)
-    await prisma.workflowStep.deleteMany({
-      where: {
-        id: {in: Array.from(stepsToDelete)},
-        workflowId, // Safety check to ensure we only delete steps from this workflow
-      },
-    });
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachSteps(tx, Array.from(stepsToDelete));
+      await tx.workflowStep.deleteMany({
+        where: {
+          id: {in: Array.from(stepsToDelete)},
+          workflowId, // Safety check to ensure we only delete steps from this workflow
+        },
+      });
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -821,7 +835,10 @@ export class WorkflowService {
     }
 
     // Delete the step — cascades and removes its own transitions
-    await prisma.workflowStep.delete({where: {id: stepId}});
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachSteps(tx, [stepId]);
+      await tx.workflowStep.delete({where: {id: stepId}});
+    }, LONG_TRANSACTION);
   }
 
   /**
