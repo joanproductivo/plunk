@@ -32,7 +32,8 @@ export function EmailSettings({
   const fromLocalPart = from.includes('@') ? from.split('@')[0] : from;
   const effectiveReplyToPlaceholder = replyToPlaceholder || fromLocalPart || fromPlaceholder;
   const GridWrapper = layout === 'grid' ? 'div' : 'div';
-  const gridClassName = layout === 'grid' ? 'grid gap-4 md:grid-cols-2' : 'space-y-4';
+  // One column again on wide screens, where the pages put these settings beside the editor
+  const gridClassName = layout === 'grid' ? 'grid gap-4 md:grid-cols-2 xl:grid-cols-1' : 'space-y-4';
 
   return (
     <div className="space-y-4">
@@ -63,7 +64,7 @@ export function EmailSettings({
         </div>
       </GridWrapper>
 
-      <GridWrapper className={layout === 'grid' ? 'grid gap-4 md:grid-cols-2' : ''}>
+      <GridWrapper className={layout === 'grid' ? 'grid gap-4 md:grid-cols-2 xl:grid-cols-1' : ''}>
         <div>
           <EmailDomainInput
             id="replyTo"
