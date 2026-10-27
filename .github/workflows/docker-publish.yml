@@ -11,7 +11,7 @@ on:
 jobs:
   # Prepare metadata and tags for all builds
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       is_release: ${{ steps.check-release.outputs.is_release }}
       release_tag: ${{ steps.check-release.outputs.release_tag }}
@@ -19,7 +19,7 @@ jobs:
       image: ${{ steps.tags.outputs.image }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -95,16 +95,16 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Turborepo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .turbo
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-${{ github.sha }}
@@ -117,10 +117,10 @@ jobs:
           docker system prune -af --volumes
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -128,13 +128,13 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ needs.prepare.outputs.image }}
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -155,7 +155,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ strategy.job-index }}
           path: /tmp/digests/*
@@ -165,7 +165,7 @@ jobs:
   # Merge platform-specific images into multi-arch manifest
   merge:
     needs: [ prepare, build ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -173,17 +173,17 @@ jobs:
       id-token: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
