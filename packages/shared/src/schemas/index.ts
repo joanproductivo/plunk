@@ -21,6 +21,13 @@ export const EVENT_NAME_MAX = 100;
 /** Plunk Lite: most recipients in one /v1/send */
 export const SEND_MAX_RECIPIENTS = 50;
 
+// A surrogate without its pair. No lookbehind and not String#isWellFormed: the dashboard loads this
+// package too, and older Safari and Firefox have neither.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+
+/** Plunk Lite: whether Postgres can store a text: no \u0000 and no lone surrogate */
+const storableText = (text: string) => !text.includes('\u0000') && !LONE_SURROGATE.test(text);
+
 /**
  * Plunk Lite: a JSON value whose depth and size are checked before `jsonSchema` walks it. That
  * walk is recursive, so a payload nested thousands of levels deep would overflow the stack and
@@ -33,14 +40,14 @@ export function boundedJson(maxBytes: number, maxDepth: number) {
       const stack: [unknown, number][] = [[value, 0]];
       for (let item = stack.pop(); item; item = stack.pop()) {
         const [node, depth] = item;
-        // Postgres cannot store \u0000 in text or JSON: a 422 here rather than a 500 on writing it
-        if (typeof node === 'string' && node.includes('\u0000')) {
-          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data cannot contain the character \\u0000'});
+        // Postgres cannot store \u0000 or half a surrogate pair: a 422 here rather than a 500 on writing it
+        if (typeof node === 'string' && !storableText(node)) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
           return;
         }
         if (node === null || typeof node !== 'object') continue;
-        if (Object.keys(node).some(key => key.includes('\u0000'))) {
-          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data cannot contain the character \\u0000'});
+        if (Object.keys(node).some(key => !storableText(key))) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
           return;
         }
         if (depth >= maxDepth) {
