@@ -2,6 +2,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {EmailStatus, EmailSourceType} from '@plunk/db';
 import {SecurityService} from '../SecurityService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {sendRawEmail} from '../SESService';
 
@@ -347,6 +348,35 @@ describe('SecurityService', () => {
       await SecurityService.checkAndEnforceSecurityLimits(projectId, ['complaint']);
 
       expect(await isDisabled()).toBe(false);
+    });
+
+    it('keeps the reason of a project disabled for something else while the rates were read', async () => {
+      await createEmails(300, {bouncedCount: 30});
+      // Read as enabled, then disabled for its content before the disable is written
+      const findUnique = appPrisma.project.findUnique.bind(appPrisma.project);
+      vi.spyOn(appPrisma.project, 'findUnique').mockImplementation((async (args: {select?: {disabled?: boolean}}) => {
+        const project = await findUnique(args as never);
+        if (args.select?.disabled) {
+          await prisma.project.update({
+            where: {id: projectId},
+            data: {disabled: true, disabledReason: 'PHISHING_DETECTED'},
+          });
+          return {...project, disabled: false};
+        }
+        return project;
+      }) as never);
+
+      try {
+        await SecurityService.checkAndEnforceSecurityLimits(projectId, ['bounce']);
+      } finally {
+        vi.restoreAllMocks();
+      }
+
+      expect(await prisma.project.findUniqueOrThrow({where: {id: projectId}})).toMatchObject({
+        disabled: true,
+        disabledReason: 'PHISHING_DETECTED',
+      });
+      expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: 'project'}})).toBe(0);
     });
 
     it('disables on a burst that moved both, for either of them', async () => {

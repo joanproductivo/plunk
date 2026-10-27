@@ -619,7 +619,16 @@ export class SecurityService {
       return;
     }
 
-    if (project.disabled) {
+    // Disable the project, only if it still is enabled: a project disabled meanwhile, for its
+    // content or its billing, keeps that reason, and only one check alerts about it
+    const disabled = project.disabled
+      ? {count: 0}
+      : await prisma.project.updateMany({
+          where: {id: projectId, disabled: false},
+          data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
+        });
+
+    if (disabled.count !== 1) {
       // Already disabled, just log the current violations
       signale.warn(
         `[SECURITY] Project ${projectId} (${project.name}) already disabled. Current violations:`,
@@ -627,12 +636,6 @@ export class SecurityService {
       );
       return;
     }
-
-    // Disable the project
-    await prisma.project.update({
-      where: {id: projectId},
-      data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'},
-    });
 
     // Log critical security event
     signale.error(
