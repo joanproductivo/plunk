@@ -44,6 +44,7 @@ import {
   sentAddress,
   suppressUnmatched,
 } from '../services/SesEventMatch.js';
+import {SnsMessages} from '../services/SnsMessages.js';
 import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -118,6 +119,8 @@ export class Webhooks {
   @Post('sns')
   @CatchAsync
   public async receiveSNSWebhook(req: Request, res: Response) {
+    // The SNS message this request claimed, settled once it is answered (see SnsMessages)
+    let claimedMessage: string | undefined;
     try {
       // Verify SNS message signature before processing anything
       const signature = await SnsSignature.verify(req.body as Record<string, string>);
@@ -239,6 +242,21 @@ export class Webhooks {
       if (notification.kind === 'invalid') {
         await reportUnreadable(notification.reason);
         return res.status(200).json({success: false, message: 'Unreadable message'});
+      }
+
+      const snsMessageId: string | undefined =
+        typeof req.body.MessageId === 'string' && req.body.MessageId ? req.body.MessageId : undefined;
+      if (snsMessageId && SnsMessages.deduplicates(notification.eventType)) {
+        const claim = await SnsMessages.claim(snsMessageId);
+        if (claim === 'seen') {
+          signale.info(`[WEBHOOK] SNS message ${snsMessageId} was already handled, ignoring the copy`);
+          return res.status(200).json({success: true});
+        }
+        if (claim === 'busy') {
+          // Another copy is being handled: if it fails, this one is delivered again
+          return res.status(503).json({success: false, message: 'Already being handled'});
+        }
+        claimedMessage = snsMessageId;
       }
 
       // Check if this is an inbound email notification (SES Receiving)
@@ -769,7 +787,7 @@ export class Webhooks {
         if (!unsubscribes || contactIsAffected) {
           await QueueService.queueEventTracking(
             {projectId: email.projectId, eventName, contactId: email.contactId, emailId: email.id, data: eventData},
-            typeof req.body.MessageId === 'string' ? req.body.MessageId : undefined,
+            snsMessageId,
           );
         }
       } catch (error) {
@@ -792,6 +810,11 @@ export class Webhooks {
       // before the suppression was fully recorded, and a redelivery is safe: the first-seen
       // timestamps and the enforcement are gated on what the row already holds.
       return res.status(500).json({success: false, message: 'Failed to process SNS notification'});
+    } finally {
+      // After the answer, whatever it was: its status says whether the message was handled
+      if (claimedMessage) {
+        await SnsMessages.settle(claimedMessage, res.statusCode < 300);
+      }
     }
   }
 

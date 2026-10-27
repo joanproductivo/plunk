@@ -1,3 +1,5 @@
+import {randomUUID} from 'node:crypto';
+
 import type {EventTrackingJobData} from '@plunk/types';
 import type {Job} from 'bullmq';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
@@ -944,20 +946,22 @@ describe('Webhooks - SES event notifications', () => {
       const email = await sentEmail('ses-queued-open');
       const track = vi.spyOn(EventService, 'trackEvent');
       const open = notification('Open', 'ses-queued-open', {open: {}});
+      // Handled messages are remembered in Redis, which outlives a run of the suite
+      const messageId = `sns-message-${randomUUID()}`;
 
-      const responses = [await postWithId(open, 'sns-message-1'), await postWithId(open, 'sns-message-1')];
+      const responses = [await postWithId(open, messageId), await postWithId(open, messageId)];
 
       expect(responses.map(response => response.status)).toEqual([200, 200]);
       expect(track).not.toHaveBeenCalled();
       const jobs = await eventTrackingQueue.getJobs(['waiting']);
       expect(jobs).toHaveLength(1);
-      expect(jobs[0].id).toBe('sns-sns-message-1');
+      expect(jobs[0].id).toBe(`sns-${messageId}`);
       expect(jobs[0].data).toMatchObject({projectId, eventName: 'email.open', contactId, emailId: email.id});
     });
 
     it('tracks the queued event in the worker', async () => {
       const email = await sentEmail('ses-worker-open');
-      await postWithId(notification('Open', 'ses-worker-open', {open: {}}), 'sns-message-2');
+      await postWithId(notification('Open', 'ses-worker-open', {open: {}}), `sns-message-${randomUUID()}`);
       const [job] = await eventTrackingQueue.getJobs(['waiting']);
 
       await processEventTracking(job);
