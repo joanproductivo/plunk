@@ -82,15 +82,25 @@ export default function CreateTemplatePage() {
                 A reusable email for campaigns and workflows.
               </p>
             </div>
+            {/* Wide screens: the actions go up here; below that they stay under the form */}
+            <div className="hidden xl:flex gap-3">
+              <Button asChild variant="outline">
+                <Link href="/templates">Cancel</Link>
+              </Button>
+              <Button type="submit" form="create-template" disabled={saving}>
+                {saving ? 'Creating…' : 'Create Template'}
+              </Button>
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form id="create-template" onSubmit={handleSubmit} className="space-y-6">
             {/* Wide screens: the editor on the left, the settings on the right. Below that, settings first */}
             <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-              <div className="space-y-6 xl:col-start-2 xl:row-start-1">
+              {/* Wide screens: basic information, email settings and the template type last */}
+              <div className="flex flex-col gap-6 xl:col-start-2 xl:row-start-1">
                 {/* Row 1: Basic Info + Template Type */}
-                <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-1">
-                  <Card>
+                <div className="grid gap-6 md:grid-cols-2 xl:contents">
+                  <Card className="xl:order-1">
                     <CardHeader>
                       <CardTitle>Basic information</CardTitle>
                     </CardHeader>
@@ -120,7 +130,7 @@ export default function CreateTemplatePage() {
                     </CardContent>
                   </Card>
 
-                  <Card>
+                  <Card className="xl:order-3">
                     <CardHeader>
                       <CardTitle>Template type</CardTitle>
                       <CardDescription>Transactional templates skip the subscription check and the footer.</CardDescription>
@@ -173,7 +183,7 @@ export default function CreateTemplatePage() {
                 </div>
 
                 {/* Email Settings */}
-                <Card>
+                <Card className="xl:order-2">
                   <CardHeader>
                     <CardTitle>Email settings</CardTitle>
                   </CardHeader>
@@ -223,7 +233,7 @@ export default function CreateTemplatePage() {
             </div>
 
             {/* Actions */}
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-3 xl:hidden">
               <Button asChild variant="outline">
                 <Link href="/templates">Cancel</Link>
               </Button>
