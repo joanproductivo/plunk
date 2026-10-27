@@ -92,7 +92,7 @@ export function splitImportRecord(
 
   // A source that stopped mailing the address for a bounce or a complaint: SES never saw it, so
   // only this list keeps it from being mailed (and mailed into a real bounce or complaint) again
-  const suppression = SUPPRESSING_STATUSES[statusValue];
+  const suppression = SUPPRESSING_STATUSES.get(statusValue);
 
   const createdAt = createdat.trim() === '' ? undefined : parseImportDate(createdat);
 
@@ -138,12 +138,13 @@ export function importedSubscription(row: ImportRecord, isUpdate: boolean): bool
 }
 
 // Statuses that mean the address bounced or reported mail as spam at the source. `cleaned` is a
-// list cleanup of addresses that bounce (Flodesk, Mailchimp).
-const SUPPRESSING_STATUSES: Record<string, SuppressionReason | undefined> = {
-  bounced: 'BOUNCE',
-  cleaned: 'BOUNCE',
-  complained: 'COMPLAINT',
-};
+// list cleanup of addresses that bounce (Flodesk, Mailchimp). A Map, not an object: a status is
+// whatever the file says, and `constructor` or `__proto__` must not find Object.prototype's.
+const SUPPRESSING_STATUSES = new Map<string, SuppressionReason>([
+  ['bounced', 'BOUNCE'],
+  ['cleaned', 'BOUNCE'],
+  ['complained', 'COMPLAINT'],
+]);
 
 // Statuses of Plunk's export and of other providers' (Flodesk, Mailchimp, ...), lowercased
 const STATUS_SUBSCRIBED = new Set(['subscribed', 'confirmed', 'active']);
