@@ -51,6 +51,8 @@ describe('Projects and the counts of their deleted emails', () => {
 
   async function bouncedContact(project: string) {
     const contact = await factories.createContact({projectId: project});
+    // In one same minute, which the deleted ones are counted by
+    const createdAt = new Date();
     await prisma.email.createMany({
       data: [true, false].map(bounced => ({
         projectId: project,
@@ -60,8 +62,9 @@ describe('Projects and the counts of their deleted emails', () => {
         from: 'hello@plunk.test',
         sourceType: 'TRANSACTIONAL' as const,
         status: EmailStatus.SENT,
-        sentAt: new Date(),
-        bouncedAt: bounced ? new Date() : null,
+        sentAt: createdAt,
+        createdAt,
+        bouncedAt: bounced ? createdAt : null,
       })),
     });
     return contact;

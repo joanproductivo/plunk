@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
@@ -89,7 +89,9 @@ describe('DeletedEmailCounts', () => {
     expect(await projectRates()).toEqual(before);
   });
 
-  it('adds the deletes of the same hour together, per project', async () => {
+  it('adds the deletes of the same minute together, per project', async () => {
+    vi.useFakeTimers({toFake: ['Date']});
+    vi.setSystemTime(new Date('2026-10-20T10:40:05Z'));
     const other = await factories.createUserWithProject();
     const otherContact = await factories.createContact({projectId: other.project.id});
     await prisma.email.create({
@@ -116,7 +118,8 @@ describe('DeletedEmailCounts', () => {
 
     const rows = await prisma.plunkLiteDeletedEmailCount.findMany({where: {projectId}});
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({sent: 3, bounced: 1, complained: 1});
+    // The column is still called hour, and holds the minute
+    expect(rows[0]).toMatchObject({hour: new Date('2026-10-20T10:40:00Z'), sent: 3, bounced: 1, complained: 1});
     // The other project's contact was not this project's to delete
     expect(await prisma.contact.count({where: {id: otherContact.id}})).toBe(1);
     expect(await prisma.plunkLiteDeletedEmailCount.count({where: {projectId: other.project.id}})).toBe(0);
@@ -170,5 +173,20 @@ describe('DeletedEmailCounts', () => {
     const after = await ReputationPolicy.disableByMetric(projectId);
     expect(after.sevenDay).toEqual(before.sevenDay);
     expect(after.bounce).toBe(true);
+  });
+
+  it('adds up a week of counts kept by the minute at once', async () => {
+    // One row a minute for 7 days, each with one bounce in ten emails
+    await prisma.$executeRaw`
+      INSERT INTO "plunk_lite_deleted_email_counts" ("projectId", "hour", "sent", "bounced", "complained")
+      SELECT ${projectId}, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => n), 10, 1, 0
+      FROM generate_series(1, 10080) AS n`;
+
+    const started = Date.now();
+    const ever = await ReputationPolicy.rates({projectId});
+    const elapsed = Date.now() - started;
+
+    expect(ever).toMatchObject({total: 100_800, bounces: 10_080, complaints: 0});
+    expect(elapsed).toBeLessThan(2000);
   });
 });

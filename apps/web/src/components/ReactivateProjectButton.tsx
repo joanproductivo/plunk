@@ -64,7 +64,7 @@ export function ReactivateProjectButton({size = 'sm'}: {size?: 'sm' | 'default'}
         onConfirm={reactivate}
         icon={RotateCcw}
         title="Reactivate this project?"
-        description="Sending starts again straight away. The addresses that bounced or complained are already suppressed, and deleting them does not change the rates: check first where they came from (an import, a signup form), or the project will be disabled again."
+        description="Sending starts again straight away. The addresses that bounced or complained are already suppressed, and deleting them, before or after reactivating, does not change the rates: check first where they came from (an import, a signup form), or the project will be disabled again."
         details={
           <ul className="list-disc space-y-1 pl-5 text-sm text-neutral-600">
             {sevenDay && (

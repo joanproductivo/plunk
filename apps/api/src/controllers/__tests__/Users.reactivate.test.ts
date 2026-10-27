@@ -178,39 +178,84 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
       expect(verdict.violations[0]).toMatch(/^Since reactivation, bounce rate \(10\.00%, 30 of 300 emails\)/);
     });
 
-    it('does not count again the bounces deleted in the hour of the reactivation, before it', async () => {
-      // Disabled for them, their contacts deleted, then reactivated, all in the same hour: the
-      // deleted emails are counted by that hour
-      const contact = await bounced(new Date());
-      await ContactService.bulkDelete(projectId, [contact.id]);
-      await reactivate(userId, projectId);
+    describe('and the deleted emails, counted by the minute they were created in', () => {
+      /** The clock, at a time of one same day */
+      const at = (time: string) => vi.setSystemTime(new Date(`2026-10-20T${time}Z`));
 
-      await bounced(new Date(Date.now() + 1000), {total: 10, bounces: 1});
+      beforeEach(() => {
+        vi.useFakeTimers({toFake: ['Date']});
+      });
 
-      expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
-      // The 7 days still count them
-      await redis.del(graceKey());
-      expect((await ReputationPolicy.disableByMetric(projectId)).sevenDay).toMatchObject({total: 310, bounces: 31});
-    });
+      it('does not count the bounces of before the reactivation whose contacts are deleted after it, in its hour', async () => {
+        // The bounces that disabled the project, at 10:05; reactivated at 10:40, and their
+        // contacts deleted at 10:45
+        at('10:05:00');
+        const contact = await bounced(new Date());
+        at('10:40:00');
+        await reactivate(userId, projectId);
+        at('10:45:00');
+        await ContactService.bulkDelete(projectId, [contact.id]);
 
-    it('counts the bounces of emails sent after the reactivation, even when their contacts are deleted in its hour', async () => {
-      await reactivate(userId, projectId);
-      const contact = await bounced(new Date(Date.now() + 1000));
-      await ContactService.bulkDelete(projectId, [contact.id]);
+        at('10:46:00');
+        await bounced(new Date(), {total: 10, bounces: 1});
 
-      const verdict = await ReputationPolicy.disableByMetric(projectId);
-      expect(verdict.sevenDay).toMatchObject({total: 300, bounces: 30});
-      expect(verdict.bounce).toBe(true);
-    });
+        expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+        // The 7 days still count them
+        await redis.del(graceKey());
+        expect((await ReputationPolicy.disableByMetric(projectId)).sevenDay).toMatchObject({total: 310, bounces: 31});
+      });
 
-    it('counts the whole hour of the reactivation when the grace period does not say what it held', async () => {
-      const contact = await bounced(new Date());
-      await ContactService.bulkDelete(projectId, [contact.id]);
-      await reactivate(userId, projectId);
-      // As the grace period was first stored: the date alone
-      await redis.set(graceKey(), new Date(Date.now() - 1000).toISOString(), 'EX', 3600);
+      it('does not count again the bounces deleted in the minute of the reactivation, before it', async () => {
+        // Disabled for them, their contacts deleted, then reactivated, all in the same minute
+        at('10:40:05');
+        const contact = await bounced(new Date());
+        at('10:40:10');
+        await ContactService.bulkDelete(projectId, [contact.id]);
+        at('10:40:20');
+        await reactivate(userId, projectId);
 
-      expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(true);
+        at('10:40:30');
+        await bounced(new Date(), {total: 10, bounces: 1});
+
+        expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+      });
+
+      it('counts the bounces of emails sent after the reactivation, even when their contacts are deleted in its minute', async () => {
+        at('10:40:00');
+        await reactivate(userId, projectId);
+        at('10:40:10');
+        const contact = await bounced(new Date());
+        at('10:40:20');
+        await ContactService.bulkDelete(projectId, [contact.id]);
+
+        const verdict = await ReputationPolicy.disableByMetric(projectId);
+        expect(verdict.sevenDay).toMatchObject({total: 300, bounces: 30});
+        expect(verdict.bounce).toBe(true);
+      });
+
+      it.each([
+        ['the date alone, as it was first stored', () => new Date(Date.now() - 1000).toISOString()],
+        [
+          'what the deleted counts held for its hour, as they were kept before',
+          () =>
+            JSON.stringify({
+              reactivatedAt: new Date(Date.now() - 1000),
+              deletedInHour: {sent: 300, bounced: 30, complained: 0},
+            }),
+        ],
+      ])(
+        'counts the whole minute of the reactivation when the grace period does not say what it held: %s',
+        async (_case, stored) => {
+          at('10:40:05');
+          const contact = await bounced(new Date());
+          await ContactService.bulkDelete(projectId, [contact.id]);
+          at('10:40:20');
+          await reactivate(userId, projectId);
+          await redis.set(graceKey(), stored(), 'EX', 3600);
+
+          expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(true);
+        },
+      );
     });
 
     it('counts the whole 7 days again once it is lost', async () => {

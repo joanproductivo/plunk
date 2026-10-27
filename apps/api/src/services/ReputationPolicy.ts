@@ -26,7 +26,7 @@ import type {SecurityMetric} from './SecurityService.js';
  *
  * A project disabled for its reputation can be reactivated from the dashboard. For the next 7 days
  * only the emails it sends from then on count towards disabling it again, or the bounces that
- * disabled it would do so at once -- deleted ones included, which are counted by the hour.
+ * disabled it would do so at once -- deleted ones included, which are counted by the minute.
  */
 
 export interface RateData {
@@ -42,7 +42,7 @@ export interface RateFilter {
   projectId: string;
   since?: Date;
   /**
-   * What the deleted counts held for the hour of `since` when the window started, left out of it
+   * What the deleted counts held for the minute of `since` when the window started, left out of it
    * (DeletedEmailCounts.sums): for a window that starts at a reactivation
    */
   deletedAtStart?: DeletedCounts;
@@ -62,11 +62,11 @@ const SEVEN_DAYS_MS = 7 * 86_400_000;
 /** A grace period after a reactivation, as stored */
 interface Grace {
   reactivatedAt: Date;
-  deletedInHour: DeletedCounts;
+  deletedInMinute: DeletedCounts;
 }
 
 /**
- * When the project was last reactivated, and what its deleted counts held for that hour then (a
+ * When the project was last reactivated, and what its deleted counts held for that minute then (a
  * Grace, as JSON), kept as long as its emails before then are in the 7 days
  */
 const REACTIVATED_KEY = (projectId: string) => `plunk-lite:reactivated:${projectId}`;
@@ -136,12 +136,12 @@ export class ReputationPolicy {
     const sinceReactivation = Boolean(grace && grace.reactivatedAt > weekAgo);
     const since = sinceReactivation ? grace!.reactivatedAt : weekAgo;
     const window = sinceReactivation ? 'Since reactivation,' : '7-day';
-    // The emails deleted are counted by the hour, so the hour of the reactivation holds the bounces
-    // deleted before it, which disabled the project: what it held then is left out
+    // The emails deleted are counted by the minute, so the minute of the reactivation may hold
+    // bounces deleted before it, which disabled the project: what it held then is left out
     const sevenDay = await this.rates({
       projectId,
       since,
-      ...(sinceReactivation && {deletedAtStart: grace!.deletedInHour}),
+      ...(sinceReactivation && {deletedAtStart: grace!.deletedInMinute}),
     });
     const bounce =
       sevenDay.total >= DISABLE_THRESHOLDS.MIN_EMAILS_FOR_BOUNCES &&
@@ -183,7 +183,7 @@ export class ReputationPolicy {
     }
 
     const reactivatedAt = new Date();
-    const grace: Grace = {reactivatedAt, deletedInHour: await DeletedEmailCounts.inHour(projectId, reactivatedAt)};
+    const grace: Grace = {reactivatedAt, deletedInMinute: await DeletedEmailCounts.inMinute(projectId, reactivatedAt)};
     await redis.set(REACTIVATED_KEY(projectId), JSON.stringify(grace), 'EX', SEVEN_DAYS_MS / 1000);
     const reactivated = await prisma.project.updateMany({
       where: {id: projectId, disabled: true, disabledReason: 'EMAIL_REPUTATION'},
@@ -222,12 +222,13 @@ export class ReputationPolicy {
 
   /**
    * When the project was reactivated, within the last 7 days, and what its deleted counts held for
-   * that hour then; undefined when Redis cannot say. Without those counts (a grace period stored
-   * before they were, or one that cannot be read) the hour counts whole: the side that stops sending.
+   * that minute then; undefined when Redis cannot say. Without those counts (a grace period stored
+   * before they were kept, or before they were kept by the minute, or one that cannot be read) the
+   * minute counts whole.
    */
   private static async grace(
     projectId: string,
-  ): Promise<{reactivatedAt: Date; deletedInHour?: DeletedCounts} | undefined> {
+  ): Promise<{reactivatedAt: Date; deletedInMinute?: DeletedCounts} | undefined> {
     try {
       const value = await redis.get(REACTIVATED_KEY(projectId));
       if (!value) {
@@ -244,13 +245,13 @@ export class ReputationPolicy {
       if (Number.isNaN(date.getTime())) {
         return undefined;
       }
-      const counts = fields.deletedInHour as Record<string, unknown> | undefined;
+      const counts = fields.deletedInMinute as Record<string, unknown> | undefined;
       const valid = (name: string) => Number.isInteger(counts?.[name]) && (counts![name] as number) >= 0;
       return {
         reactivatedAt: date,
         ...(valid('sent') &&
           valid('bounced') &&
-          valid('complained') && {deletedInHour: counts as unknown as DeletedCounts}),
+          valid('complained') && {deletedInMinute: counts as unknown as DeletedCounts}),
       };
     } catch (error) {
       // Counted as if there were no grace period: the side that stops sending
