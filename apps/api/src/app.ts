@@ -745,4 +745,21 @@ async function addRepeatables(): Promise<void> {
   );
 
   signale.info('[BACKGROUND-JOB] Redis memory check scheduled (BullMQ repeatable job, runs every 15 minutes)');
+
+  // Plunk Lite: every 5 minutes, fail the workflow runs a restart left RUNNING, so they no longer
+  // keep their contacts out of the workflow. Few kept, so they do not crowd out the other checks.
+  await plunkLiteChecksQueue.add(
+    'workflow-recovery',
+    {},
+    {
+      repeat: {
+        pattern: '*/5 * * * *', // Every 5 minutes
+      },
+      jobId: 'workflow-recovery-repeatable', // Fixed ID to prevent duplicates
+      attempts: 2,
+      removeOnComplete: 20,
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Workflow recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
 }

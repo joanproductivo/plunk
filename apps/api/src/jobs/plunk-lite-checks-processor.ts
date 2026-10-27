@@ -1,6 +1,7 @@
 /**
- * Plunk Lite's checks worker: the reputation check after bounces and complaints, and every 15
- * minutes the check that SES events reach the webhook and the one of Redis's memory
+ * Plunk Lite's checks worker: the reputation check after bounces and complaints, every 15 minutes
+ * the check that SES events reach the webhook and the one of Redis's memory, and every 5 minutes
+ * the sweep of workflow runs a restart interrupted
  */
 
 import type {PlunkLiteChecksJobData, SecurityCheckJobData} from '@plunk/types';
@@ -11,6 +12,7 @@ import {plunkLiteChecksQueue} from '../services/QueueService.js';
 import {checkRedisMemory} from '../services/RedisMemoryCheck.js';
 import {ReputationCheck} from '../services/ReputationCheck.js';
 import {checkEventPipeline} from '../services/SesEventMatch.js';
+import {WorkflowRecoveryService} from '../services/WorkflowRecoveryService.js';
 
 export async function processPlunkLiteCheck(job: Job<PlunkLiteChecksJobData>): Promise<void> {
   switch (job.name) {
@@ -20,6 +22,9 @@ export async function processPlunkLiteCheck(job: Job<PlunkLiteChecksJobData>): P
       return checkEventPipeline();
     case 'redis-memory':
       return checkRedisMemory();
+    case 'workflow-recovery':
+      await WorkflowRecoveryService.failInterrupted();
+      return;
     default:
       throw new Error(`Unknown Plunk Lite check: ${job.name}`);
   }
