@@ -38,6 +38,7 @@ import {
   detectCustomHtmlPatterns,
   isFramedBrand,
   joinEmailMarkers,
+  preheaderToText,
   renderTemplate,
   splitEmailMarkers,
 } from '@plunk/shared';
@@ -328,14 +329,8 @@ export function EmailEditor({
     };
   };
 
-  // A template that doesn't parse yet is shown as written; the syntax banner already says why
-  const renderPreview = (text: string) => {
-    try {
-      return renderTemplate(text, previewVariables());
-    } catch {
-      return text;
-    }
-  };
+  // Never throws: a template that doesn't parse yet falls back to plain {{variable}} substitution
+  const renderPreview = (text: string) => renderTemplate(text, previewVariables());
 
   const getPreviewHtml = () => renderPreview(mode === 'visual' ? editor?.getHTML() || '' : htmlContent);
 
@@ -360,7 +355,8 @@ export function EmailEditor({
   useEffect(() => {
     if (previewIframeRef.current && view === 'preview') {
       const iframe = previewIframeRef.current;
-      const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+      // null rather than a SecurityError if the frame was ever navigated to another origin
+      const iframeDoc = iframe.contentDocument;
 
       if (iframeDoc) {
         const previewContent = getPreviewHtml();
@@ -370,14 +366,20 @@ export function EmailEditor({
         iframeDoc.write(fullHtml);
         iframeDoc.close();
 
+        // Links open in a new tab. Followed in the frame, they would take it to another origin,
+        // and the preview could no longer write to it
+        const base = iframeDoc.createElement('base');
+        base.target = '_blank';
+        iframeDoc.head?.prepend(base);
+
         // Auto-adjust iframe height to content. Reset to a small value first so
         // body content that uses % / vh heights doesn't lock the iframe to its
         // previous size (which would otherwise cause the iframe to grow by the
         // padding offset on every preview-device switch).
         const adjustHeight = () => {
-          if (!iframe.contentWindow) return;
+          const doc = iframe.contentDocument;
+          if (!doc) return;
           iframe.style.height = '0px';
-          const doc = iframe.contentWindow.document;
           const height = Math.max(
             doc.body?.scrollHeight ?? 0,
             doc.documentElement?.scrollHeight ?? 0,
@@ -628,7 +630,8 @@ export function EmailEditor({
                     {preheader && (
                       <div>
                         <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Preview text</p>
-                        <p className="text-sm text-neutral-700 mt-1">{renderPreview(preheader)}</p>
+                        {/* Stored escaped, as it goes into the email's HTML */}
+                        <p className="text-sm text-neutral-700 mt-1">{preheaderToText(renderPreview(preheader))}</p>
                       </div>
                     )}
                     {(from || replyTo) && (
@@ -649,10 +652,11 @@ export function EmailEditor({
                     )}
                   </div>
                 )}
-                {/* No scripts: the body is the author's HTML, written into a document of the dashboard's origin */}
+                {/* No scripts: the body is the author's HTML, written into a document of the dashboard's origin.
+                    Links still open, in a new tab outside the sandbox */}
                 <iframe
                   ref={previewIframeRef}
-                  sandbox="allow-same-origin"
+                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                   className="w-full border-0"
                   style={{
                     minHeight: '400px',

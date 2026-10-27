@@ -201,8 +201,9 @@ export default function CreateCampaignPage() {
             <div className="space-y-6">
               {/* Wide screens: the editor on the left, the settings on the right. Below that, settings first */}
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-                {/* Wide screens: basic information, audience, email settings and the campaign type last */}
-                <div className="flex flex-col gap-6 xl:col-start-2 xl:row-start-1">
+                {/* Wide screens: basic information, audience, email settings and the campaign type last. Below that
+                    the column dissolves into the page, so the audience goes after the email content, as it always did */}
+                <div className="contents xl:col-start-2 xl:row-start-1 xl:flex xl:flex-col xl:gap-6">
                   {/* Row 1: Basic Info + Campaign Type */}
                   <div className="grid gap-6 md:grid-cols-2 xl:contents">
                     {/* Basic Information */}
@@ -321,7 +322,7 @@ export default function CreateCampaignPage() {
                   </Card>
 
                   {/* Audience */}
-                  <Card className="xl:order-2">
+                  <Card className="order-last xl:order-2">
                     <CardHeader>
                       <CardTitle>Audience</CardTitle>
                     </CardHeader>
