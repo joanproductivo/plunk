@@ -21,7 +21,33 @@ const SIGNUP_DNS_TRY_TIMEOUT_MS = 1000;
 const SIGNUP_DNS_DEADLINE_MS = 2000;
 // Domains whose answer was clear, for a while: most sign-ups share a handful of providers
 const SIGNUP_DOMAIN_CACHE_MS = 10 * 60 * 1000;
+const SIGNUP_DOMAIN_UNCERTAIN_MS = 60 * 1000;
 const SIGNUP_DOMAIN_CACHE_MAX = 5000;
+
+// Plunk Lite: the largest mailbox providers, never refused at sign-up: a resolver that answers wrongly,
+// or a bad change to the disposable list, must not turn away most of a form's sign-ups
+const NEVER_REFUSED_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'outlook.es',
+  'hotmail.com',
+  'hotmail.es',
+  'live.com',
+  'msn.com',
+  'yahoo.com',
+  'yahoo.es',
+  'icloud.com',
+  'me.com',
+  'proton.me',
+  'protonmail.com',
+  'gmx.com',
+  'gmx.es',
+  'telefonica.net',
+]);
+
+/** The domain of an address, lowercased; empty if it has none */
+const domainOf = (email: string) => email.split('@')[1]?.toLowerCase() ?? '';
 
 /** Plunk Lite: whether a new contact's address may be added, and if not, why */
 export interface SignupVerdict {
@@ -63,20 +89,22 @@ export class EmailVerificationService {
   private static disposableDomainsSet: Set<string> | null = null;
   private static disposableDomainsFailedAt: number | null = null;
   private static personalDomainsSet: Set<string> | null = null;
-  /** Plunk Lite: a domain's clear answer -- the reason it takes no email, or null if it does */
-  private static signupDomains = new Map<string, {reason: string | null; expiresAt: number}>();
+  /** Plunk Lite: a domain's answer -- why it takes no email, null if it does, undefined if DNS could not say */
+  private static signupDomains = new Map<string, {reason: string | null | undefined; expiresAt: number}>();
+  private static disposableDomainsLoading: Promise<Set<string>> | null = null;
 
   /**
    * Plunk Lite: whether a new contact's address may be added. Refused only when the answer is
    * clear: a disposable domain, a domain that does not exist, one that declares it takes no email
    * (a null MX, RFC 7505), or one with neither MX nor address records. Anything uncertain -- a DNS
    * server that times out or fails, an unexpected error -- lets the address in: a sign-up is never
-   * lost to a lookup. An inbox that does not exist on a real domain is not caught.
+   * lost to a lookup. The largest providers are never refused, whatever DNS or the disposable list
+   * say. An inbox that does not exist on a real domain is not caught.
    */
   static async verifySignup(email: string): Promise<SignupVerdict> {
+    const domain = domainOf(email);
     try {
-      const domain = email.split('@')[1]?.toLowerCase();
-      if (!domain) {
+      if (!domain || NEVER_REFUSED_DOMAINS.has(domain)) {
         return {valid: true, reasons: []};
       }
 
@@ -99,14 +127,16 @@ export class EmailVerificationService {
         ...(typo?.full && typo.full !== email ? {suggestedEmail: typo.full} : {}),
       };
     } catch (error) {
-      signale.warn(`[VERIFY] Could not verify ${email}, letting it in:`, error);
+      signale.warn(
+        `[VERIFY] Could not verify an address on ${domain}, letting it in: ${error instanceof Error ? error.message : error}`,
+      );
       return {valid: true, reasons: []};
     }
   }
 
   /** Plunk Lite: look up these addresses' domains at once, so verifying each one later is quick */
   static async prefetchSignupDomains(emails: string[]): Promise<void> {
-    const domains = new Set(emails.map(email => email.split('@')[1]?.toLowerCase()).filter(Boolean) as string[]);
+    const domains = new Set(emails.map(domainOf).filter(domain => domain && !NEVER_REFUSED_DOMAINS.has(domain)));
     await Promise.all([...domains].map(domain => this.signupDomainReason(domain).catch(() => undefined)));
   }
 
@@ -115,7 +145,11 @@ export class EmailVerificationService {
     await this.getDisposableDomains();
   }
 
-  /** Why a domain takes no email, null if it does, undefined if DNS could not say */
+  /**
+   * Why a domain takes no email, null if it does, undefined if DNS could not say. A clear answer
+   * is remembered for 10 minutes; an uncertain one for a minute, so a DNS outage costs each domain
+   * one lookup a minute rather than one per sign-up.
+   */
   private static async signupDomainReason(domain: string): Promise<string | null | undefined> {
     const cached = this.signupDomains.get(domain);
     if (cached && cached.expiresAt > Date.now()) {
@@ -130,15 +164,15 @@ export class EmailVerificationService {
     });
     try {
       const reason = await Promise.race([this.lookUpSignupDomain(resolver, domain), deadline]);
-      if (reason !== undefined) {
-        if (this.signupDomains.size >= SIGNUP_DOMAIN_CACHE_MAX) {
-          this.signupDomains.clear();
-        }
-        this.signupDomains.set(domain, {reason, expiresAt: Date.now() + SIGNUP_DOMAIN_CACHE_MS});
+      if (this.signupDomains.size >= SIGNUP_DOMAIN_CACHE_MAX) {
+        this.signupDomains.clear();
       }
+      const keepFor = reason === undefined ? SIGNUP_DOMAIN_UNCERTAIN_MS : SIGNUP_DOMAIN_CACHE_MS;
+      this.signupDomains.set(domain, {reason, expiresAt: Date.now() + keepFor});
       return reason;
     } finally {
       clearTimeout(timer);
+      // Ends the lookups still pending after the deadline; their rejections are already handled
       resolver.cancel();
     }
   }
@@ -290,6 +324,14 @@ export class EmailVerificationService {
     if (this.disposableDomainsSet) {
       return this.disposableDomainsSet;
     }
+    // Plunk Lite: requests that arrive while the list is downloading wait for that download
+    this.disposableDomainsLoading ??= this.loadDisposableDomains().finally(() => {
+      this.disposableDomainsLoading = null;
+    });
+    return this.disposableDomainsLoading;
+  }
+
+  private static async loadDisposableDomains(): Promise<Set<string>> {
     // Plunk Lite: after a failed download, go without the list for a while rather than retry
     // on every request
     if (this.disposableDomainsFailedAt !== null && Date.now() - this.disposableDomainsFailedAt < LIST_RETRY_AFTER_MS) {

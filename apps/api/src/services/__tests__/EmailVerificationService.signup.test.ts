@@ -26,7 +26,9 @@ describe('EmailVerificationService.verifySignup', () => {
   beforeEach(() => {
     caches.disposableDomainsSet = new Set(['mailinator.com']);
     caches.signupDomains.clear();
-    resolveMx = vi.spyOn(dns.Resolver.prototype, 'resolveMx').mockResolvedValue([{exchange: 'mx.example.org', priority: 10}]);
+    resolveMx = vi
+      .spyOn(dns.Resolver.prototype, 'resolveMx')
+      .mockResolvedValue([{exchange: 'mx.example.org', priority: 10}]);
     resolve4 = vi.spyOn(dns.Resolver.prototype, 'resolve4').mockRejectedValue(dnsError('ENODATA'));
     resolve6 = vi.spyOn(dns.Resolver.prototype, 'resolve6').mockRejectedValue(dnsError('ENODATA'));
   });
@@ -114,15 +116,27 @@ describe('EmailVerificationService.verifySignup', () => {
     expect((await EmailVerificationService.verifySignup('ana@shop.org')).valid).toBe(true);
   });
 
-  it("remembers a domain's clear answer, but not an uncertain one", async () => {
+  it("remembers a domain's clear answer for 10 minutes, and an uncertain one for a minute", async () => {
+    vi.useFakeTimers({toFake: ['Date']});
     await EmailVerificationService.verifySignup('ana@shop.org');
-    await EmailVerificationService.verifySignup('luis@shop.org');
-    expect(resolveMx).toHaveBeenCalledTimes(1);
-
     resolveMx.mockRejectedValue(dnsError('ETIMEOUT'));
     await EmailVerificationService.verifySignup('ana@other.org');
+    await EmailVerificationService.verifySignup('luis@shop.org');
     await EmailVerificationService.verifySignup('luis@other.org');
+    expect(resolveMx).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(61_000);
+    await EmailVerificationService.verifySignup('eva@shop.org');
+    await EmailVerificationService.verifySignup('eva@other.org');
     expect(resolveMx).toHaveBeenCalledTimes(3);
+  });
+
+  it('never refuses the largest providers, whatever DNS or the disposable list say', async () => {
+    resolveMx.mockRejectedValue(dnsError('ENOTFOUND'));
+    caches.disposableDomainsSet = new Set(['gmail.com']);
+
+    expect(await EmailVerificationService.verifySignup('ana@Gmail.com')).toEqual({valid: true, reasons: []});
+    expect(resolveMx).not.toHaveBeenCalled();
   });
 
   it('looks up the domains of several addresses at once, once each', async () => {
