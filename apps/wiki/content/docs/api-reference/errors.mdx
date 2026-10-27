@@ -110,7 +110,7 @@ All errors include a machine-readable `code` field for programmatic handling. He
 |------|--------|-------------|
 | `BAD_REQUEST` | 400 | General request error |
 | `VALIDATION_ERROR` | 422 | Request validation failed (includes field errors) |
-| `INVALID_EMAIL` | 422 | Email format is invalid |
+| `INVALID_EMAIL` | 422 | Email format is invalid, or a new contact's domain does not exist, takes no email, is disposable or is a slip of a large provider's (`details` has `reasons` and any `suggestedEmail`) |
 | `INVALID_REQUEST_BODY` | 400 | Request body is malformed |
 | `MISSING_REQUIRED_FIELD` | 422 | Required field is missing |
 

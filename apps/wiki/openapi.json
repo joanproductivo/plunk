@@ -595,7 +595,7 @@
       "post": {
         "tags": ["Public API"],
         "summary": "Send transactional email",
-        "description": "Send a transactional email via the public API. Automatically creates or updates the recipient contact.\n\n**Required content:** either a `template` ID, **or** both `subject` and `body`. Template fields can be overridden by explicit request fields.\n\n**Sender:** `from` is required unless using a template that already has a `from` configured. The sender's domain must be verified.\n\n**Multiple recipients:** when `to` is an array, each recipient is processed sequentially with its own contact upsert and rendered email — there is no batch-send semantics. Sending is always immediate; for scheduled sends, use a Campaign.\n\n**Attachments:** up to 10 attachments per email and 10 MB total by default. A request can be at most 10 MB, so attachments, which travel base64-encoded, can add up to about 7 MB.\n\n**Message format:** `body` is your HTML. Plunk generates a plain text alternative from it and sends both, which avoids the spam penalties that apply to HTML-only mail. There is no plain text field to set.",
+        "description": "Send a transactional email via the public API. Automatically creates or updates the recipient contact.\n\n**Required content:** either a `template` ID, **or** both `subject` and `body`. Template fields can be overridden by explicit request fields.\n\n**Sender:** `from` is required unless using a template that already has a `from` configured. The sender's domain must be verified.\n\n**Multiple recipients:** `to` takes 1 to 50 recipients. Each is processed in turn with its own contact upsert and rendered email — there is no batch-send semantics. A recipient that is refused (a client error) does not stop the others: the answer is `207` with `data.failed` listing `{email, code, message, suggestedEmail?}` for those not sent. An unexpected error stops the ones after it, which are listed with `NOT_ATTEMPTED`. A request that sent nothing answers with the error. A `207` keeps its `Idempotency-Key`, so retrying it gives `409` and never sends the others twice. Sending is always immediate; for scheduled sends, use a Campaign.\n\n**New recipients:** a recipient that is not a contact yet is refused with `422 INVALID_EMAIL` when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`); `error.details` has `reasons` and any `suggestedEmail`. No contact is created for it.\n\n**Attachments:** up to 10 attachments per email and 10 MB total by default. A request can be at most 10 MB, so attachments, which travel base64-encoded, can add up to about 7 MB.\n\n**Message format:** `body` is your HTML. Plunk generates a plain text alternative from it and sends both, which avoids the spam penalties that apply to HTML-only mail. There is no plain text field to set.",
         "operationId": "sendEmail",
         "requestBody": {
           "required": true,
@@ -653,6 +653,8 @@
                             }
                           ]
                         },
+                        "minItems": 1,
+                        "maxItems": 50,
                         "description": "Array of recipients (strings or objects)"
                       }
                     ],
@@ -924,6 +926,36 @@
                           "email": "user@example.com"
                         },
                         "email": "ac32f08e-c6b9-45d3-9824-a73dff1e3bbf"
+                      }
+                    ],
+                    "timestamp": "2025-01-15T10:30:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Sent to some recipients; `data.failed` lists the others",
+            "content": {
+              "application/json": {
+                "example": {
+                  "success": true,
+                  "data": {
+                    "emails": [
+                      {
+                        "contact": {
+                          "id": "cnt_abc123",
+                          "email": "user@example.com"
+                        },
+                        "email": "ac32f08e-c6b9-45d3-9824-a73dff1e3bbf"
+                      }
+                    ],
+                    "failed": [
+                      {
+                        "email": "ana@gmial.com",
+                        "code": "INVALID_EMAIL",
+                        "message": "This address cannot receive email: Looks like a typo of gmail.com. Did you mean the suggested address (details.suggestedEmail)?",
+                        "suggestedEmail": "ana@gmail.com"
                       }
                     ],
                     "timestamp": "2025-01-15T10:30:00.000Z"
