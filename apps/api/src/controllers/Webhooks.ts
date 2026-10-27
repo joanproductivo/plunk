@@ -31,6 +31,7 @@ import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {QueueService} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
+import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
@@ -136,7 +137,7 @@ export class Webhooks {
   public async receiveSNSWebhook(req: Request, res: Response) {
     try {
       // Verify SNS message signature before processing anything
-      const signature = await SecurityService.verifySnsSignature(req.body as Record<string, string>);
+      const signature = await SnsSignature.verify(req.body as Record<string, string>);
       if (signature === 'unavailable') {
         // AWS's signing certificate could not be fetched. Nothing says the message is forged,
         // so a 5xx has SNS deliver it again rather than losing it.

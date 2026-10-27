@@ -15,6 +15,7 @@ import {NtfyService} from '../../services/NtfyService';
 import {eventTrackingQueue, QueueService} from '../../services/QueueService';
 import {SecurityService} from '../../services/SecurityService';
 import {getAwsAccountId} from '../../services/SESService';
+import {SnsSignature} from '../../services/SnsSignature';
 import {processEventTracking} from '../../jobs/event-tracking-processor';
 import {affectedAddresses, Webhooks} from '../Webhooks';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -51,7 +52,7 @@ describe('Webhooks - SES event notifications', () => {
 
     // The signature is AWS's to produce; every test here is about what happens after it checks
     // out. The rejection path is covered separately below.
-    vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue('valid');
+    vi.spyOn(SnsSignature, 'verify').mockResolvedValue('valid');
     vi.mocked(getAwsAccountId).mockResolvedValue('111111111111');
 
     // The event is tracked by the worker; here it runs as soon as it is queued, so the tests can
@@ -436,7 +437,7 @@ describe('Webhooks - SES event notifications', () => {
 
   describe('rejected and unmatched events', () => {
     it('rejects a notification whose signature does not verify', async () => {
-      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue('invalid');
+      vi.spyOn(SnsSignature, 'verify').mockResolvedValue('invalid');
       const email = await sentEmail('ses-unsigned-1');
 
       const captured = await post(notification('Delivery', 'ses-unsigned-1'));
@@ -463,7 +464,7 @@ describe('Webhooks - SES event notifications', () => {
     });
 
     it("asks SNS to retry when AWS's signing certificate cannot be fetched", async () => {
-      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValueOnce('unavailable');
+      vi.spyOn(SnsSignature, 'verify').mockResolvedValueOnce('unavailable');
 
       const captured = await post(notification('Delivery', 'ses-cert-down'));
 

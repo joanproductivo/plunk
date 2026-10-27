@@ -1,5 +1,3 @@
-import crypto from 'crypto';
-
 import {ProjectDisabledEmail, sendPlatformEmail} from '@plunk/email';
 import React from 'react';
 import signale from 'signale';
@@ -153,57 +151,6 @@ interface SecurityStatus {
   criticalByMetric: Record<SecurityMetric, boolean>;
 }
 
-const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
-const snsSigningCertCache = new Map<string, string>();
-
-/** The outcome of checking an SNS message signature */
-export type SnsSignatureCheck = 'valid' | 'invalid' | 'unavailable';
-
-/** AWS's signing certificate could not be fetched: the network failed, or SNS answered with a 5xx */
-class SigningCertUnavailableError extends Error {}
-
-async function fetchSigningCert(certUrl: string): Promise<string> {
-  const cached = snsSigningCertCache.get(certUrl);
-  if (cached) return cached;
-
-  // Anything that keeps an answer from arriving -- the network, the timeout (which runs from
-  // the request to the last byte of the body), a 5xx -- is unavailable. A 4xx is an answer: the
-  // certificate does not exist, so the signature cannot be valid.
-  const signal = AbortSignal.timeout(5000);
-  let response: Response;
-  try {
-    response = await fetch(certUrl, {signal});
-  } catch (error) {
-    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${String(error)}`);
-  }
-  if (response.status >= 500) {
-    throw new SigningCertUnavailableError(`Failed to fetch SNS signing cert: ${response.status}`);
-  }
-  if (!response.ok) throw new Error(`Failed to fetch SNS signing cert: ${response.statusText}`);
-
-  let pem: string;
-  try {
-    pem = await response.text();
-  } catch (error) {
-    throw new SigningCertUnavailableError(`Failed to read SNS signing cert: ${String(error)}`);
-  }
-
-  snsSigningCertCache.set(certUrl, pem);
-  return pem;
-}
-
-function buildSnsStringToSign(message: Record<string, string>): string {
-  const fields =
-    message['Type'] === 'Notification'
-      ? ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type']
-      : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
-
-  return fields
-    .filter(key => message[key] !== undefined)
-    .map(key => `${key}\n${message[key]}\n`)
-    .join('');
-}
-
 /**
  * The account id in an SNS topic ARN (`arn:aws:sns:<region>:<account>:<topic>`), or
  * undefined when the value is not an SNS topic ARN.
@@ -238,46 +185,6 @@ export class SecurityService {
     } catch (error) {
       signale.error('[SNS] Could not look up the AWS account to check the topic against:', error);
       return 'unknown';
-    }
-  }
-
-  /**
-   * Verify an AWS SNS message signature: 'invalid' if the cert URL is untrusted or the
-   * signature doesn't match, 'unavailable' if AWS's certificate could not be fetched.
-   */
-  public static async verifySnsSignature(body: Record<string, string>): Promise<SnsSignatureCheck> {
-    try {
-      const certUrl = body['SigningCertURL'];
-      const signature = body['Signature'];
-
-      if (!certUrl || !signature) {
-        signale.warn('[SNS] Missing SigningCertURL or Signature');
-        return 'invalid';
-      }
-
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(certUrl);
-      } catch {
-        signale.warn('[SNS] Unparseable SigningCertURL');
-        return 'invalid';
-      }
-
-      if (parsedUrl.protocol !== 'https:' || !SNS_CERT_HOST_RE.test(parsedUrl.hostname)) {
-        signale.warn(`[SNS] Untrusted SigningCertURL host: ${parsedUrl.hostname}`);
-        return 'invalid';
-      }
-
-      const pem = await fetchSigningCert(certUrl);
-      const stringToSign = buildSnsStringToSign(body);
-      const algorithm = body['SignatureVersion'] === '2' ? 'RSA-SHA256' : 'RSA-SHA1';
-
-      const verifier = crypto.createVerify(algorithm);
-      verifier.update(stringToSign, 'utf8');
-      return verifier.verify(pem, signature, 'base64') ? 'valid' : 'invalid';
-    } catch (err) {
-      signale.error('[SNS] Signature verification error:', err);
-      return err instanceof SigningCertUnavailableError ? 'unavailable' : 'invalid';
     }
   }
 
