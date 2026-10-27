@@ -265,8 +265,8 @@ export class WorkflowExecutionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Pass up untouched an error a later step of this run already handled. An error of this step
-      // itself is always handled, even one another execution it resumed through an event already
-      // handled: this step failed too.
+      // itself is always handled (Plunk Lite: another run it resumes through an event keeps its own
+      // failure, see handleEvent).
       const isObject = typeof error === 'object' && error !== null;
       if (stepCompleted && isObject && handledFailures.has(error)) {
         throw error;
@@ -577,8 +577,14 @@ export class WorkflowExecutionService {
           signale.warn(`[WORKFLOW] Could not cancel the timeout of step execution ${stepExecution.id}:`, error);
         }
 
-        // Continue workflow
-        await this.processNextSteps(stepExecution.execution, stepExecution.step, {eventReceived: true});
+        // Continue workflow. Plunk Lite: one resumed run's failure stays in that run -- it must not
+        // stop the others waiting for this event, nor fail whatever tracked it (a /v1/track call,
+        // another workflow's step)
+        try {
+          await this.processNextSteps(stepExecution.execution, stepExecution.step, {eventReceived: true});
+        } catch (error) {
+          await this.failResumedRun(stepExecution.execution, error);
+        }
       }
     }
   }
@@ -1482,6 +1488,39 @@ export class WorkflowExecutionService {
     // Process the next step
     // All steps are processed immediately - DELAY and WAIT_FOR_EVENT will pause the workflow internally
     await this.processStepExecution(execution.id, nextStep.id);
+  }
+
+  /**
+   * Plunk Lite: a run resumed by an event failed. A step that failed has already failed its run and
+   * alerted; anything else (moving on, before any step ran) fails it here, with the reason, so it
+   * is not left RUNNING or WAITING with its wait claimed and nobody to move it on.
+   */
+  private static async failResumedRun(execution: WorkflowExecutionWithRelations, error: unknown): Promise<void> {
+    if (typeof error === 'object' && error !== null && handledFailures.has(error)) {
+      return;
+    }
+    signale.error(`[WORKFLOW] Resuming execution ${execution.id} after its event failed:`, error);
+    try {
+      const {count} = await prisma.workflowExecution.updateMany({
+        where: {id: execution.id, status: {notIn: STOPPED_STATUSES}},
+        data: {
+          status: WorkflowExecutionStatus.FAILED,
+          completedAt: new Date(),
+          exitReason: 'Resuming after the event failed',
+        },
+      });
+      if (count > 0) {
+        await FailureAlertService.record(execution.workflow.projectId, {
+          sourceKey: `workflow:${execution.workflowId}`,
+          label: execution.workflow.name,
+          error: error instanceof Error ? error.message : 'Resuming after the event failed',
+          contactEmail: execution.contact.email,
+        });
+      }
+    } catch (failError) {
+      // The database is out too: the run stays as it was, and the alert of the failure is lost
+      signale.error(`[WORKFLOW] Could not fail execution ${execution.id}:`, failError);
+    }
   }
 
   /**

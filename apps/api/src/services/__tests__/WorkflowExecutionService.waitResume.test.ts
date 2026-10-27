@@ -216,4 +216,29 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     const {status} = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
     expect(status).toBe(WorkflowExecutionStatus.CANCELLED);
   });
+
+  it('resumes every run waiting for the event when one of them fails to move on (Plunk Lite)', async () => {
+    const first = await createRun();
+    const second = await createRun();
+    // The first run's step after the wait was deleted meanwhile: moving it on throws
+    const real = WorkflowExecutionService.processStepExecution.bind(WorkflowExecutionService);
+    vi.spyOn(WorkflowExecutionService, 'processStepExecution').mockImplementation(async (executionId, stepId) => {
+      if (executionId === first.executionId) throw new Error('moving on failed');
+      return real(executionId, stepId);
+    });
+
+    await expect(ship()).resolves.toBeUndefined();
+
+    const runs = await prisma.workflowExecution.findMany({
+      where: {id: {in: [first.executionId, second.executionId]}},
+      select: {id: true, status: true, exitReason: true},
+    });
+    const byId = Object.fromEntries(runs.map(run => [run.id, run]));
+    expect(byId[first.executionId]).toMatchObject({
+      status: WorkflowExecutionStatus.FAILED,
+      exitReason: 'Resuming after the event failed',
+    });
+    expect(byId[second.executionId]!.status).toBe(WorkflowExecutionStatus.COMPLETED);
+  });
 });
+

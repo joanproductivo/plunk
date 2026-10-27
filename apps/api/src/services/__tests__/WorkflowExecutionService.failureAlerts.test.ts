@@ -110,7 +110,7 @@ describe('WorkflowExecutionService - failure alerts', () => {
     expect(await prisma.plunkLiteFailure.findFirst({where: {sourceKey: `workflow:${done.id}`}})).toBeNull();
   });
 
-  it('records both workflows when a step fails in another execution it resumed through an event', async () => {
+  it('records only the resumed workflow when a step fails in another execution it resumed through an event', async () => {
     const subscribed = await factories.createContact({projectId, email: 'leo@example.net', subscribed: true});
 
     /** A workflow with `steps` after its trigger, started for the subscribed contact */
@@ -148,9 +148,10 @@ describe('WorkflowExecutionService - failure alerts', () => {
       {type: WorkflowStepType.UPDATE_CONTACT, config: {subscriptionAction: 'unsubscribe'}},
     ]);
 
-    await expect(unsubscribing.run()).rejects.toThrow(/private/i);
+    // Plunk Lite: the resumed run keeps its failure; the one that resumed it carries on
+    await unsubscribing.run();
 
     const sources = (await prisma.plunkLiteFailure.findMany({where: {projectId}})).map(failure => failure.sourceKey);
-    expect(sources.sort()).toEqual([`workflow:${waiting.workflowId}`, `workflow:${unsubscribing.workflowId}`].sort());
+    expect(sources).toEqual([`workflow:${waiting.workflowId}`]);
   });
 });

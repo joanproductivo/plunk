@@ -98,7 +98,8 @@ describe('WorkflowExecutionService - the step that failed', () => {
     expect(ntfy).toHaveBeenCalledTimes(1);
   });
 
-  it('fails both executions when a step fails in another execution it resumed through an event', async () => {
+  it('fails only the resumed execution when a step fails in another execution it resumed through an event', async () => {
+    // Plunk Lite: one resumed run's failure stays in that run (it used to fail the one that resumed it too)
     const ntfy = vi.spyOn(NtfyService, 'notifyWorkflowExecutionFailed');
     // B waits for the contact to unsubscribe, then calls a webhook that fails
     const waiting = await createRun([
@@ -112,20 +113,20 @@ describe('WorkflowExecutionService - the step that failed', () => {
     const unsubscribing = await createRun([
       {type: WorkflowStepType.UPDATE_CONTACT, config: {subscriptionAction: 'unsubscribe'}},
     ]);
-    await expect(unsubscribing.start()).rejects.toThrow(/private/i);
+    await unsubscribing.start();
 
-    // Each execution has its own failed step, and the steps before it stay completed
+    // B has its failed step, and the wait before it stays completed
     const [, wait, webhook] = await waiting.steps();
     expect(wait).toMatchObject({status: StepExecutionStatus.COMPLETED});
     expect(webhook).toMatchObject({status: StepExecutionStatus.FAILED});
     expect(await waiting.status()).toBe(WorkflowExecutionStatus.FAILED);
 
+    // A carried on and completed
     const [trigger, update] = await unsubscribing.steps();
     expect(trigger).toMatchObject({status: StepExecutionStatus.COMPLETED});
-    expect(update).toMatchObject({status: StepExecutionStatus.FAILED});
-    expect(update!.error).toMatch(/private/i);
-    expect(await unsubscribing.status()).toBe(WorkflowExecutionStatus.FAILED);
-    expect(ntfy).toHaveBeenCalledTimes(2);
+    expect(update).toMatchObject({status: StepExecutionStatus.COMPLETED});
+    expect(await unsubscribing.status()).toBe(WorkflowExecutionStatus.COMPLETED);
+    expect(ntfy).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the trigger completed when the only step after it fails', async () => {
