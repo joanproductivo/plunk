@@ -10,18 +10,19 @@ import {parseRedisUrl} from '../utils/redis.js';
 
 /**
  * Email Body Cleanup Worker
- * Blanks the rendered HTML body of emails past the retention window. The row is kept
- * so delivery history, event counts and analytics stay intact; only the body — by far
- * the largest column — is dropped. Runs daily.
+ * Blanks the rendered HTML body and drops the attachments of emails past the retention
+ * window. The row is kept so delivery history, event counts and analytics stay intact;
+ * only the body and the attachments — by far the largest columns, and never sent again
+ * this late — are dropped. Runs daily.
  */
 
 const RETENTION_DAYS = 90;
 const BATCH_SIZE = 1000; // Update in batches to avoid long-held row locks
 
 /**
- * Process email body cleanup job
+ * Process email body cleanup job. Exported so tests can run it without a queue.
  */
-async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{cleared: number}> {
+export async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{cleared: number}> {
   signale.info('[EMAIL-BODY-CLEANUP] Starting cleanup of email bodies past retention...');
 
   const cutoffDate = new Date();
@@ -33,10 +34,11 @@ async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{clear
     for (;;) {
       // updateMany has no LIMIT, so bound each statement with a subselect. The
       // `body <> ''` predicate keeps already-cleared rows out of every later batch
-      // and is served by the partial index emails_createdAt_unpurged_idx.
+      // and is served by the partial index emails_createdAt_unpurged_idx. Attachments
+      // go with the body, so a row cleared before they did keeps its attachments.
       const cleared = await prisma.$executeRaw`
         UPDATE "emails"
-        SET "body" = ''
+        SET "body" = '', "attachments" = NULL
         WHERE "id" IN (
           SELECT "id" FROM "emails"
           WHERE "createdAt" < ${cutoffDate}
