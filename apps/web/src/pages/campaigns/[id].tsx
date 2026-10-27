@@ -633,261 +633,270 @@ export default function CampaignDetailsPage() {
             </div>
           </div>
 
-          {/* Audience — surfaced first because Send lives in the header.
-              Users need to see who/how many before pressing Send. */}
-          <Card>
-            <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
-              <div>
-                <CardTitle>Audience</CardTitle>
-                <CardDescription>Who will receive this campaign when you send</CardDescription>
-              </div>
-              {draftRecipientCount > 0 && (
-                <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 shrink-0">
-                  <Users className="h-4 w-4 text-neutral-500" />
-                  <span className="text-sm font-semibold text-neutral-900 tabular-nums">
-                    {draftRecipientCount.toLocaleString()} {draftRecipientCount === 1 ? 'recipient' : 'recipients'}
-                  </span>
-                </div>
-              )}
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="audienceType">
-                    Audience Type <span className="text-red-500">*</span>
-                  </Label>
-                  <Select
-                    value={editedCampaign.audienceType ?? c.audienceType}
-                    onValueChange={(value: CampaignAudienceType) => {
-                      setEditedCampaign({
-                        ...editedCampaign,
-                        audienceType: value,
-                        segmentId: value === CampaignAudienceType.SEGMENT ? editedCampaign.segmentId : undefined,
-                      });
-                    }}
-                  >
-                    <SelectTrigger id="audienceType">
-                      <SelectValue placeholder="Select audience type" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItemWithDescription
-                        value={CampaignAudienceType.ALL}
-                        title={(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL ? 'All Contacts' : 'All Subscribed Contacts'}
-                        description={(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL ? 'Send to all contacts regardless of subscription status' : "Send to everyone who hasn't unsubscribed"}
-                      />
-                      <SelectItemWithDescription
-                        value={CampaignAudienceType.SEGMENT}
-                        title="Specific segment"
-                        description="Target a defined group of contacts"
-                      />
-                    </SelectContent>
-                  </Select>
-                </div>
+          {/* Wide screens: the editor on the left, the settings on the right. Below that, settings first */}
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
+            <div className="space-y-6 xl:col-start-2 xl:row-start-1">
+              {/* Audience — surfaced first because Send lives in the header.
+                  Users need to see who/how many before pressing Send. */}
+              <Card>
+                <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+                  <div>
+                    <CardTitle>Audience</CardTitle>
+                    <CardDescription>Who will receive this campaign when you send</CardDescription>
+                  </div>
+                  {draftRecipientCount > 0 && (
+                    <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 shrink-0">
+                      <Users className="h-4 w-4 text-neutral-500" />
+                      <span className="text-sm font-semibold text-neutral-900 tabular-nums">
+                        {draftRecipientCount.toLocaleString()} {draftRecipientCount === 1 ? 'recipient' : 'recipients'}
+                      </span>
+                    </div>
+                  )}
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
+                    <div className="space-y-2">
+                      <Label htmlFor="audienceType">
+                        Audience Type <span className="text-red-500">*</span>
+                      </Label>
+                      <Select
+                        value={editedCampaign.audienceType ?? c.audienceType}
+                        onValueChange={(value: CampaignAudienceType) => {
+                          setEditedCampaign({
+                            ...editedCampaign,
+                            audienceType: value,
+                            segmentId: value === CampaignAudienceType.SEGMENT ? editedCampaign.segmentId : undefined,
+                          });
+                        }}
+                      >
+                        <SelectTrigger id="audienceType">
+                          <SelectValue placeholder="Select audience type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItemWithDescription
+                            value={CampaignAudienceType.ALL}
+                            title={(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL ? 'All Contacts' : 'All Subscribed Contacts'}
+                            description={(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL ? 'Send to all contacts regardless of subscription status' : "Send to everyone who hasn't unsubscribed"}
+                          />
+                          <SelectItemWithDescription
+                            value={CampaignAudienceType.SEGMENT}
+                            title="Specific segment"
+                            description="Target a defined group of contacts"
+                          />
+                        </SelectContent>
+                      </Select>
+                    </div>
 
-                {(editedCampaign.audienceType ?? c.audienceType) === CampaignAudienceType.SEGMENT && (
-                  <div className="space-y-2">
-                    <Label htmlFor="segment">
-                      Select Segment <span className="text-red-500">*</span>
-                    </Label>
-                    <Select
-                      value={editedCampaign.segmentId ?? c.segmentId ?? undefined}
-                      onValueChange={(value: string) => {
-                        setEditedCampaign({
-                          ...editedCampaign,
-                          segmentId: value,
-                        });
-                      }}
-                      disabled={!segments || segments.length === 0}
-                    >
-                      <SelectTrigger id="segment">
-                        <SelectValue
-                          placeholder={segments && segments.length > 0 ? 'Choose a segment' : 'No segments available'}
-                        />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {segments &&
-                          segments.length > 0 &&
-                          segments.map(segment => (
-                            <SelectItemWithDescription
-                              key={segment.id}
-                              value={segment.id}
-                              title={segment.name}
-                              description={`${segment.memberCount.toLocaleString()} contacts`}
+                    {(editedCampaign.audienceType ?? c.audienceType) === CampaignAudienceType.SEGMENT && (
+                      <div className="space-y-2">
+                        <Label htmlFor="segment">
+                          Select Segment <span className="text-red-500">*</span>
+                        </Label>
+                        <Select
+                          value={editedCampaign.segmentId ?? c.segmentId ?? undefined}
+                          onValueChange={(value: string) => {
+                            setEditedCampaign({
+                              ...editedCampaign,
+                              segmentId: value,
+                            });
+                          }}
+                          disabled={!segments || segments.length === 0}
+                        >
+                          <SelectTrigger id="segment">
+                            <SelectValue
+                              placeholder={segments && segments.length > 0 ? 'Choose a segment' : 'No segments available'}
                             />
-                          ))}
-                      </SelectContent>
-                    </Select>
-                    {segments && segments.length === 0 && (
-                      <p className="text-sm text-neutral-500">
-                        No segments found.{' '}
-                        <Link href="/segments/new" className="underline">
-                          Create one first
-                        </Link>
-                      </p>
+                          </SelectTrigger>
+                          <SelectContent>
+                            {segments &&
+                              segments.length > 0 &&
+                              segments.map(segment => (
+                                <SelectItemWithDescription
+                                  key={segment.id}
+                                  value={segment.id}
+                                  title={segment.name}
+                                  description={`${segment.memberCount.toLocaleString()} contacts`}
+                                />
+                              ))}
+                          </SelectContent>
+                        </Select>
+                        {segments && segments.length === 0 && (
+                          <p className="text-sm text-neutral-500">
+                            No segments found.{' '}
+                            <Link href="/segments/new" className="underline">
+                              Create one first
+                            </Link>
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
+
+                  {editedCampaign.audienceType === CampaignAudienceType.FILTERED && (
+                    <p className="text-sm text-neutral-500">
+                      Filtered audiences are configured with advanced filter conditions
+                    </p>
+                  )}
+
+                  {draftRecipientCount > 0 && (
+                    <p className="text-xs text-neutral-500">
+                      Recalculated at send time. Final count may differ if contacts{' '}
+                      {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL
+                        ? 'are added or removed, or segment membership changes.'
+                        : 'subscribe, unsubscribe, or segment membership changes.'
+                      }
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Row 1: Basic Info + Campaign Type */}
+              <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-1">
+                {/* Basic Information */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Basic information</CardTitle>
+                    <CardDescription>Name and describe your campaign</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="name">
+                        Campaign Name <span className="text-red-500">*</span>
+                      </Label>
+                      <Input
+                        id="name"
+                        placeholder="e.g., Spring Sale Announcement"
+                        value={editedCampaign.name || ''}
+                        onChange={e => setEditedCampaign({...editedCampaign, name: e.target.value})}
+                        required
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="description">Description</Label>
+                      <Input
+                        id="description"
+                        placeholder="e.g., Q2 launch, list A"
+                        value={editedCampaign.description || ''}
+                        onChange={e => setEditedCampaign({...editedCampaign, description: e.target.value})}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Campaign Type */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Campaign type</CardTitle>
+                    <CardDescription>Choose how this campaign should be treated</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex flex-col gap-2">
+                      {([
+                        {value: TemplateType.MARKETING, label: 'Marketing', description: 'Subscribed contacts, includes unsubscribe link'},
+                        {value: TemplateType.TRANSACTIONAL, label: 'Transactional', description: 'All contacts, no subscription check or footer'},
+                        {value: TemplateType.HEADLESS, label: 'Headless', description: 'Subscribed contacts, no Plunk footer'},
+                      ] as const).map(({value, label, description}) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setEditedCampaign({...editedCampaign, type: value})}
+                          className={`flex items-center justify-between w-full min-h-[44px] px-4 py-3 rounded-lg border-2 text-left transition-colors ${
+                            (editedCampaign.type ?? c.type) === value
+                              ? 'border-neutral-900 bg-neutral-50'
+                              : 'border-neutral-200 hover:border-neutral-300'
+                          }`}
+                        >
+                          <span className="font-medium text-sm text-neutral-900 shrink-0">{label}</span>
+                          <span className="text-xs text-neutral-500 ml-4 text-right">{description}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {(editedCampaign.type ?? c.type) === TemplateType.HEADLESS &&
+                      !detectUnsubscribeSignal(editedCampaign.body ?? c.body) && (
+                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
+                        <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-100/60 px-3 py-2">
+                          <TriangleAlert className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                          <p className="text-xs font-semibold text-amber-900">No unsubscribe link detected</p>
+                        </div>
+                        <div className="px-3 py-2.5 space-y-2">
+                          <p className="text-xs text-amber-800 leading-relaxed">
+                            You are responsible for providing recipients a way to opt out. Use the Plunk variables below to build your own footer.
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
+                              {'{{unsubscribeUrl}}'}
+                            </code>
+                            <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
+                              {'{{manageUrl}}'}
+                            </code>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
               </div>
 
-              {editedCampaign.audienceType === CampaignAudienceType.FILTERED && (
-                <p className="text-sm text-neutral-500">
-                  Filtered audiences are configured with advanced filter conditions
-                </p>
-              )}
-
-              {draftRecipientCount > 0 && (
-                <p className="text-xs text-neutral-500">
-                  Recalculated at send time. Final count may differ if contacts{' '}
-                  {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL
-                    ? 'are added or removed, or segment membership changes.'
-                    : 'subscribe, unsubscribe, or segment membership changes.'
-                  }
-                </p>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Row 1: Basic Info + Campaign Type */}
-          <div className="grid gap-6 md:grid-cols-2">
-            {/* Basic Information */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Basic information</CardTitle>
-                <CardDescription>Name and describe your campaign</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">
-                    Campaign Name <span className="text-red-500">*</span>
-                  </Label>
-                  <Input
-                    id="name"
-                    placeholder="e.g., Spring Sale Announcement"
-                    value={editedCampaign.name || ''}
-                    onChange={e => setEditedCampaign({...editedCampaign, name: e.target.value})}
-                    required
+              {/* Email Settings */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Email settings</CardTitle>
+                  <CardDescription>Configure sender information and subject</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <EmailSettings
+                    from={editedCampaign.from || ''}
+                    fromName={editedCampaign.fromName || ''}
+                    replyTo={editedCampaign.replyTo || ''}
+                    onFromChange={value => setEditedCampaign({...editedCampaign, from: value})}
+                    onFromNameChange={value => setEditedCampaign({...editedCampaign, fromName: value})}
+                    onReplyToChange={value => setEditedCampaign({...editedCampaign, replyTo: value})}
+                    fromNamePlaceholder={activeProject?.name || 'Your Company'}
                   />
-                </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="description">Description</Label>
-                  <Input
-                    id="description"
-                    placeholder="e.g., Q2 launch, list A"
-                    value={editedCampaign.description || ''}
-                    onChange={e => setEditedCampaign({...editedCampaign, description: e.target.value})}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Campaign Type */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Campaign type</CardTitle>
-                <CardDescription>Choose how this campaign should be treated</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-col gap-2">
-                  {([
-                    {value: TemplateType.MARKETING, label: 'Marketing', description: 'Subscribed contacts, includes unsubscribe link'},
-                    {value: TemplateType.TRANSACTIONAL, label: 'Transactional', description: 'All contacts, no subscription check or footer'},
-                    {value: TemplateType.HEADLESS, label: 'Headless', description: 'Subscribed contacts, no Plunk footer'},
-                  ] as const).map(({value, label, description}) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setEditedCampaign({...editedCampaign, type: value})}
-                      className={`flex items-center justify-between w-full min-h-[44px] px-4 py-3 rounded-lg border-2 text-left transition-colors ${
-                        (editedCampaign.type ?? c.type) === value
-                          ? 'border-neutral-900 bg-neutral-50'
-                          : 'border-neutral-200 hover:border-neutral-300'
-                      }`}
-                    >
-                      <span className="font-medium text-sm text-neutral-900 shrink-0">{label}</span>
-                      <span className="text-xs text-neutral-500 ml-4 text-right">{description}</span>
-                    </button>
-                  ))}
-                </div>
-                {(editedCampaign.type ?? c.type) === TemplateType.HEADLESS &&
-                  !detectUnsubscribeSignal(editedCampaign.body ?? c.body) && (
-                  <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
-                    <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-100/60 px-3 py-2">
-                      <TriangleAlert className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                      <p className="text-xs font-semibold text-amber-900">No unsubscribe link detected</p>
-                    </div>
-                    <div className="px-3 py-2.5 space-y-2">
-                      <p className="text-xs text-amber-800 leading-relaxed">
-                        You are responsible for providing recipients a way to opt out. Use the Plunk variables below to build your own footer.
-                      </p>
-                      <div className="flex flex-wrap gap-1.5">
-                        <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
-                          {'{{unsubscribeUrl}}'}
-                        </code>
-                        <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
-                          {'{{manageUrl}}'}
-                        </code>
-                      </div>
-                    </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="subject">
+                      Email Subject <span className="text-red-500">*</span>
+                    </Label>
+                    <Input
+                      id="subject"
+                      placeholder="e.g., Introducing our Spring Sale!"
+                      value={editedCampaign.subject || ''}
+                      onChange={e => setEditedCampaign({...editedCampaign, subject: e.target.value})}
+                      required
+                    />
                   </div>
-                )}
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Email Content */}
+            <Card className="overflow-visible xl:sticky xl:top-6 xl:col-start-1 xl:row-start-1 xl:flex xl:h-[calc(100dvh-3rem)] xl:flex-col xl:self-start">
+              <CardHeader>
+                <CardTitle>Email content</CardTitle>
+                <CardDescription>Design your email message</CardDescription>
+              </CardHeader>
+              <CardContent className="xl:min-h-0 xl:flex-1">
+                <EmailEditor
+                  value={editedCampaign.body || ''}
+                  onChange={body => {
+                    setEditedCampaign({...editedCampaign, body});
+                    setHasChanges(true);
+                  }}
+                  segmentId={
+                    (editedCampaign.audienceType ?? c.audienceType) === CampaignAudienceType.SEGMENT
+                      ? (editedCampaign.segmentId ?? c.segmentId ?? undefined)
+                      : undefined
+                  }
+                  subject={editedCampaign.subject || ''}
+                  from={editedCampaign.from || ''}
+                  replyTo={editedCampaign.replyTo || ''}
+                  fillHeight
+                />
               </CardContent>
             </Card>
           </div>
-
-          {/* Email Settings */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Email settings</CardTitle>
-              <CardDescription>Configure sender information and subject</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <EmailSettings
-                from={editedCampaign.from || ''}
-                fromName={editedCampaign.fromName || ''}
-                replyTo={editedCampaign.replyTo || ''}
-                onFromChange={value => setEditedCampaign({...editedCampaign, from: value})}
-                onFromNameChange={value => setEditedCampaign({...editedCampaign, fromName: value})}
-                onReplyToChange={value => setEditedCampaign({...editedCampaign, replyTo: value})}
-                fromNamePlaceholder={activeProject?.name || 'Your Company'}
-              />
-
-              <div className="space-y-2">
-                <Label htmlFor="subject">
-                  Email Subject <span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="subject"
-                  placeholder="e.g., Introducing our Spring Sale!"
-                  value={editedCampaign.subject || ''}
-                  onChange={e => setEditedCampaign({...editedCampaign, subject: e.target.value})}
-                  required
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Email Content */}
-          <Card className="overflow-visible">
-            <CardHeader>
-              <CardTitle>Email content</CardTitle>
-              <CardDescription>Design your email message</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <EmailEditor
-                value={editedCampaign.body || ''}
-                onChange={body => {
-                  setEditedCampaign({...editedCampaign, body});
-                  setHasChanges(true);
-                }}
-                segmentId={
-                  (editedCampaign.audienceType ?? c.audienceType) === CampaignAudienceType.SEGMENT
-                    ? (editedCampaign.segmentId ?? c.segmentId ?? undefined)
-                    : undefined
-                }
-              />
-            </CardContent>
-          </Card>
 
           {/* Test Email Dialog */}
           <Dialog open={dialog.type === 'testEmail'} onOpenChange={open => !open && setDialog({type: 'none'})}>
