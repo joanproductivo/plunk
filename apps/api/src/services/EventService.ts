@@ -38,11 +38,13 @@ export class EventService {
       },
     });
 
+    // Resume workflows waiting for this event. Plunk Lite: before starting new ones, so a run this
+    // event starts does not have its own wait for the same event met by it ("order -> wait for the
+    // next order")
+    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
+
     // Trigger workflows that are listening for this event
     await this.triggerWorkflows(projectId, eventName, contactId, data);
-
-    // Resume workflows waiting for this event
-    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
 
     return event;
   }
