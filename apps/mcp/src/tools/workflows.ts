@@ -145,7 +145,9 @@ const stepConfigShape = {
   subscriptionAction: z
     .enum(SUBSCRIPTION_ACTIONS)
     .optional()
-    .describe('UPDATE_CONTACT: also subscribe or unsubscribe the contact.'),
+    .describe(
+      'UPDATE_CONTACT: also subscribe or unsubscribe the contact. `subscribe` leaves an address on the suppression list unsubscribed, and the step goes on.',
+    ),
   segments: z
     .object({
       add: z.array(z.string().uuid()).max(MAX_SEGMENT_CHANGES).optional(),

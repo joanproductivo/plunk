@@ -142,7 +142,9 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
         createMissing: z
           .boolean()
           .default(false)
-          .describe('Create contacts for emails that do not exist yet (subscribed unless `subscribed` is false).'),
+          .describe(
+            'Create contacts for emails that do not exist yet (subscribed unless `subscribed` is false; an address on the suppression list is created unsubscribed).',
+          ),
         subscribed: z.boolean().optional().describe('With createMissing: subscription state of the created contacts.'),
       }),
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true},
