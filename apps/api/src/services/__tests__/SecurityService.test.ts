@@ -78,8 +78,8 @@ describe('SecurityService', () => {
 
   describe('Rate-based checks (existing behavior)', () => {
     it('should report healthy when bounce rate is below warning', async () => {
-      // 200 emails, 5 bounces = 2.5% (below 5% warning)
-      await createEmails(200, {bouncedCount: 5});
+      // 400 emails, 5 bounces = 1.25% (below the 2.5% warning)
+      await createEmails(400, {bouncedCount: 5});
 
       const status = await SecurityService.getSecurityStatus(projectId);
       expect(status.isHealthy).toBe(true);
@@ -89,8 +89,8 @@ describe('SecurityService', () => {
     });
 
     it('should trigger warning when 7-day bounce rate exceeds warning threshold', async () => {
-      // 100 emails, 6 bounces = 6% (above 5% warning, below 10% critical)
-      await createEmails(100, {bouncedCount: 6});
+      // 200 emails, 6 bounces = 3% (above the 2.5% warning, below the 5% critical)
+      await createEmails(200, {bouncedCount: 6});
 
       const status = await SecurityService.getSecurityStatus(projectId);
       expect(status.isHealthy).toBe(true);
@@ -98,13 +98,34 @@ describe('SecurityService', () => {
     });
 
     it('should trigger violation when 7-day bounce rate exceeds critical threshold', async () => {
-      // 100 emails, 11 bounces = 11% (above 10% critical)
+      // 100 emails, 11 bounces = 11% (above the 5% critical)
       await createEmails(100, {bouncedCount: 11});
 
       const status = await SecurityService.getSecurityStatus(projectId);
       expect(status.isHealthy).toBe(false);
       expect(status.shouldDisable).toBe(true);
       expect(status.violations.length).toBeGreaterThan(0);
+    });
+
+    it('counts only emails given to SES, so a queued campaign does not dilute the rate', async () => {
+      // 100 sent, 11 bounced = 11% -- with 2,000 more still queued for a campaign, which used to
+      // read as 0.5% while the send was going out
+      await createEmails(100, {bouncedCount: 11});
+      await prisma.email.createMany({
+        data: Array.from({length: 2000}, (_, i) => ({
+          projectId,
+          contactId,
+          subject: `Queued ${i}`,
+          body: '<p>queued</p>',
+          from: 'test@example.com',
+          status: EmailStatus.PENDING,
+          sourceType: EmailSourceType.CAMPAIGN,
+        })),
+      });
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+      expect(status.sevenDay.total).toBe(100);
+      expect(status.shouldDisable).toBe(true);
     });
 
     it('should not enforce rate checks when below minimum volume', async () => {
@@ -140,7 +161,7 @@ describe('SecurityService', () => {
     });
 
     it('should NOT trigger on high absolute complaint count when rate is healthy', async () => {
-      // 40,000 emails, 30 complaints = 0.075% (below critical: 0.15% 7-day, 0.12% all-time)
+      // 40,000 emails, 30 complaints = 0.075% (below critical: 0.1% 7-day, 0.08% all-time)
       // Old absolute ceiling (25 complaints in 7d critical) would have tripped.
       await createEmails(40000, {complainedCount: 30});
 
@@ -231,13 +252,14 @@ describe('SecurityService', () => {
     });
 
     it('should NOT disable project when only warnings exist', async () => {
-      // Established project, 200 emails, 12 bounces = 6% (above 5% warning, below 10% critical)
+      // Established project, 400 emails, 12 bounces = 3% (above the warnings, below the 4% and
+      // 5% criticals)
       const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
       await prisma.project.update({
         where: {id: projectId},
         data: {createdAt: oldDate},
       });
-      await createEmails(200, {bouncedCount: 12});
+      await createEmails(400, {bouncedCount: 12});
 
       await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
 
@@ -365,7 +387,7 @@ describe('SecurityService', () => {
      */
     it('should exclude simulated bounces from the rates entirely', async () => {
       await createEmails(100);
-      // 50 bounces out of 150 is 33%, far past the 10% critical threshold.
+      // 50 bounces out of 150 is 33%, far past the 5% critical threshold.
       await createEmails(50, {bouncedCount: 50, simulated: true});
 
       const status = await SecurityService.getSecurityStatus(projectId);

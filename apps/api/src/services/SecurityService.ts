@@ -27,30 +27,33 @@ import {
 
 /**
  * Security thresholds for bounce and complaint rates
- * These limits protect AWS SES reputation and prevent account suspension
+ * These limits protect AWS SES reputation and prevent account suspension. The critical ones sit
+ * where AWS starts reviewing an account -- a 5% bounce rate, a 0.1% complaint rate -- so a
+ * project is stopped before SES has to act on the whole account. The dashboard repeats them
+ * (apps/web/src/components/analytics/metrics.ts, apps/web/src/pages/campaigns/[id].tsx).
  */
 const SECURITY_THRESHOLDS = {
   // Minimum emails required before enforcing rate-based limits (prevents false positives)
   MIN_EMAILS_FOR_ENFORCEMENT: 100,
 
   // Bounce rate thresholds (hard bounces only)
-  BOUNCE_7DAY_WARNING: 5,
-  BOUNCE_7DAY_CRITICAL: 10,
-  BOUNCE_ALLTIME_WARNING: 4,
-  BOUNCE_ALLTIME_CRITICAL: 8,
+  BOUNCE_7DAY_WARNING: 2.5,
+  BOUNCE_7DAY_CRITICAL: 5,
+  BOUNCE_ALLTIME_WARNING: 2,
+  BOUNCE_ALLTIME_CRITICAL: 4,
 
   // Complaint rate thresholds (spam reports)
-  COMPLAINT_7DAY_WARNING: 0.075,
-  COMPLAINT_7DAY_CRITICAL: 0.15,
+  COMPLAINT_7DAY_WARNING: 0.05,
+  COMPLAINT_7DAY_CRITICAL: 0.1,
   COMPLAINT_ALLTIME_WARNING: 0.03,
-  COMPLAINT_ALLTIME_CRITICAL: 0.12,
+  COMPLAINT_ALLTIME_CRITICAL: 0.08,
 
   // Minimum absolute counts (prevents small sample size false positives)
   // Both percentage AND absolute count must be exceeded to trigger rate-based checks
   MIN_BOUNCES_FOR_CRITICAL: 10,
   MIN_BOUNCES_FOR_WARNING: 5,
-  MIN_COMPLAINTS_FOR_CRITICAL: 5,
-  MIN_COMPLAINTS_FOR_WARNING: 3,
+  MIN_COMPLAINTS_FOR_CRITICAL: 3,
+  MIN_COMPLAINTS_FOR_WARNING: 2,
 
   // === Absolute count ceilings (new projects only) ===
   // These trigger regardless of rate — catches new accounts blasting emails
@@ -534,6 +537,10 @@ export class SecurityService {
       // Nothing else changes for these emails -- the webhook fires, the activity feed
       // shows the bounce, the contact is still suppressed.
       simulated: false,
+      // Only emails SES was given count, as only those count for AWS: a campaign creates its
+      // rows well ahead of the send, and counting the ones still queued (or never sent) would
+      // understate the rate exactly while a large send is going out
+      sentAt: {not: null},
       ...(startDate && {
         createdAt: {
           gte: startDate,

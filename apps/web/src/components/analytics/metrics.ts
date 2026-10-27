@@ -73,7 +73,8 @@ export const METRICS: MetricDefinition[] = [
     label: 'Bounce rate',
     kind: 'rate',
     better: 'down',
-    thresholds: {warning: 5, critical: 10},
+    // The API's SECURITY_THRESHOLDS (7-day bounce rate)
+    thresholds: {warning: 2.5, critical: 5},
     volume: sent,
     fromPoint: p => ratio(p.bounced, p.sent),
   },
@@ -82,7 +83,8 @@ export const METRICS: MetricDefinition[] = [
     label: 'Complaint rate',
     kind: 'rate',
     better: 'down',
-    thresholds: {warning: 0.075, critical: 0.15},
+    // The API's SECURITY_THRESHOLDS (7-day complaint rate)
+    thresholds: {warning: 0.05, critical: 0.1},
     volume: sent,
     fromPoint: p => ratio(p.complained, p.sent),
   },
