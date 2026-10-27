@@ -221,7 +221,10 @@ describe('Webhooks - events without a stored messageId', () => {
         messageId: null,
         bouncedAt: null,
       });
-      expect(await subscribed()).toBe(true);
+      // Nor is the address suppressed in the tagged project, where the sender domain is not
+      // verified: only in the project that has it, as for an untagged event
+      expect(await prisma.plunkLiteSuppression.count({where: {projectId: other.id}})).toBe(0);
+      expect(await suppressed()).toHaveLength(1);
     });
 
     it('takes the row of a contact who changed address since, and suppresses the address it went to', async () => {
@@ -333,6 +336,30 @@ describe('Webhooks - events without a stored messageId', () => {
       expect(captured.status).toBe(200);
       expect(await subscribed()).toBe(true);
       expect(await prisma.plunkLiteSuppression.count({where: {projectId: {in: [projectId, other.id]}}})).toBe(0);
+      // Lost, so every project hears about it, without the address
+      const alerts = await prisma.plunkLiteFailure.findMany({
+        where: {sourceKey: 'sns:unmatched', projectId: {in: [projectId, other.id]}},
+      });
+      expect(alerts.map(alert => alert.projectId).sort()).toEqual([projectId, other.id].sort());
+      expect(alerts[0]!.lastError).toContain('hello@plunk.test');
+      expect(alerts[0]!.lastError).not.toContain(contact.email.toLowerCase());
+      expect(alerts[0]!.lastContactEmail).toBeNull();
+    });
+
+    it('does not take the tag of a project the sender domain is not verified in', async () => {
+      const {project: other} = await factories.createUserWithProject();
+
+      const captured = await post(
+        event('Complaint', {
+          tags: {plunk_email_id: '0b6b7a2e-1c3d-5e4f-8a9b-0c1d2e3f4a5b', plunk_project_id: other.id},
+        }),
+      );
+
+      expect(captured.status).toBe(200);
+      // Suppressed in the one project with the domain, as if untagged
+      expect(await prisma.plunkLiteSuppression.count({where: {projectId: other.id}})).toBe(0);
+      expect(await suppressed()).toHaveLength(1);
+      expect(await subscribed()).toBe(false);
     });
 
     it('does not suppress on a transient bounce', async () => {

@@ -262,18 +262,26 @@ export async function matchEmail(mail: SesMail): Promise<EventMatch> {
 }
 
 /**
- * The project an event without an email belongs to: the tagged one, or else the one project with
- * the sender's domain verified. Undefined when neither says.
+ * The project an event without an email belongs to: the tagged one, as long as the sender's domain
+ * is verified in it, or else the one project with the sender's domain verified. Undefined when
+ * neither says. A tag alone is not trusted: whoever sends through the same account could put any.
  */
 async function unmatchedProject(tags: Partial<SesMessageTags>, mail: SesMail): Promise<string | undefined> {
-  if (tags.projectId) {
-    return (await prisma.project.findUnique({where: {id: tags.projectId}, select: {id: true}}))?.id;
-  }
-
   const domain = bareAddress(mail.source ?? '').split('@')[1];
   if (!domain) {
     return undefined;
   }
+
+  if (tags.projectId) {
+    const tagged = await prisma.domain.findFirst({
+      where: {projectId: tags.projectId, domain, verified: true},
+      select: {projectId: true},
+    });
+    if (tagged) {
+      return tagged.projectId;
+    }
+  }
+
   const domains = await prisma.domain.findMany({
     where: {domain, verified: true},
     select: {projectId: true},
@@ -307,11 +315,23 @@ export async function suppressUnmatched(
   const addresses = affectedAddresses(eventType, body, sentAddress(mail, '')).filter(
     address => address && !isMailboxSimulatorAddress(address),
   );
-  const projectId = addresses.length > 0 ? await unmatchedProject(tags, mail) : undefined;
+  if (addresses.length === 0) {
+    signale.info(
+      `[WEBHOOK] ${eventType} event for unknown messageId ${mail.messageId} is about no address to suppress`,
+    );
+    return;
+  }
+  const projectId = await unmatchedProject(tags, mail);
   if (!projectId) {
-    // Error level: an event that matches no email and no project is lost, and SES gives up after
-    // its retries. A run of these means the send path is not stamping `messageId`.
+    // Error level: an event that matches no email and no project is lost. A run of these means
+    // the send path is not stamping `messageId`, or a sender domain is shared between projects.
     signale.error(`[WEBHOOK] ${eventType} event dropped — no email or project found for messageId ${mail.messageId}`);
+    // Every project hears about it, without the address, which may be another project's contact
+    await FailureAlertService.recordForAll({
+      sourceKey: 'sns:unmatched',
+      label: 'SES events without an email',
+      error: `A ${eventType === 'Complaint' ? 'complaint' : 'permanent bounce'} from ${mail.source ? bareAddress(mail.source) : 'an unknown sender'} matched no email and no single project (SES message ${mail.messageId}), so its address was not suppressed. Check that each sending domain is verified in one project only.`,
+    });
     return;
   }
 
