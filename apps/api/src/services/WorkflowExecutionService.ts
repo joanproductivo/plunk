@@ -25,6 +25,7 @@ import {EmailService} from './EmailService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+import {SuppressionService} from './SuppressionService.js';
 
 // A step's error is rethrown through the catch of every step before it in the same run, which
 // had completed; the step it came from has handled it, so those pass it up untouched.
@@ -1277,8 +1278,16 @@ export class WorkflowExecutionService {
     const hasDataUpdates = updates && Object.keys(updates).length > 0;
     const newData = hasDataUpdates ? {...currentData, ...updates} : currentData;
 
-    const desiredSubscribed =
+    let desiredSubscribed =
       subscriptionAction === 'subscribe' ? true : subscriptionAction === 'unsubscribe' ? false : undefined;
+    // A suppressed address is not subscribed by a workflow: the step goes on without it
+    if (
+      desiredSubscribed === true &&
+      !contact.subscribed &&
+      (await SuppressionService.allowedSubscription(execution.workflow.projectId, contact.email, true)).suppression
+    ) {
+      desiredSubscribed = undefined;
+    }
     const subscriptionChanging = desiredSubscribed !== undefined && desiredSubscribed !== contact.subscribed;
 
     const updateData: Prisma.ContactUpdateInput = {};

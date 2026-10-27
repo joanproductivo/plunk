@@ -41,6 +41,7 @@ import {MeterService} from '../services/MeterService.js';
 import {ProjectFooterService} from '../services/ProjectFooterService.js';
 import {emailQueue} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
+import {SuppressionService} from '../services/SuppressionService.js';
 import {getSendingQuota, safeToRetrySend, sendRawEmail} from '../services/SESService.js';
 
 /**
@@ -342,6 +343,24 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       data: {
         status: EmailStatus.FAILED,
         error: 'Contact is unsubscribed',
+      },
+    });
+
+    await finalizeCampaignSafely(email.campaignId);
+    return;
+  }
+
+  // An address on the project's suppression list is never sent to, transactional email
+  // included: it bounced for good or reported mail as spam, and SES would only bounce it again.
+  // This is the last gate whatever subscribed the contact meanwhile.
+  const suppression = await SuppressionService.find(email.projectId, recipientEmail);
+  if (suppression) {
+    signale.info(`[EMAIL-PROCESSOR] ${recipientEmail} is suppressed, skipping email ${emailId}`);
+    await prisma.email.updateMany({
+      where: {id: emailId, status: EmailStatus.PENDING},
+      data: {
+        status: EmailStatus.FAILED,
+        error: `Address is suppressed after a ${suppression.reason === 'COMPLAINT' ? 'complaint' : 'bounce'}`,
       },
     });
 

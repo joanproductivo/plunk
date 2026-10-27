@@ -24,12 +24,12 @@ function isSegmentJob(data: BulkContactActionJobData): data is BulkSegmentJobDat
 async function applyBatch(
   data: BulkContactActionJobData,
   ids: string[],
-): Promise<{changed: number; unchanged: number}> {
+): Promise<{changed: number; unchanged: number; suppressed?: number}> {
   const {projectId} = data;
   switch (data.operation) {
     case 'subscribe': {
       const r = await ContactService.bulkSubscribe(projectId, ids);
-      return {changed: r.updated, unchanged: r.unchanged};
+      return {changed: r.updated, unchanged: r.unchanged, suppressed: r.suppressed};
     }
     case 'unsubscribe': {
       const r = await ContactService.bulkUnsubscribe(projectId, ids);
@@ -94,10 +94,11 @@ export async function processBulkContactAction(job: Job<BulkContactActionJobData
 
   const runBatch = async (batchIds: string[]) => {
     try {
-      const {changed, unchanged} = await applyBatch(job.data, batchIds);
+      const {changed, unchanged, suppressed = 0} = await applyBatch(job.data, batchIds);
       result.successCount += changed;
       result.unchangedCount += unchanged;
-      const failed = batchIds.length - changed - unchanged;
+      if (suppressed > 0) result.suppressedCount = (result.suppressedCount ?? 0) + suppressed;
+      const failed = batchIds.length - changed - unchanged - suppressed;
       if (failed > 0) result.failureCount += failed;
     } catch (error) {
       signale.error('[BULK-CONTACT-PROCESSOR] Batch failed:', error);

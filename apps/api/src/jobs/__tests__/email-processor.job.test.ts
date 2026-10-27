@@ -7,6 +7,7 @@ import {prisma as appPrisma} from '../../database/prisma';
 import {CampaignService} from '../../services/CampaignService';
 import {EventService} from '../../services/EventService';
 import {SecurityService} from '../../services/SecurityService';
+import {SuppressionService} from '../../services/SuppressionService';
 import {sendRawEmail} from '../../services/SESService';
 import {type EmailJob, failAbandonedEmail, processEmailJob} from '../email-processor';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -282,6 +283,21 @@ describe('processEmailJob', () => {
 
       const row = await prisma.email.findUnique({where: {id: email.id}});
       expect(row?.status).toBe(EmailStatus.SENT);
+    });
+  });
+
+  describe('suppressed addresses', () => {
+    it('never sends to a suppressed address, transactional email included', async () => {
+      const email = await pendingEmail({sourceType: EmailSourceType.TRANSACTIONAL});
+      const contact = await prisma.contact.findUniqueOrThrow({where: {id: email.contactId}});
+      await SuppressionService.record(appPrisma, projectId, [contact.email], 'COMPLAINT', 'email-0');
+
+      await processEmailJob(makeJob(email.id));
+
+      const row = await prisma.email.findUnique({where: {id: email.id}});
+      expect(row?.status).toBe(EmailStatus.FAILED);
+      expect(row?.error).toBe('Address is suppressed after a complaint');
+      expect(sendRawEmail).not.toHaveBeenCalled();
     });
   });
 

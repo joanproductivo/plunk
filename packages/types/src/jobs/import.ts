@@ -100,6 +100,8 @@ export interface BulkContactActionResult {
   unchangedCount: number;
   /** Contacts that errored or weren't found (e.g. wrong project). */
   failureCount: number;
+  /** Contacts left unsubscribed because their address bounced or complained (Plunk Lite). */
+  suppressedCount?: number;
   errors: {contactId: string; email: string; error: string}[];
 }
 

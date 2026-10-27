@@ -68,6 +68,34 @@ export class SuppressionService {
     return new Map(rows.map(row => [row.email, {reason: row.reason as SuppressionReason, createdAt: row.createdAt}]));
   }
 
+  /** Split contacts, of one project or several, into those that may be subscribed and those that may not */
+  public static async partition<T extends {projectId: string; email: string}>(
+    contacts: T[],
+  ): Promise<{allowed: T[]; suppressed: T[]}> {
+    const byProject = new Map<string, T[]>();
+    for (const contact of contacts) {
+      byProject.set(contact.projectId, [...(byProject.get(contact.projectId) ?? []), contact]);
+    }
+
+    const allowed: T[] = [];
+    const suppressed: T[] = [];
+    for (const [projectId, group] of byProject) {
+      const listed = await this.suppressedAmong(
+        projectId,
+        group.map(contact => contact.email),
+      );
+      for (const contact of group) {
+        (listed.has(normalizeEmail(contact.email)) ? suppressed : allowed).push(contact);
+      }
+    }
+
+    if (suppressed.length > 0) {
+      signale.info(`[SUPPRESSION] ${suppressed.length} suppressed contact(s) left unsubscribed`);
+    }
+
+    return {allowed, suppressed};
+  }
+
   public static async find(projectId: string, address: string): Promise<Suppression | null> {
     return (await this.suppressedAmong(projectId, [address])).get(normalizeEmail(address)) ?? null;
   }
