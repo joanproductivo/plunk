@@ -329,8 +329,8 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
   connection: redisConnection,
   defaultJobOptions: {
     attempts: 1,
-    // Kept a day, so a copy of the same notification that SNS delivers again finds its job
-    // and is not tracked twice
+    // Kept up to a day (or the last 20,000), so a copy of the same notification that SNS
+    // delivers again -- within minutes, normally -- finds its job and is not tracked twice
     removeOnComplete: {age: 86_400, count: 20_000},
     removeOnFail: 5000,
   },
@@ -463,13 +463,21 @@ export class QueueService {
    */
   public static async scheduleCampaign(campaignId: string, scheduledFor: Date): Promise<Job<ScheduledCampaignJobData>> {
     const delay = scheduledFor.getTime() - Date.now();
+    const jobId = `scheduled-campaign-${campaignId}`;
+
+    // A finished or failed job under this id -- a campaign that could not start and was
+    // scheduled again -- would make BullMQ ignore the new one, and the campaign would never go out
+    const previous = await scheduledQueue.getJob(jobId);
+    if (previous && ['completed', 'failed'].includes(await previous.getState())) {
+      await previous.remove();
+    }
 
     return scheduledQueue.add(
       'send-scheduled-campaign',
       {campaignId},
       {
         delay: Math.max(0, delay),
-        jobId: `scheduled-campaign-${campaignId}`,
+        jobId,
       },
     );
   }

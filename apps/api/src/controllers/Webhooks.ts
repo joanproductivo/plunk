@@ -695,7 +695,7 @@ export class Webhooks {
       // Operator notification for a new suppression, naming the address it is about, sent
       // last: it is not part of recording the suppression, so a failure to send it must never
       // fail the event
-      const address = affected[0] ?? email.contact.email;
+      const address = sentTo === contactAddress ? email.contact.email : (affected[0] ?? email.contact.email);
       const notify =
         suppression && !isSimulated
           ? eventType === 'Complaint'
@@ -709,10 +709,9 @@ export class Webhooks {
                 )
           : undefined;
 
-      // The suppression is recorded. What follows is answered with 200 even when it fails:
-      // a redelivery would record the event again and start the workflows listening for it a
-      // second time -- one more email per retry for every workflow that allows re-entry --
-      // and add the open or click to the counters twice. Losing a workflow trigger is the
+      // The suppression is recorded. What follows is answered with 200 even when it fails: a
+      // redelivery would add the open or click to the counters twice, and could queue the event
+      // again once its job has been removed from the queue. Losing a workflow trigger is the
       // lesser failure.
       try {
         // The campaign counters the stats endpoint reads live on the campaign row, and this
@@ -736,7 +735,7 @@ export class Webhooks {
           );
         }
       } catch (error) {
-        signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but tracking the event failed:`, error);
+        signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but queueing the event failed:`, error);
       }
 
       if (notify) {

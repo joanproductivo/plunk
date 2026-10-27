@@ -92,8 +92,8 @@ module.exports = {
       kill_timeout: 30000,
       // A heap ceiling, so a runaway process fails on its own instead of the kernel killing the
       // container or a neighbour; pm2 restarts it cleanly, with a signal, before V8 reaches it
-      node_args: '--max-old-space-size=512',
-      max_memory_restart: '450M',
+      node_args: '--max-old-space-size=768',
+      max_memory_restart: '600M',
       env: {
         NODE_ENV: 'production',
         PORT: 8080,

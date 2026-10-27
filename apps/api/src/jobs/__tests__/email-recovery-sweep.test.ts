@@ -174,6 +174,8 @@ describe('sweepStuckEmails', () => {
     const row = await prisma.email.findUnique({where: {id: email.id}});
     expect(row?.status).toBe(EmailStatus.FAILED);
     expect(row?.error).toMatch(/could not be recorded/);
+    // With the id SES gave it, so its bounces and complaints still find the row
+    expect(row?.messageId).toBe('ses-1');
     expect(alert).toHaveBeenCalledTimes(1);
   });
 

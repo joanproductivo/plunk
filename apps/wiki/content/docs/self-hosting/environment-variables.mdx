@@ -71,7 +71,7 @@ Plunk supports attachments on transactional emails. AWS SES caps total message s
 
 | Variable                 | Required | Description                                                                                                              | Default |
 | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ | ------- |
-| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. A `/v1/send` request is limited to 10 MB, so about 7 MB of attachments is the real upper bound. | `10`    |
+| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. Requests are capped at 10 MB, so ~7 MB.                           | `10`    |
 | `MAX_ATTACHMENTS_COUNT`  | No       | Maximum number of attachments per email.                                                                                 | `10`    |
 
 ## API Rate Limiting

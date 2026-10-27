@@ -36,6 +36,9 @@ const SES_CLIENT_CONFIG = {
  */
 const SES_HTTP_OPTIONS = {connectionTimeout: 5_000, requestTimeout: 15_000, throwOnRequestTimeout: true};
 
+/** Ceiling on a whole send, under the worker's shutdown timeout like the request timeout */
+const SEND_TIMEOUT_MS = 20_000;
+
 /**
  * AWS SES Client for everything but sending: domain, DKIM and quota calls are safe to repeat,
  * so they keep the SDK's own retries
@@ -58,6 +61,9 @@ const sesSend = new SES({
 /** Node's codes for a connection that was never made, so nothing reached SES */
 const NEVER_CONNECTED_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 
+/** The system calls that fail before a socket is connected: DNS and the TCP connect itself */
+const NEVER_CONNECTED_SYSCALLS = new Set(['connect', 'getaddrinfo']);
+
 /**
  * Whether a failed send can be retried without risking a second copy: SES answered and refused
  * it (an HTTP error status), or the connection was never made. Anything else -- a reset or a
@@ -65,7 +71,13 @@ const NEVER_CONNECTED_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']
  * reports with the 2xx status -- may follow an email SES accepted.
  */
 export function safeToRetrySend(error: unknown): boolean {
-  const failure = error as {$metadata?: {httpStatusCode?: unknown}; code?: unknown; name?: unknown; message?: unknown};
+  const failure = error as {
+    $metadata?: {httpStatusCode?: unknown};
+    code?: unknown;
+    syscall?: unknown;
+    name?: unknown;
+    message?: unknown;
+  };
   const status = failure?.$metadata?.httpStatusCode;
 
   if (typeof status === 'number') {
@@ -73,6 +85,11 @@ export function safeToRetrySend(error: unknown): boolean {
   }
 
   if (typeof failure?.code === 'string' && NEVER_CONNECTED_CODES.has(failure.code)) {
+    return true;
+  }
+
+  // Any failure of the connect itself -- an unreachable host or network, a connect timeout
+  if (typeof failure?.syscall === 'string' && NEVER_CONNECTED_SYSCALLS.has(failure.syscall)) {
     return true;
   }
 
@@ -297,16 +314,22 @@ ${breakLongLines(attachment.content, 76)}`;
     TRACKING_TOGGLE_ENABLED && !tracking ? SES_CONFIGURATION_SET_NO_TRACKING : SES_CONFIGURATION_SET;
 
   // Send via SES
-  const response = await sesSend.sendRawEmail({
-    Destinations: destinations,
-    ConfigurationSetName: configurationSetName,
-    RawMessage: {
-      Data: new TextEncoder().encode(rawMessage),
+  const response = await sesSend.sendRawEmail(
+    {
+      Destinations: destinations,
+      ConfigurationSetName: configurationSetName,
+      RawMessage: {
+        Data: new TextEncoder().encode(rawMessage),
+      },
+      // The address alone: the display name travels in the From header above, and Source
+      // only names the sending identity and where bounces go.
+      Source: from.email,
     },
-    // The address alone: the display name travels in the From header above, and Source
-    // only names the sending identity and where bounces go.
-    Source: from.email,
-  });
+    // The request timeout stops once SES's answer starts arriving; this bounds the whole send,
+    // the answer's body included. An abort mid-answer reports no error status, so it is failed
+    // as possibly sent, never retried.
+    {abortSignal: AbortSignal.timeout(SEND_TIMEOUT_MS)},
+  );
 
   if (!response.MessageId) {
     throw new Error('Could not send email');

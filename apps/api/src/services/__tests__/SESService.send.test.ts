@@ -102,6 +102,24 @@ describe('sendRawEmail against an SES endpoint', () => {
     const error = await failureOf(send(service));
 
     expect(service.safeToRetrySend(error)).toBe(false);
+    expect(requests).toBe(1);
+  });
+
+  it('gives up on an answer that stops arriving, without marking it safe to retry', async () => {
+    // The whole-send timeout, shortened: SES accepted it and the body of its answer never ends
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => timeout(300));
+    respond = res => {
+      res.writeHead(200, {'Content-Type': 'text/xml', 'Content-Length': '500'});
+      res.write('<SendRawEmailResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/">');
+    };
+    const service = await sesServiceAt(local());
+
+    const error = await failureOf(send(service));
+
+    expect(service.safeToRetrySend(error)).toBe(false);
+    expect(requests).toBe(1);
+    vi.restoreAllMocks();
   });
 
   it('leaves a throttled send to the caller to retry, without retrying it itself', async () => {
@@ -158,6 +176,16 @@ describe('safeToRetrySend', () => {
       false,
     ],
     ['the host was not found', Object.assign(new Error('getaddrinfo'), {code: 'ENOTFOUND'}), true],
+    [
+      'the network was unreachable',
+      Object.assign(new Error('connect'), {code: 'ENETUNREACH', syscall: 'connect'}),
+      true,
+    ],
+    [
+      'the connection was reset after sending',
+      Object.assign(new Error('read ECONNRESET'), {name: 'TimeoutError', code: 'ECONNRESET', syscall: 'read'}),
+      false,
+    ],
     [
       'the connection was never made',
       Object.assign(

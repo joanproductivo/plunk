@@ -77,10 +77,11 @@ async function fail(
   from: EmailStatus,
   error: string,
   alert: boolean,
+  messageId?: string,
 ): Promise<boolean> {
   const changed = await prisma.email.updateMany({
     where: {id: email.id, status: from},
-    data: {status: EmailStatus.FAILED, error},
+    data: {status: EmailStatus.FAILED, error, ...(messageId && {messageId})},
   });
 
   if (changed.count === 0) {
@@ -167,12 +168,14 @@ export async function sweepStuckEmails(now = new Date()): Promise<RecoverySweepR
         continue;
       }
 
-      const error =
-        job?.data.accepted && state === 'failed'
-          ? 'Sent, but the send could not be recorded after every retry'
-          : 'Stopped while sending; may have been sent';
+      // SES accepted it but the send could not be recorded: failed with the message id SES
+      // gave it, so its bounces and complaints still find the row
+      const accepted = state === 'failed' ? job?.data.accepted : undefined;
+      const error = accepted
+        ? 'Sent, but the send could not be recorded after every retry'
+        : 'Stopped while sending; may have been sent';
 
-      if (await fail(email, EmailStatus.SENDING, error, true)) {
+      if (await fail(email, EmailStatus.SENDING, error, true, accepted?.messageId)) {
         result.failed++;
       }
     } catch (error) {

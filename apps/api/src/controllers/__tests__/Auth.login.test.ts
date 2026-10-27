@@ -1,7 +1,7 @@
 import type {NextFunction, Request, Response} from 'express';
 import {beforeEach, describe, expect, it} from 'vitest';
 
-import {LOGIN_RATE_LIMIT} from '../../app/constants';
+import {LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW} from '../../app/constants';
 import {redis} from '../../database/redis';
 import {Keys} from '../../services/keys';
 import {Auth} from '../Auth';
@@ -63,6 +63,14 @@ describe('Auth.login - attempt limit', () => {
     }
 
     expect((await login({email: unknown, password: 'wrong-password'})).error?.code).toBe(429);
+  });
+
+  it('lets the count expire after its window', async () => {
+    await login({email, password: 'wrong-password'});
+
+    const ttl = await redis.ttl(Keys.User.loginRateLimit(email.toLowerCase()));
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(LOGIN_RATE_WINDOW);
   });
 
   it('starts the count again after a successful login', async () => {
