@@ -327,7 +327,9 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
 export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('segment-membership-events', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Plunk Lite: 10 attempts over about 40 minutes, so a job stopped by the database being out
+    // (it fails then, and resumes from its progress) outlasts a restart or an outage
+    attempts: 10,
     backoff: {
       type: 'exponential',
       delay: 5000,

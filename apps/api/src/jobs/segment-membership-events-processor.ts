@@ -13,12 +13,14 @@ import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {EventService} from '../services/EventService.js';
 import {segmentMembershipEventsQueue} from '../services/QueueService.js';
+import {isInfrastructureError} from '../utils/infrastructureErrors.js';
 
 /**
  * Track the job's events, resuming after the contacts a previous run already handled.
  *
  * Progress is the number of contacts done, so a run cut short (a restart, a Redis error) picks
- * up from there. The contact in flight when it stopped gets its event again; its workflow
+ * up from there. (Plunk Lite) With the database or Redis out, the job fails at the contact it
+ * reached, instead of skipping every one left, and is retried from it. The contact in flight when it stopped gets its event again; its workflow
  * execution may be left mid-way, and only re-runs if the workflow allows re-entry and that
  * execution had already finished or was waiting.
  *
@@ -33,6 +35,7 @@ export async function processSegmentMembershipEvents(job: Job<MembershipEventsJo
     const {projectId, eventName, contactIds} = job.data;
     await EventService.trackEventsSequentially(projectId, eventName, contactIds.slice(start), undefined, {
       onTracked: async done => job.updateProgress(start + done),
+      rethrow: isInfrastructureError,
     });
     return;
   }
@@ -54,7 +57,7 @@ export async function processSegmentMembershipEvents(job: Job<MembershipEventsJo
     segmentEventName(segmentName, kind),
     contactIds.slice(start),
     {segmentId, segmentName},
-    {onTracked: async done => job.updateProgress(start + done)},
+    {onTracked: async done => job.updateProgress(start + done), rethrow: isInfrastructureError},
   );
 }
 

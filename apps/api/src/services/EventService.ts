@@ -54,18 +54,23 @@ export class EventService {
    * Track the same event for several contacts, one at a time to avoid database deadlocks.
    * A failure is logged and the remaining contacts are still processed. `onTracked` runs after
    * each contact, failed or not, with how many are done; if it throws, the loop stops.
+   * (Plunk Lite) A failure `rethrow` picks -- the database out, say -- stops the loop instead,
+   * before that contact counts as done, so a job can retry from it.
    */
   public static async trackEventsSequentially(
     projectId: string,
     eventName: string,
     contactIds: string[],
     data?: Record<string, unknown>,
-    {onTracked}: {onTracked?: (done: number) => Promise<void>} = {},
+    {onTracked, rethrow}: {onTracked?: (done: number) => Promise<void>; rethrow?: (error: unknown) => boolean} = {},
   ): Promise<void> {
     for (const [index, contactId] of contactIds.entries()) {
       try {
         await this.trackEvent(projectId, eventName, contactId, undefined, data);
       } catch (error) {
+        if (rethrow?.(error)) {
+          throw error;
+        }
         // Suppress logging in test environments to reduce noise from cleanup race conditions
         if (process.env.NODE_ENV !== 'test') {
           signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
