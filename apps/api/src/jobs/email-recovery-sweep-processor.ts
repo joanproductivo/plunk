@@ -35,6 +35,9 @@ const STUCK_AFTER_MS = 15 * 60 * 1000;
 /** Rows looked at per kind and run, oldest first */
 const BATCH_SIZE = 500;
 
+/** Rounds of retries the sweep gives an accepted email whose send could not be recorded */
+const MAX_SWEEP_RETRIES = 3;
+
 /** Job states in which the email's job will still run on its own */
 const LIVE_JOB_STATES = new Set(['waiting', 'prioritized', 'delayed', 'active', 'waiting-children']);
 
@@ -152,15 +155,24 @@ export async function sweepStuckEmails(now = new Date()): Promise<RecoverySweepR
         continue;
       }
 
-      if (job && state === 'failed' && job.data.accepted) {
+      const sweepRetries = job?.data.sweepRetries ?? 0;
+
+      if (job && state === 'failed' && job.data.accepted && sweepRetries < MAX_SWEEP_RETRIES) {
         // SES accepted it and recording the send failed on every attempt: a retry records it
-        // from the job data, without sending it again
-        await job.retry('failed');
+        // from the job data, without sending it again. BullMQ keeps the attempts already made,
+        // so they are reset for the retry to get its own round, and the rounds are counted.
+        await job.updateData({...job.data, sweepRetries: sweepRetries + 1});
+        await job.retry('failed', {resetAttemptsMade: true});
         result.retried++;
         continue;
       }
 
-      if (await fail(email, EmailStatus.SENDING, 'Stopped while sending; may have been sent', true)) {
+      const error =
+        job?.data.accepted && state === 'failed'
+          ? 'Sent, but the send could not be recorded after every retry'
+          : 'Stopped while sending; may have been sent';
+
+      if (await fail(email, EmailStatus.SENDING, error, true)) {
         result.failed++;
       }
     } catch (error) {
