@@ -115,6 +115,9 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     name: {en: label => label, es: () => 'Configuration sets de SES'},
     path: () => SECURITY_PATH,
   },
+  // The SES account itself: its daily quota, a pause of its sending (`ses:<what>`). The emails it
+  // holds back wait in the activity.
+  'ses': {name: {en: () => 'Amazon SES', es: () => 'Amazon SES'}, path: () => '/activity'},
   // A CloudWatch alarm of the AWS account, by its name
   'aws:alarm': {
     name: {en: label => `AWS alarm "${label}"`, es: label => `Alarma de AWS «${label}»`},

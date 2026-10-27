@@ -17,11 +17,13 @@ describe('isFailureNotice', () => {
     'security:check',
     'sns:events',
     'sns:config',
+    'ses:paused',
+    'ses:daily-quota',
   ])('reads %s as a condition that needs attention', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });
 
-  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx'])('reads %s as a failure', sourceKey => {
+  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx', 'sesx'])('reads %s as a failure', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(false);
   });
 });

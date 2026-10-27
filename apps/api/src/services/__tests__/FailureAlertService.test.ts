@@ -426,6 +426,8 @@ describe('FailureAlertService', () => {
       ],
       ['sns:events', 'SES events not arriving', 'Los eventos de SES no llegan', '/settings?tab=security'],
       ['sns:config', 'SES configuration sets', 'Configuration sets de SES', '/settings?tab=security'],
+      ['ses:paused', 'SES', 'Amazon SES', '/activity'],
+      ['ses:daily-quota', 'SES', 'Amazon SES', '/activity'],
     ])('names %s and links to where it is reviewed, as needing attention', async (sourceKey, label, name, path) => {
       await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
       await FailureAlertService.record(projectId, {sourceKey, label, error: 'Details'});
