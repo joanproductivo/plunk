@@ -738,21 +738,22 @@ export class Webhooks {
         await prisma.email.update({where: {id: email.id}, data: {...updateData, status}});
       }
 
+      // The reputation check after a bounce or complaint that counts, for a copy as well: the
+      // first one may have stopped right after recording it, before the check was queued. The
+      // check reads the rates as they are, so running it again counts nothing twice, and a
+      // project reactivated from the dashboard only counts what it sent since. It is queued, once
+      // for a burst, and never throws here.
+      if (suppression?.enforces && !isSimulated) {
+        // Only one metric moved, so only that metric's thresholds may disable the project.
+        // One notification is one event type, so it can never be both.
+        await ReputationCheck.afterEvent(email, eventType === 'Complaint' ? 'complaint' : 'bounce');
+      }
+
       // A copy of a bounce or complaint that is already recorded: the suppression stands, and
       // nothing that follows may run a second time
       if (!isNew) {
         signale.info(`[WEBHOOK] ${eventType} for email ${email.id} already recorded, ignoring the copy`);
         return res.status(200).json({success: true});
-      }
-
-      // Check security limits only for a suppression the project has not been charged for
-      // yet. Re-running enforcement on a copy could only re-disable a project over history it
-      // has already been judged against -- which is what happened to projects that were
-      // manually re-enabled. The check is queued, once for a burst, and never throws here.
-      if (suppression?.enforces && !isSimulated) {
-        // Only one metric moved, so only that metric's thresholds may disable the project.
-        // One notification is one event type, so it can never be both.
-        await ReputationCheck.afterEvent(email, eventType === 'Complaint' ? 'complaint' : 'bounce');
       }
 
       // Operator notification for a new suppression, naming the address it is about, sent

@@ -508,17 +508,17 @@ describe('Webhooks - SES event notifications', () => {
   /**
    * SNS delivers at least once, so the same bounce or complaint notification arrives again
    * hours or days later. Reputation enforcement reads the rates by counting `bouncedAt` and
-   * `complainedAt` rows, so a second copy of an old event leaves every number unchanged --
-   * running the check on it could only re-disable a project over history it had already been
-   * judged against. That is what re-disabled a manually re-enabled project whose complaint
-   * count had not moved.
+   * `complainedAt` rows, so a second copy of an old event leaves every number unchanged: the
+   * copy records nothing and alerts no one. It does have the rates checked again (Plunk Lite),
+   * in case the first copy stopped before queueing the check; a project reactivated from the
+   * dashboard only counts what it sent since.
    */
   describe('duplicate SNS deliveries', () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });
 
-    it('does not re-enforce or re-alert on a redelivered complaint', async () => {
+    it('does not re-alert on a redelivered complaint, and checks the rates again', async () => {
       const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailComplaint').mockResolvedValue(undefined);
       const email = await sentEmail('ses-dup-complaint');
@@ -529,14 +529,16 @@ describe('Webhooks - SES event notifications', () => {
       await post(notification('Complaint', 'ses-dup-complaint'));
       const second = await prisma.email.findUnique({where: {id: email.id}});
 
-      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(enforce).toHaveBeenCalledTimes(2);
+      expect(enforce).toHaveBeenNthCalledWith(2, expect.objectContaining({projectId}), 'complaint');
       expect(notify).toHaveBeenCalledTimes(1);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.complaint'}})).toBe(1);
       // The complaint happened once; the timestamp must not walk forward into a window it
       // does not belong to, or the 24-hour and 7-day rates count it again later.
       expect(second?.complainedAt).toEqual(first?.complainedAt);
     });
 
-    it('does not re-enforce or re-alert on a redelivered permanent bounce', async () => {
+    it('does not re-alert on a redelivered permanent bounce, and checks the rates again', async () => {
       const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailBounce').mockResolvedValue(undefined);
       const email = await sentEmail('ses-dup-bounce');
@@ -548,7 +550,7 @@ describe('Webhooks - SES event notifications', () => {
       await post(notification('Bounce', 'ses-dup-bounce', bounce));
       const second = await prisma.email.findUnique({where: {id: email.id}});
 
-      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(enforce).toHaveBeenCalledTimes(2);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(second?.bouncedAt).toEqual(first?.bouncedAt);
     });
@@ -746,7 +748,8 @@ describe('Webhooks - SES event notifications', () => {
       const responses = await Promise.all([post(bounce), post(bounce), post(bounce)]);
 
       expect(responses.map(response => response.status)).toEqual([200, 200, 200]);
-      expect(enforce).toHaveBeenCalledTimes(1);
+      // Each copy has the rates checked, which counts nothing twice; the event is tracked once
+      expect(enforce).toHaveBeenCalledTimes(3);
       expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
     });
   });

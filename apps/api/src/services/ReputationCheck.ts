@@ -23,11 +23,26 @@ const PENDING_KEY = (projectId: string) => `plunk-lite:security:pending:${projec
 // A check runs within seconds; this only bounds a set no check ever takes
 const PENDING_SECONDS = 86400;
 const METRICS: SecurityMetric[] = ['bounce', 'complaint'];
+/**
+ * How long queueing the check may take. BullMQ waits for Redis for as long as it is down, and the
+ * webhook that queues it must still answer SNS.
+ */
+const QUEUE_TIMEOUT_MS = 3000;
+
+/** Rejects once `ms` have passed without `promise` settling */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 export class ReputationCheck {
   /**
    * Has the project's reputation checked after a new bounce or complaint of one of its emails. When
-   * the check cannot be queued it runs here and now. Never throws: the event is already recorded.
+   * the check cannot be queued, within a few seconds, it runs here and now; if that fails too, the
+   * project is told its reputation is not being watched. Never throws: the event is already recorded.
    */
   public static async afterEvent(
     email: {projectId: string; campaignId: string | null; workflowExecutionId: string | null},
@@ -41,7 +56,8 @@ export class ReputationCheck {
     await this.notePending(email.projectId, [`trigger:${trigger}`, ...(source ? [source] : [])]);
 
     try {
-      await QueueService.queueSecurityCheck(data);
+      // A job that is queued after all once Redis is back only checks the project again
+      await withTimeout(QueueService.queueSecurityCheck(data), QUEUE_TIMEOUT_MS);
     } catch (queueError) {
       signale.warn(
         `[SECURITY] Could not queue the reputation check of project ${email.projectId}, running it now:`,
@@ -51,6 +67,7 @@ export class ReputationCheck {
         await this.run(data);
       } catch (checkError) {
         signale.error(`[SECURITY] Reputation check of project ${email.projectId} failed:`, checkError);
+        await this.exhausted(data, checkError);
       }
     }
   }
@@ -89,7 +106,10 @@ export class ReputationCheck {
     }
   }
 
-  /** A check that ran out of attempts: the project's reputation is not being watched */
+  /**
+   * A check that ran out of attempts, or that could neither be queued nor run: the project's
+   * reputation is not being watched. Never throws.
+   */
   public static async exhausted(data: SecurityCheckJobData, error: unknown): Promise<void> {
     await FailureAlertService.record(data.projectId, {
       sourceKey: 'security:check',

@@ -144,6 +144,22 @@ describe('ReputationCheck', () => {
     await expect(ReputationCheck.afterEvent(transactional(), 'bounce')).resolves.toBeUndefined();
 
     expect(enforce).toHaveBeenCalledWith(projectId, ['bounce']);
+    // Nothing is watching the project's rates: it is told so
+    const failure = await prisma.plunkLiteFailure.findFirstOrThrow({where: {projectId}});
+    expect(failure).toMatchObject({sourceKey: 'security:check', label: 'Sending reputation check'});
+    expect(failure.lastError).toContain('database down');
+  });
+
+  it('runs the check at once when queueing it hangs, as BullMQ does while Redis is down', async () => {
+    vi.spyOn(QueueService, 'queueSecurityCheck').mockReturnValue(new Promise<never>(() => undefined));
+    const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+
+    const started = Date.now();
+    await ReputationCheck.afterEvent(transactional(), 'complaint');
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(enforce).toHaveBeenCalledWith(projectId, ['complaint']);
+    expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(0);
   });
 
   it('tells the project once a check has run out of attempts, and not before', async () => {
