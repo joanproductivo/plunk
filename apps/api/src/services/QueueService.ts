@@ -722,15 +722,33 @@ export class QueueService {
    * the check runs queues another after it, so none is judged on rates read before it. Retried
    * while the database cannot answer, since a check that cannot read the rates has not found the
    * project healthy.
+   *
+   * The deduplication key only goes when its job ends. If it outlives the job (removed by hand, or
+   * evicted: Redis must keep `noeviction`), every check would be deduplicated into a job that never
+   * runs, so a key whose job is gone or finished is removed and the check queued again, once. If a
+   * check queued meanwhile does the same, two run, which judges the project twice and changes nothing.
    */
-  public static async queueSecurityCheck(data: SecurityCheckJobData): Promise<void> {
-    await plunkLiteChecksQueue.add('security-check', data, {
-      // BullMQ ignores a ttl with keepLastIfActive; a job id would stop the one queued behind a run
-      deduplication: {id: `security-check-${data.projectId}`, keepLastIfActive: true},
-      delay: SECURITY_CHECK_DELAY_MS,
-      attempts: 5,
-      backoff: {type: 'exponential', delay: 5000},
-    });
+  public static async queueSecurityCheck(data: SecurityCheckJobData): Promise<Job> {
+    const deduplicationId = `security-check-${data.projectId}`;
+    const add = () =>
+      plunkLiteChecksQueue.add('security-check', data, {
+        // BullMQ ignores a ttl with keepLastIfActive; a job id would stop the one queued behind a run
+        deduplication: {id: deduplicationId, keepLastIfActive: true},
+        delay: SECURITY_CHECK_DELAY_MS,
+        attempts: 5,
+        backoff: {type: 'exponential', delay: 5000},
+      });
+
+    const job = await add();
+    const state = await job.getState();
+    if (state !== 'completed' && state !== 'failed' && state !== 'unknown') {
+      return job;
+    }
+    signale.warn(
+      `[QUEUE] The reputation check of project ${data.projectId} was held by job ${job.id}, ${state}: queueing it again`,
+    );
+    await plunkLiteChecksQueue.removeDeduplicationKey(deduplicationId);
+    return add();
   }
 
   /**

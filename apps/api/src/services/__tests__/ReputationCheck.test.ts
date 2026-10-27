@@ -57,6 +57,23 @@ describe('ReputationCheck', () => {
     expect(enforce).toHaveBeenCalledWith(projectId, ['bounce', 'complaint']);
   });
 
+  it('queues the check again when the job its deduplication points to is gone', async () => {
+    const first = await QueueService.queueSecurityCheck({projectId, trigger: 'bounce'});
+    expect((await QueueService.queueSecurityCheck({projectId, trigger: 'bounce'})).id).toBe(first.id);
+    // Removed by hand, leaving its deduplication key behind
+    const client = await plunkLiteChecksQueue.client;
+    await client.del(plunkLiteChecksQueue.toKey(first.id!));
+    await client.zrem(plunkLiteChecksQueue.toKey('delayed'), first.id!);
+
+    const again = await QueueService.queueSecurityCheck({projectId, trigger: 'complaint'});
+
+    expect(again.id).not.toBe(first.id);
+    const delayed = await plunkLiteChecksQueue.getDelayed();
+    expect(delayed.map(job => job.data)).toEqual([{projectId, trigger: 'complaint'}]);
+    // And deduplicates the ones after it as before
+    expect((await QueueService.queueSecurityCheck({projectId, trigger: 'bounce'})).id).toBe(again.id);
+  });
+
   it('judges the campaigns and workflows of the burst, then the project', async () => {
     const campaign = await factories.createCampaign({projectId});
     const workflow = await factories.createWorkflow({projectId});
