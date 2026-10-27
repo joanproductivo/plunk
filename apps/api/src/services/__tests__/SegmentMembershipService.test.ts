@@ -336,5 +336,41 @@ describe('SegmentMembershipService', () => {
       await SegmentService.computeMembership(projectId, segment.id);
       expect(await eventContactIds('segment.active-readers.exit')).toEqual([contact.id]);
     });
+
+    it('enters each contact once when two computations run at once (Plunk Lite)', async () => {
+      const contacts = await Promise.all([1, 2, 3].map(() => factories.createContact({projectId, subscribed: true})));
+      const segment = await factories.createSegment(projectId, {
+        name: 'Readers',
+        filters: [{field: 'subscribed', operator: 'equals', value: true}],
+        trackMembership: true,
+      });
+
+      const [first, second] = await Promise.all([
+        SegmentService.computeMembership(projectId, segment.id),
+        SegmentService.computeMembership(projectId, segment.id),
+      ]);
+
+      expect(first.added + second.added).toBe(3);
+      expect(await eventContactIds('segment.readers.entry')).toEqual(contacts.map(c => c.id).sort());
+      expect(await memberCountOf(segment.id)).toBe(3);
+    });
+
+    it('queues the events instead of firing them when a request computes (Plunk Lite)', async () => {
+      const queued = vi.spyOn(QueueService, 'queueSegmentMembershipEvents').mockResolvedValue({id: 'job'} as never);
+      const contact = await factories.createContact({projectId, subscribed: true});
+      const segment = await factories.createSegment(projectId, {
+        name: 'Queued',
+        filters: [{field: 'subscribed', operator: 'equals', value: true}],
+        trackMembership: true,
+      });
+
+      await SegmentService.computeMembership(projectId, segment.id, {events: 'background'});
+
+      expect(queued).toHaveBeenCalledWith(expect.objectContaining({kind: 'entry', contactIds: [contact.id]}));
+      expect(await eventContactIds('segment.queued.entry')).toEqual([]);
+      // A second computation with nothing changed queues nothing
+      await SegmentService.computeMembership(projectId, segment.id, {events: 'background'});
+      expect(queued).toHaveBeenCalledTimes(1);
+    });
   });
 });

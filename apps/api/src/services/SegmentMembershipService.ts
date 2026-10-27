@@ -157,6 +157,61 @@ export class SegmentMembershipService {
   /**
    * The given contact IDs that belong to the project, deduplicated, in their original order
    */
+  /**
+   * Plunk Lite: write the membership changes computeMembership found for a dynamic segment, and
+   * fire their events. Each write claims its rows (an insert that skips existing ones, updates
+   * guarded on `exitedAt`), so two computations at once -- the job and a request -- enter or leave
+   * each contact once, without a lock or a transaction holding a connection.
+   */
+  public static async applyComputedMembership(
+    projectId: string,
+    segment: Segment,
+    toAdd: string[],
+    toRemove: string[],
+    {mode}: {mode: Exclude<MembershipMode, 'silent'>},
+  ): Promise<{added: number; removed: number}> {
+    const BATCH_SIZE = 500;
+    let added = 0;
+    let removed = 0;
+
+    for (let i = 0; i < toAdd.length; i += BATCH_SIZE) {
+      const batch = toAdd.slice(i, i + BATCH_SIZE);
+      const now = new Date();
+      const created = await prisma.segmentMembership.createManyAndReturn({
+        data: batch.map(contactId => ({segmentId: segment.id, contactId, enteredAt: now})),
+        skipDuplicates: true,
+        select: {contactId: true},
+      });
+      const returning = await prisma.segmentMembership.updateManyAndReturn({
+        where: {segmentId: segment.id, contactId: {in: batch}, exitedAt: {not: null}},
+        data: {exitedAt: null, enteredAt: now},
+        select: {contactId: true},
+      });
+      const entered = [...created, ...returning].map(m => m.contactId);
+      added += entered.length;
+      await this.trackMembershipEvents(projectId, segment, entered, 'entry', mode);
+    }
+
+    for (let i = 0; i < toRemove.length; i += BATCH_SIZE) {
+      const batch = toRemove.slice(i, i + BATCH_SIZE);
+      const left = await prisma.segmentMembership.updateManyAndReturn({
+        where: {segmentId: segment.id, contactId: {in: batch}, exitedAt: null},
+        data: {exitedAt: new Date()},
+        select: {contactId: true},
+      });
+      removed += left.length;
+      await this.trackMembershipEvents(
+        projectId,
+        segment,
+        left.map(m => m.contactId),
+        'exit',
+        mode,
+      );
+    }
+
+    return {added, removed};
+  }
+
   private static async projectContactIds(projectId: string, contactIds: string[]): Promise<string[]> {
     const unique = [...new Set(contactIds)];
     if (unique.length === 0) {

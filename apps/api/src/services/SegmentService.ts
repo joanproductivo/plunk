@@ -1,5 +1,4 @@
 import {type CampaignStatus, type Contact, Prisma, type Segment} from '@plunk/db';
-import {segmentEventName} from '@plunk/shared';
 import type {FilterCondition, FilterGroup, PaginatedResponse, SegmentFilter, SegmentType} from '@plunk/types';
 import {fromPrismaJson, toPrismaJson} from '@plunk/types';
 import signale from 'signale';
@@ -10,7 +9,6 @@ import {HttpException} from '../exceptions/index.js';
 import {LONG_TRANSACTION} from '../utils/database.js';
 
 import {ContactService} from './ContactService.js';
-import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
 import {SegmentMembershipService} from './SegmentMembershipService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -652,6 +650,8 @@ export class SegmentService {
   public static async computeMembership(
     projectId: string,
     segmentId: string,
+    // Plunk Lite: a request queues the entry/exit events instead of running their workflows inline
+    {events = 'await'}: {events?: 'await' | 'background'} = {},
   ): Promise<{added: number; removed: number; total: number}> {
     const segment = await this.get(projectId, segmentId);
 
@@ -727,92 +727,26 @@ export class SegmentService {
     const toAdd = Array.from(matchingContactIds).filter(id => !currentMemberIds.has(id));
     const toRemove = Array.from(currentMemberIds).filter(id => !matchingContactIds.has(id));
 
-    // Process additions in batches
-    const ADD_BATCH_SIZE = 500;
-    for (let i = 0; i < toAdd.length; i += ADD_BATCH_SIZE) {
-      const batch = toAdd.slice(i, i + ADD_BATCH_SIZE);
-
-      // Check which contacts already have a membership record (inactive)
-      const existingMemberships = await prisma.segmentMembership.findMany({
-        where: {
-          segmentId,
-          contactId: {in: batch},
-        },
-        select: {contactId: true},
-      });
-
-      const existingContactIds = new Set(existingMemberships.map(m => m.contactId));
-      const newEntries = batch.filter(id => !existingContactIds.has(id));
-      const reEntries = batch.filter(id => existingContactIds.has(id));
-
-      if (newEntries.length > 0) {
-        await prisma.segmentMembership.createMany({
-          data: newEntries.map(contactId => ({
-            segmentId,
-            contactId,
-            enteredAt: new Date(),
-          })),
-          skipDuplicates: true,
-        });
-      }
-
-      if (reEntries.length > 0) {
-        await prisma.segmentMembership.updateMany({
-          where: {
-            segmentId,
-            contactId: {in: reEntries},
-          },
-          data: {
-            exitedAt: null,
-            enteredAt: new Date(),
-          },
-        });
-      }
-
-      // Create segment-specific entry events for each contact in the batch
-      await EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, 'entry'), batch, {
-        segmentId: segment.id,
-        segmentName: segment.name,
-      });
-    }
-
-    const REMOVE_BATCH_SIZE = 500;
-    for (let i = 0; i < toRemove.length; i += REMOVE_BATCH_SIZE) {
-      const batch = toRemove.slice(i, i + REMOVE_BATCH_SIZE);
-
-      await prisma.segmentMembership.updateMany({
-        where: {
-          segmentId,
-          contactId: {in: batch},
-          exitedAt: null,
-        },
-        data: {
-          exitedAt: new Date(),
-        },
-      });
-
-      // Create segment-specific exit events for each contact in the batch
-      await EventService.trackEventsSequentially(projectId, segmentEventName(segment.name, 'exit'), batch, {
-        segmentId: segment.id,
-        segmentName: segment.name,
-      });
-    }
-
-    // Update member count on segment
-    await prisma.segment.update({
-      where: {id: segmentId},
-      data: {memberCount: matchingContactIds.size},
-    });
-
-    signale.info(
-      `[SEGMENT] Computed membership for segment ${segmentId}: added ${toAdd.length}, removed ${toRemove.length}, total ${matchingContactIds.size}`,
+    // Plunk Lite: written by claiming each row, so two computations at once (the job and a request)
+    // enter or leave each contact once and fire its event once
+    const {added, removed} = await SegmentMembershipService.applyComputedMembership(
+      projectId,
+      segment,
+      toAdd,
+      toRemove,
+      {mode: events},
     );
 
-    return {
-      added: toAdd.length,
-      removed: toRemove.length,
-      total: matchingContactIds.size,
-    };
+    // Update member count on segment, from what is written
+    const total = await prisma.segmentMembership.count({where: {segmentId, exitedAt: null}});
+    await prisma.segment.update({
+      where: {id: segmentId},
+      data: {memberCount: total},
+    });
+
+    signale.info(`[SEGMENT] Computed membership for segment ${segmentId}: added ${added}, removed ${removed}, total ${total}`);
+
+    return {added, removed, total};
   }
 
   /**
