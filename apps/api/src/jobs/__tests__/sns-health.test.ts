@@ -94,4 +94,20 @@ describe('the SES events check', () => {
     const closed = (await notice())!;
     expect(closed.reviewedAt).toEqual(closed.lastAt);
   });
+
+  it.each([
+    ['fewer than 20 emails', 5],
+    ['no email at all', 0],
+  ])('closes the notice once the project has %s in the window', async (_case, count) => {
+    await sent(30, EmailStatus.SENT, hoursAgo(2));
+    await checkEventPipeline();
+    expect(await notice()).not.toBeNull();
+
+    await prisma.email.deleteMany({where: {projectId}});
+    await sent(count, EmailStatus.SENT, hoursAgo(2));
+    await checkEventPipeline();
+
+    const closed = (await notice())!;
+    expect(closed.reviewedAt).toEqual(closed.lastAt);
+  });
 });

@@ -449,7 +449,8 @@ const PIPELINE_GRACE_HOURS = 1;
  * Whether SES events are reaching the webhook, for each project: of the emails SES accepted between
  * one and six hours ago, half or more still SENT -- no delivery, bounce or complaint recorded, which
  * both configuration sets publish -- means they are not. The project is told, with what the webhook
- * rejected meanwhile; once its emails get their events again, the notice is closed.
+ * rejected meanwhile; once its emails get their events again, or it has sent too few to say, the
+ * notice is closed.
  */
 export async function checkEventPipeline(): Promise<void> {
   const now = Date.now();
@@ -467,14 +468,12 @@ export async function checkEventPipeline(): Promise<void> {
     GROUP BY "projectId"`;
 
   let rejections: string | undefined;
+  const stuckProjects = new Set<string>();
   for (const {projectId, total, stuck} of rows) {
-    if (total < PIPELINE_MIN_EMAILS) {
+    if (total < PIPELINE_MIN_EMAILS || stuck / total < PIPELINE_STUCK_SHARE) {
       continue;
     }
-    if (stuck / total < PIPELINE_STUCK_SHARE) {
-      await FailureAlertService.resolve('sns:events', projectId);
-      continue;
-    }
+    stuckProjects.add(projectId);
     rejections ??= await recentRejections(PIPELINE_WINDOW_HOURS);
     signale.error(`[WEBHOOK] ${stuck} of ${total} recent emails of project ${projectId} have no SES event`);
     await FailureAlertService.record(projectId, {
@@ -482,6 +481,15 @@ export async function checkEventPipeline(): Promise<void> {
       label: 'SES events not arriving',
       error: `${stuck} of the ${total} emails SES accepted between ${PIPELINE_GRACE_HOURS} and ${PIPELINE_WINDOW_HOURS} hours ago have had no delivery, bounce or complaint reported: SES events are not reaching Plunk, so bounces are not being suppressed.${rejections}`,
     });
+  }
+
+  // Every other notice is closed: its project's emails get their events again, or it sent too few
+  // in the window (none at all, perhaps) to say they do not
+  const notices = await prisma.plunkLiteFailure.findMany({where: {sourceKey: 'sns:events'}, select: {projectId: true}});
+  for (const {projectId} of notices) {
+    if (!stuckProjects.has(projectId)) {
+      await FailureAlertService.resolve('sns:events', projectId);
+    }
   }
 }
 
