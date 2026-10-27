@@ -115,7 +115,7 @@ function answeredBySes(error: unknown): boolean {
  * Finalize a campaign whose email has just reached a terminal state, without letting a failure
  * here fail the job that got it there
  */
-async function finalizeCampaignSafely(campaignId: string | null): Promise<void> {
+export async function finalizeCampaignSafely(campaignId: string | null): Promise<void> {
   if (!campaignId) {
     return;
   }
