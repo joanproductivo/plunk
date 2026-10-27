@@ -1,44 +1,88 @@
 import {Controller, Get, Middleware, Post} from '@overnightjs/core';
-import type {NextFunction, Request, Response} from 'express';
+import {MAX_UPLOAD_BYTES} from '@plunk/shared';
+import type {UploadedFilesResponse, UploadedImagesResponse} from '@plunk/types';
+import type {NextFunction, Request, RequestHandler, Response} from 'express';
 import multer from 'multer';
 import signale from 'signale';
-import {ErrorCode, HttpException} from '../exceptions/index.js';
+import {BadRequest, ErrorCode, HttpException} from '../exceptions/index.js';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import * as S3Service from '../services/S3Service.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
-const MAGIC_BYTES: Record<string, Buffer[]> = {
-  'image/jpeg': [Buffer.from([0xff, 0xd8, 0xff])],
-  'image/jpg': [Buffer.from([0xff, 0xd8, 0xff])],
-  'image/png': [Buffer.from([0x89, 0x50, 0x4e, 0x47])],
-  'image/gif': [Buffer.from('GIF87a'), Buffer.from('GIF89a')],
-  'image/webp': [Buffer.from('RIFF')],
+// Uploads are held in memory. multer 2.4 reads `defParamCharset`, which @types/multer 2.0 does not
+// declare yet. Browsers send file names as UTF-8; the default would read "café.png" as "cafÃ©.png".
+// A refused file is a 400: an HttpException passed to the callback reaches the error handler as is.
+const receive = (field: string, accepts: (file: Express.Multer.File) => boolean, refusal: string): RequestHandler => {
+  const options: multer.Options & {defParamCharset: string} = {
+    storage: multer.memoryStorage(),
+    defParamCharset: 'utf8',
+    limits: {fileSize: MAX_UPLOAD_BYTES},
+    fileFilter: (_req, file, cb) => (accepts(file) ? cb(null, true) : cb(new BadRequest(refusal))),
+  };
+  const upload = multer(options).single(field);
+
+  // multer's own refusals (a file too large) are a 400 as well, not the error handler's 500
+  return (req, res, next) =>
+    upload(req, res, (error?: unknown) => {
+      if (error instanceof multer.MulterError) {
+        return next(
+          new BadRequest(
+            error.code === 'LIMIT_FILE_SIZE'
+              ? `The file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`
+              : error.message,
+          ),
+        );
+      }
+      next(error);
+    });
 };
 
-function validateMagicBytes(buffer: Buffer, mimetype: string): boolean {
-  const signatures = MAGIC_BYTES[mimetype];
-  if (!signatures) return false;
-  return signatures.some(sig => buffer.subarray(0, sig.length).equals(sig));
+const receiveImage = receive(
+  'image',
+  file => S3Service.isImageType(file.mimetype),
+  'Only image files are allowed (JPEG, PNG, GIF, WebP)',
+);
+// Exported so tests can run it on an app of their own
+export const receiveFile = receive(
+  'file',
+  file => S3Service.linkedFileType(file.originalname, file.mimetype) !== null,
+  'Only PDF, Word, Excel and PowerPoint files are allowed (.pdf, .docx, .xlsx, .pptx)',
+);
+
+/** Listing is a billed storage request, and files are hosted under the project's domain: dashboard only. */
+function requireDashboard(auth: {type: string}, action: string) {
+  if (auth.type !== 'jwt') {
+    throw new HttpException(403, `${action} only from the dashboard`, ErrorCode.FORBIDDEN);
+  }
 }
 
-// Configure multer for file uploads (memory storage). multer 2.4 reads `defParamCharset`, which
-// @types/multer 2.0 does not declare yet.
-const uploadOptions: multer.Options & {defParamCharset: string} = {
-  storage: multer.memoryStorage(),
-  // Browsers send file names as UTF-8; the default would read "café.png" as "cafÃ©.png"
-  defParamCharset: 'utf8',
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max file size
-  },
-  fileFilter: (_req, file, cb) => {
-    if (S3Service.isImageType(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP)'));
+function requireStorage() {
+  if (!S3Service.isS3Enabled()) {
+    throw new HttpException(503, 'File storage is not configured');
+  }
+}
+
+// The storage error names the endpoint, which carries the account id: it stays in the log
+function storageFailure(action: string, error: unknown): HttpException {
+  signale.error(`[UPLOADS] Failed to ${action}:`, error);
+  return new HttpException(502, `Couldn't ${action} in storage`, ErrorCode.EXTERNAL_SERVICE_ERROR);
+}
+
+// Checked before the body is read, so a refused upload is never held in memory
+const checkBeforeReading =
+  (check: (res: Response) => void): RequestHandler =>
+  (_req, res, next) => {
+    try {
+      check(res);
+      next();
+    } catch (error) {
+      next(error);
     }
-  },
-};
-const upload = multer(uploadOptions);
+  };
+
+const storageReady = checkBeforeReading(() => requireStorage());
+// Exported so tests can run it on an app of their own
+export const dashboardOnly = checkBeforeReading(res => requireDashboard(res.locals.auth, 'Files can be uploaded'));
 
 @Controller('uploads')
 export class Uploads {
@@ -52,71 +96,115 @@ export class Uploads {
   @CatchAsync
   public async listImages(_req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
-    if (auth.type !== 'jwt') {
-      throw new HttpException(403, 'Images can only be listed from the dashboard', ErrorCode.FORBIDDEN);
-    }
-    if (!S3Service.isS3Enabled()) {
-      throw new HttpException(503, 'Image storage is not configured');
-    }
+    requireDashboard(auth, 'Images can be listed');
+    requireStorage();
 
     try {
-      return res.status(200).json(await S3Service.listImages(auth.projectId!));
+      const {uploads, truncated} = await S3Service.listUploads('image', auth.projectId!);
+      const body: UploadedImagesResponse = {images: uploads, truncated};
+      return res.status(200).json(body);
     } catch (error) {
-      // The storage error names the endpoint, which carries the account id: it stays in the log
-      signale.error('[UPLOADS] Failed to list images:', error);
-      throw new HttpException(502, "Couldn't list your images in storage", ErrorCode.EXTERNAL_SERVICE_ERROR);
+      throw storageFailure('list your images', error);
+    }
+  }
+
+  /**
+   * GET /uploads/files
+   * The project's uploaded files, latest first, for the file dialog's gallery. Dashboard only.
+   */
+  @Get('files')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async listFiles(_req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    requireDashboard(auth, 'Files can be listed');
+    requireStorage();
+
+    try {
+      const {uploads, truncated} = await S3Service.listUploads('file', auth.projectId!);
+      const body: UploadedFilesResponse = {files: uploads, truncated};
+      return res.status(200).json(body);
+    } catch (error) {
+      throw storageFailure('list your files', error);
     }
   }
 
   /**
    * POST /uploads/image
-   * Upload an image file to S3/Minio
+   * Upload an image to the project's storage
    */
   @Post('image')
-  @Middleware([requireAuth, requireEmailVerified, upload.single('image')])
+  @Middleware([requireAuth, requireEmailVerified, storageReady, receiveImage])
   @CatchAsync
   public async uploadImage(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
 
+    if (!req.file) {
+      throw new BadRequest('No image file provided');
+    }
+    if (!S3Service.hasContentsOf(req.file.buffer, req.file.mimetype)) {
+      throw new BadRequest('File contents do not match the declared image type');
+    }
+
+    let stored: {url: string; key: string};
     try {
-      if (!S3Service.isS3Enabled()) {
-        return res.status(503).json({
-          error: 'File uploads are not enabled. Please configure S3 storage.',
-        });
-      }
-
-      if (!req.file) {
-        return res.status(400).json({
-          error: 'No image file provided',
-        });
-      }
-
-      if (!validateMagicBytes(req.file.buffer, req.file.mimetype)) {
-        return res.status(400).json({
-          error: 'File contents do not match the declared image type',
-        });
-      }
-
-      // Upload file to S3/Minio
-      const result = await S3Service.uploadFile({
+      stored = await S3Service.uploadFile({
         file: req.file.buffer,
         filename: req.file.originalname,
         contentType: req.file.mimetype,
         projectId: auth.projectId!,
       });
+    } catch (error) {
+      throw storageFailure('store the image', error);
+    }
 
-      return res.status(200).json({
-        url: result.url,
-        key: result.key,
+    return res.status(200).json({
+      url: stored.url,
+      key: stored.key,
+      filename: req.file.originalname,
+      contentType: req.file.mimetype,
+      size: req.file.size,
+    });
+  }
+
+  /**
+   * POST /uploads/file
+   * Upload a document (PDF, Word, Excel, PowerPoint) to link to from an email. Dashboard only: the
+   * file is served from the project's storage domain to whoever has the link.
+   */
+  @Post('file')
+  @Middleware([requireAuth, requireEmailVerified, dashboardOnly, storageReady, receiveFile])
+  @CatchAsync
+  public async uploadLinkedFile(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    if (!req.file) {
+      throw new BadRequest('No file provided');
+    }
+    // Stored with the type its name says rather than the browser's, which is often none for Office files
+    const contentType = S3Service.linkedFileType(req.file.originalname, req.file.mimetype);
+    if (!contentType || !S3Service.hasContentsOf(req.file.buffer, contentType)) {
+      throw new BadRequest('File contents do not match its type (macro-enabled Office files are not allowed)');
+    }
+
+    let stored: {url: string; key: string};
+    try {
+      stored = await S3Service.uploadFile({
+        file: req.file.buffer,
         filename: req.file.originalname,
-        contentType: req.file.mimetype,
-        size: req.file.size,
+        contentType,
+        projectId: auth.projectId!,
       });
     } catch (error) {
-      signale.error('[UPLOADS] Failed to upload image:', error);
-      return res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to upload image',
-      });
+      throw storageFailure('store the file', error);
     }
+
+    return res.status(200).json({
+      url: stored.url,
+      key: stored.key,
+      filename: req.file.originalname,
+      contentType,
+      size: req.file.size,
+    });
   }
 }

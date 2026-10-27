@@ -1,4 +1,4 @@
-import type {UploadedImage, UploadedImagesResponse} from '@plunk/types';
+import type {UploadedImagesResponse, UploadedObject} from '@plunk/types';
 import {Button} from '@plunk/ui';
 import {useState} from 'react';
 import useSWRImmutable from 'swr/immutable';
@@ -9,7 +9,7 @@ export const UPLOADED_IMAGES_KEY = '/uploads/images';
 // Thumbnails are the full images, so they are shown a few at a time
 const BATCH = 24;
 
-function describe(image: UploadedImage): string {
+function describe(image: UploadedObject): string {
   if (image.name) return image.name;
   return image.uploadedAt ? `Uploaded ${new Date(image.uploadedAt).toLocaleDateString()}` : 'Uploaded image';
 }
