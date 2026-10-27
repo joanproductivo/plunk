@@ -4,7 +4,9 @@ import {createMockJob, factories, getPrismaClient} from '../../../../../test/hel
 import {ContactService} from '../../services/ContactService.js';
 import {SegmentService} from '../../services/SegmentService.js';
 import {coerceCustomValue, importCustomData, importFieldKey, parseImportCsv, splitImportRecord} from '../import-csv.js';
-import {processContactImport} from '../import-processor.js';
+import {dropFinishedCsv, processContactImport} from '../import-processor.js';
+import {importQueue, QueueService} from '../../services/QueueService.js';
+import {CONTACT_FIELDS_MAX} from '../../services/ContactService.js';
 
 /**
  * Tests for Contact Import Processor - Subscription Status Preservation
@@ -716,5 +718,63 @@ describe('importCustomData', () => {
     const data = importCustomData({'data.__proto__': 'x'});
     expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
     expect(Object.keys(data!)).toEqual(['__proto__']);
+  });
+});
+
+/** Plunk Lite: a finished import's CSV leaves Redis, and its status never carries it */
+describe('Contact Import - the CSV after the import', () => {
+  const job = (attemptsMade: number) =>
+    createMockJob<ContactImportJobData>(
+      {projectId: 'p', csvData: 'Y3N2', filename: 'contacts.csv'},
+      {attemptsMade, opts: {attempts: 2}},
+    );
+
+  it('drops the CSV of a completed import', async () => {
+    const completed = job(1);
+    await dropFinishedCsv(completed, 'completed');
+
+    expect(completed.updateData).toHaveBeenCalledWith(expect.objectContaining({csvData: '', filename: 'contacts.csv'}));
+  });
+
+  it('keeps it for a retry, and drops it once no attempt is left', async () => {
+    const retrying = job(1);
+    const exhausted = job(2);
+    await dropFinishedCsv(retrying, 'failed');
+    await dropFinishedCsv(exhausted, 'failed');
+
+    expect(retrying.updateData).not.toHaveBeenCalled();
+    expect(exhausted.updateData).toHaveBeenCalledWith(expect.objectContaining({csvData: ''}));
+  });
+
+  it('reports the status without the CSV', async () => {
+    const added = await importQueue.add('import', {projectId: 'p', csvData: 'Y3N2', filename: 'contacts.csv'});
+    try {
+      const status = await QueueService.getImportJobStatus(added.id!, 'p');
+
+      expect(status).toMatchObject({filename: 'contacts.csv'});
+      expect(JSON.stringify(status)).not.toContain('Y3N2');
+    } finally {
+      await added.remove();
+    }
+  });
+
+  it('fails only the row that takes a contact past the field cap', async () => {
+    const {
+      project: {id: projectId},
+    } = await factories.createUserWithProject();
+    const columns = Array.from({length: CONTACT_FIELDS_MAX + 1}, (_, i) => `field${i}`);
+    const csv = [
+      ['email', ...columns].join(','),
+      ['wide@plunk.test', ...columns.map(() => 'x')].join(','),
+      ['fine@plunk.test', ...columns.map(() => '')].join(','),
+    ].join('\n');
+
+    const result = await processContactImport(
+      createMockJob<ContactImportJobData>({projectId, csvData: Buffer.from(csv).toString('base64'), filename: 'c.csv'}),
+    );
+
+    expect(result.failureCount).toBe(1);
+    expect(result.errors[0]).toMatchObject({email: 'wide@plunk.test'});
+    expect(result.createdCount).toBe(1);
   });
 });

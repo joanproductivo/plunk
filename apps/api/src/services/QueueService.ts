@@ -113,8 +113,9 @@ export const importQueue = new Queue<ContactImportJobData>('import', {
       type: 'exponential',
       delay: 5000,
     },
-    removeOnComplete: 50, // Keep last 50 completed imports
-    removeOnFail: 100, // Keep last 100 failed imports
+    // Plunk Lite: fewer and for less time -- each kept its whole CSV, up to about 7 MB, in Redis
+    removeOnComplete: {age: 24 * 3600, count: 20},
+    removeOnFail: {age: 7 * 24 * 3600, count: 50},
   },
 });
 
@@ -599,7 +600,8 @@ export class QueueService {
       state,
       progress,
       result: returnValue,
-      data: job.data,
+      // Plunk Lite: not the job's data, which holds the whole CSV, sent on every poll of the dashboard
+      filename: job.data.filename,
       failedReason,
     };
   }

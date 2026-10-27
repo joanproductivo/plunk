@@ -226,6 +226,21 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
   }
 }
 
+/**
+ * Plunk Lite: once an import is done -- completed, or failed with no attempt left -- its CSV goes,
+ * as the job stays in Redis for a while to report its result. Not before: a retry reads it again.
+ */
+export async function dropFinishedCsv(job: Job<ContactImportJobData>, outcome: 'completed' | 'failed'): Promise<void> {
+  if (outcome === 'failed' && job.attemptsMade < (job.opts?.attempts ?? 1)) {
+    return;
+  }
+  try {
+    await job.updateData({...job.data, csvData: ''});
+  } catch (error) {
+    signale.warn(`[IMPORT-PROCESSOR] Could not drop the CSV of job ${job.id}:`, error);
+  }
+}
+
 export function createImportWorker() {
   const worker = new Worker<ContactImportJobData>(importQueue.name, processContactImport, {
     connection: importQueue.opts.connection,
@@ -234,10 +249,14 @@ export function createImportWorker() {
 
   worker.on('completed', job => {
     signale.info(`[IMPORT-PROCESSOR] Job ${job.id} completed`);
+    void dropFinishedCsv(job, 'completed');
   });
 
   worker.on('failed', (job, err) => {
     signale.error(`[IMPORT-PROCESSOR] Job ${job?.id} failed:`, err.message);
+    if (job) {
+      void dropFinishedCsv(job, 'failed');
+    }
   });
 
   worker.on('error', err => {
