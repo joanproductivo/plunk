@@ -50,6 +50,7 @@
       "error": "Error",
       "loadFailed": "No pudimos cargar tus preferencias de correo. Revisa el enlace e inténtalo de nuevo.",
       "actionFailed": "Algo salió mal. Inténtalo de nuevo.",
+      "resubscribeNeedsEmail": "Esta dirección no se puede volver a suscribir desde aquí. Usa el enlace de un email que hayas recibido de nosotros.",
       "sentWith": "Enviado con {provider}"
     }
   },

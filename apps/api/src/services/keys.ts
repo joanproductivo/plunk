@@ -1,3 +1,12 @@
+import {createHash} from 'node:crypto';
+
+import {normalizeEmail} from '../utils/emailAddress.js';
+
+/** An address in a key: normalized, so case variants share it, and hashed, so its size is fixed */
+function hashedAddress(email: string): string {
+  return createHash('sha256').update(normalizeEmail(email)).digest('hex');
+}
+
 export const Keys = {
   User: {
     id(id: string): string {
@@ -16,13 +25,13 @@ export const Keys = {
       return `auth:email_verification_rate:${userId}`;
     },
     passwordResetRateLimit(email: string): string {
-      return `auth:password_reset_rate:${email}`;
+      return `auth:password_reset_rate:${hashedAddress(email)}`;
     },
     passwordChangeRateLimit(userId: string): string {
       return `auth:password_change_rate:${userId}`;
     },
     loginRateLimit(email: string): string {
-      return `auth:login_rate:${email}`;
+      return `auth:login_rate:${hashedAddress(email)}`;
     },
   },
   RateLimit: {

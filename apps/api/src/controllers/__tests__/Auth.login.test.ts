@@ -65,6 +65,28 @@ describe('Auth.login - attempt limit', () => {
     expect((await login({email: unknown, password: 'wrong-password'})).error?.code).toBe(429);
   });
 
+  it('does not take `_` in an address as any character', async () => {
+    // `_` matched any one character, so `_lice@` found alice@ and had a count of its own
+    const lookalike = `_${email.slice(1)}`;
+
+    const result = await login({email: lookalike, password});
+
+    expect(result.json?.success).toBe(false);
+  });
+
+  it('finds the account whatever the case, including addresses with `_` in them', async () => {
+    const underscored = await factories.createUser({email: `first_last-${Date.now()}@test.com`, password});
+
+    expect((await login({email: underscored.email.toUpperCase(), password})).json?.success).toBe(true);
+  });
+
+  it('refuses an address longer than any deliverable one', async () => {
+    const result = await login({email: `${'a'.repeat(250)}@test.com`, password});
+
+    expect(result.error).toBeDefined();
+    expect(result.json).toBeUndefined();
+  });
+
   it('lets the count expire after its window', async () => {
     await login({email, password: 'wrong-password'});
 

@@ -11,6 +11,7 @@ import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
 import {SegmentMembershipService} from './SegmentMembershipService.js';
+import {SuppressionService} from './SuppressionService.js';
 
 export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
 
@@ -588,8 +589,10 @@ export class SegmentService {
 
     let created = 0;
     if (createMissing && missing.length > 0) {
+      // A suppressed address is created unsubscribed
+      const suppressed = subscribed ? await SuppressionService.suppressedAmong(projectId, missing) : new Map();
       await prisma.contact.createMany({
-        data: missing.map(email => ({projectId, email, subscribed})),
+        data: missing.map(email => ({projectId, email, subscribed: subscribed && !suppressed.has(email)})),
         skipDuplicates: true,
       });
       created = missing.length;

@@ -50,6 +50,7 @@
       "error": "Chyba",
       "loadFailed": "Nepodařilo se načíst vaše e-mailové předvolby. Zkontrolujte odkaz a zkuste to znovu.",
       "actionFailed": "Něco se pokazilo. Zkuste to prosím znovu.",
+      "resubscribeNeedsEmail": "Tuto adresu zde nelze znovu přihlásit. Použijte odkaz v e-mailu, který jste od nás obdrželi.",
       "sentWith": "Odesláno přes {provider}"
     }
   },

@@ -54,14 +54,11 @@ export class UserService {
     }
 
     return wrapRedis(Keys.User.email(email), async () => {
-      return prisma.user.findFirst({
-        where: {
-          email: {
-            equals: email,
-            mode: 'insensitive',
-          },
-        },
-      });
+      // Case-insensitive by lower(), not by Prisma's `mode: 'insensitive'`: that is an ILIKE,
+      // where `_` and `%` in the address are wildcards, so `_lice@x.com` found alice@x.com
+      const [match] = await prisma.$queryRaw<{id: string}[]>`
+        SELECT "id" FROM "users" WHERE lower("email") = lower(${email}) LIMIT 1`;
+      return match ? prisma.user.findUnique({where: {id: match.id}}) : null;
     });
   }
 

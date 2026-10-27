@@ -940,3 +940,22 @@ model PlunkLiteFailure {
   @@unique([projectId, sourceKey])
   @@map("plunk_lite_failures")
 }
+
+/// Plunk Lite: addresses a project must not email again -- a permanent bounce or a complaint,
+/// including SES answering for an address already on its account suppression list. Keyed by the
+/// address, not the contact, so it outlives a deleted contact. Only the contact page lifts it, or
+/// the person resubscribing from an email they received. No relation to Project, like the other
+/// tables of Plunk Lite; rows of a deleted project stay behind.
+model PlunkLiteSuppression {
+  projectId String
+  /// Normalized like a contact's email: trimmed and lowercased
+  email     String
+  /// 'BOUNCE' or 'COMPLAINT'
+  reason    String
+  /// The email whose bounce or complaint recorded it
+  emailId   String?
+  createdAt DateTime @default(now())
+
+  @@id([projectId, email])
+  @@map("plunk_lite_suppressions")
+}

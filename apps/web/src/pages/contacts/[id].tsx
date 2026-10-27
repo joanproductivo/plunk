@@ -11,7 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
-import {contactStatus} from '@plunk/types';
+import {contactStatus, type ContactSuppression} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -32,7 +32,11 @@ import dayjs from 'dayjs';
 export default function ContactDetailPage() {
   const router = useRouter();
   const {id} = router.query;
-  const {data: contact, mutate, isLoading} = useSWR<Contact>(id ? `/contacts/${id}` : null);
+  const {
+    data: contact,
+    mutate,
+    isLoading,
+  } = useSWR<Contact & {suppression?: ContactSuppression<string> | null}>(id ? `/contacts/${id}` : null);
   const {mutate: mutateKey} = useSWRConfig();
 
   const [email, setEmail] = useState('');
@@ -69,6 +73,21 @@ export default function ContactDetailPage() {
       toast.error(error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const [isLifting, setIsLifting] = useState(false);
+
+  const handleLiftSuppression = async () => {
+    setIsLifting(true);
+    try {
+      await network.fetch('DELETE', `/contacts/${id}/suppression`);
+      toast.success('Suppression removed. The contact can be subscribed again.');
+      void mutate();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Couldn’t remove the suppression. Try again.');
+    } finally {
+      setIsLifting(false);
     }
   };
 
@@ -207,6 +226,31 @@ export default function ContactDetailPage() {
                       </div>
                       <Switch id="subscribed" checked={subscribed} onCheckedChange={setSubscribed} />
                     </div>
+
+                    {contact?.suppression && (
+                      // Without it, the switch above would just fail on save with no way out
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <p className="font-medium">
+                          Suppressed after a {contact.suppression.reason === 'COMPLAINT' ? 'spam complaint' : 'bounce'}{' '}
+                          on {dayjs(contact.suppression.createdAt).format('D MMM YYYY')}
+                        </p>
+                        <p className="mt-1 text-xs text-amber-800">
+                          Nothing is sent to this address, and it can’t be subscribed until the suppression is removed.
+                          SES may still block it on its own account suppression list.
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                          disabled={isLifting}
+                          onClick={() => void handleLiftSuppression()}
+                        >
+                          {isLifting && <IconSpinner className="h-4 w-4" />}
+                          Remove suppression
+                        </Button>
+                      </div>
+                    )}
 
                     <div>
                       {contact && (

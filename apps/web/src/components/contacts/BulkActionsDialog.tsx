@@ -473,6 +473,9 @@ function buildToastSummary(result: BulkContactActionResult): string {
   if (result.unchangedCount > 0 && copy.alreadyState) {
     parts.push(`${result.unchangedCount.toLocaleString()} ${copy.alreadyState}`);
   }
+  if (result.suppressedCount) {
+    parts.push(`${result.suppressedCount.toLocaleString()} suppressed after a bounce or complaint`);
+  }
   if (result.failureCount > 0) parts.push(`${result.failureCount.toLocaleString()} failed`);
   if (parts.length === 0) return 'No contacts to update';
   return parts.join(' · ');
@@ -482,7 +485,7 @@ function BulkResultSummary({result}: {result: BulkContactActionResult}) {
   const copy = getOperationCopy(result.operation);
   const {successCount, unchangedCount, failureCount} = result;
   const noChanges = successCount === 0 && failureCount === 0 && unchangedCount > 0;
-  const total = successCount + unchangedCount + failureCount;
+  const total = successCount + unchangedCount + failureCount + (result.suppressedCount ?? 0);
 
   // Build the row list. The "primary" row is the row that represents what the
   // user actually got — usually the changed count, but when nothing changed we
@@ -496,13 +499,24 @@ function BulkResultSummary({result}: {result: BulkContactActionResult}) {
   };
   const rows: Row[] = [];
 
-  if (noChanges && copy.alreadyState) {
+  if (successCount === 0 && failureCount === 0 && unchangedCount === 0 && result.suppressedCount) {
+    // Nothing changed because every contact is suppressed: that is the lead, not "0 subscribed"
+    rows.push({
+      key: 'suppressed',
+      label: 'Suppressed after a bounce or complaint',
+      count: result.suppressedCount,
+      primary: true,
+    });
+  } else if (noChanges && copy.alreadyState) {
     rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount, primary: true});
   } else {
     rows.push({key: 'changed', label: copy.completedTitle, count: successCount, primary: true});
     if (unchangedCount > 0 && copy.alreadyState) {
       rows.push({key: 'already', label: copy.alreadyState, count: unchangedCount});
     }
+  }
+  if (result.suppressedCount && !rows.some(row => row.key === 'suppressed')) {
+    rows.push({key: 'suppressed', label: 'Suppressed after a bounce or complaint', count: result.suppressedCount});
   }
   if (failureCount > 0) {
     rows.push({key: 'failed', label: 'Failed', count: failureCount, tone: 'danger'});

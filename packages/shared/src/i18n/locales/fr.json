@@ -50,6 +50,7 @@
       "error": "Erreur",
       "loadFailed": "Impossible de charger vos préférences e-mail. Vérifiez le lien et réessayez.",
       "actionFailed": "Une erreur s'est produite. Veuillez réessayer.",
+      "resubscribeNeedsEmail": "Cette adresse ne peut pas être réabonnée d'ici. Utilisez le lien d'un e-mail que vous avez reçu de notre part.",
       "sentWith": "Envoyé avec {provider}"
     }
   },

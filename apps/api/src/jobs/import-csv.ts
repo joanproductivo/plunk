@@ -2,6 +2,7 @@
  * Reading an uploaded contacts CSV: parsing it, and splitting each row into what the import writes.
  */
 
+import type {SuppressionReason} from '@plunk/types';
 import {parse} from 'csv-parse/sync';
 
 import {unescapeCsvFormula} from '../utils/csv.js';
@@ -47,6 +48,11 @@ export interface ImportRecord {
    * (`''`) when only `status` speaks for the file and this row's is empty.
    */
   unknownStatus?: string;
+  /**
+   * The address bounced or complained at the source (Plunk Lite): it goes on the project's
+   * suppression list and the contact is unsubscribed, whatever the other cells say
+   */
+  suppression?: SuppressionReason;
 }
 
 /**
@@ -84,6 +90,10 @@ export function splitImportRecord(
     }
   }
 
+  // A source that stopped mailing the address for a bounce or a complaint: SES never saw it, so
+  // only this list keeps it from being mailed (and mailed into a real bounce or complaint) again
+  const suppression = SUPPRESSING_STATUSES[statusValue];
+
   const createdAt = createdat.trim() === '' ? undefined : parseImportDate(createdat);
 
   // Custom data: every other column except the read-only ones
@@ -101,6 +111,7 @@ export function splitImportRecord(
     invalidCreatedAt: createdAt === null,
     statusSubscription,
     unknownStatus,
+    suppression,
   };
 }
 
@@ -125,6 +136,14 @@ export function importedSubscription(row: ImportRecord, isUpdate: boolean): bool
   }
   return row.statusSubscription === true;
 }
+
+// Statuses that mean the address bounced or reported mail as spam at the source. `cleaned` is a
+// list cleanup of addresses that bounce (Flodesk, Mailchimp).
+const SUPPRESSING_STATUSES: Record<string, SuppressionReason | undefined> = {
+  bounced: 'BOUNCE',
+  cleaned: 'BOUNCE',
+  complained: 'COMPLAINT',
+};
 
 // Statuses of Plunk's export and of other providers' (Flodesk, Mailchimp, ...), lowercased
 const STATUS_SUBSCRIBED = new Set(['subscribed', 'confirmed', 'active']);

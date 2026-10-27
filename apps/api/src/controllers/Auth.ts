@@ -42,7 +42,7 @@ export class Auth {
     // limit bounds password guesses without telling which accounts exist. INCR counts each
     // request on its own, which a read-then-write would not when guesses arrive together; the
     // expiry is set in the same transaction, so the count can never be left without one.
-    const rateLimitKey = Keys.User.loginRateLimit(email.toLowerCase());
+    const rateLimitKey = Keys.User.loginRateLimit(email);
     const counted = await redis.multi().incr(rateLimitKey).expire(rateLimitKey, LOGIN_RATE_WINDOW, 'NX').exec();
     const [incrError, attempts] = counted?.[0] ?? [new Error('Login attempt count failed')];
     if (incrError) {

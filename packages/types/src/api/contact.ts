@@ -57,3 +57,15 @@ export function contactStatus(contact: Pick<Contact, 'subscribed' | 'snoozedUnti
 
   return contact.snoozedUntil ? 'snoozed' : 'unsubscribed';
 }
+
+/** Why an address is on the project's suppression list (Plunk Lite) */
+export type SuppressionReason = 'BOUNCE' | 'COMPLAINT';
+
+/**
+ * A contact address on the project's suppression list (Plunk Lite): it is never sent to, and
+ * only the contact page or its owner, from an email they received, can subscribe it again
+ */
+export interface ContactSuppression<TDate = Date> {
+  reason: SuppressionReason;
+  createdAt: TDate;
+}

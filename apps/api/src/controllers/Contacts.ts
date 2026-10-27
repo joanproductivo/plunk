@@ -22,6 +22,7 @@ import {ContactSegmentsService} from '../services/ContactSegmentsService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
 import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
+import {SuppressionService} from '../services/SuppressionService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 // Configure multer for file uploads (memory storage)
@@ -162,7 +163,8 @@ export class Contacts {
 
   /**
    * GET /contacts/:id
-   * Get a specific contact by ID
+   * Get a specific contact by ID, with `suppression` when its address is on the project's
+   * suppression list (Plunk Lite)
    */
   @Get(':id')
   @Middleware([requireAuth, requireEmailVerified])
@@ -176,8 +178,9 @@ export class Contacts {
     }
 
     const contact = await ContactService.get(auth.projectId!, contactId);
+    const suppression = await SuppressionService.find(auth.projectId!, contact.email);
 
-    return res.status(200).json(contact);
+    return res.status(200).json({...contact, suppression});
   }
 
   /**
@@ -204,7 +207,9 @@ export class Contacts {
 
   /**
    * POST /contacts
-   * Create or update a contact (upsert)
+   * Create or update a contact (upsert). A suppressed address is never subscribed: from a dashboard
+   * session the request is refused (409), from an API key the contact stays unsubscribed and
+   * `_meta.suppressed` says why.
    */
   @Post('')
   @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
@@ -221,13 +226,23 @@ export class Contacts {
     const existingContact = await ContactService.findByEmail(auth.projectId!, email);
     const isUpdate = !!existingContact;
 
-    const contact = await ContactService.upsert(auth.projectId!, email, data, subscribed);
+    // From the dashboard's form, subscribing a suppressed address is refused with the reason;
+    // from an API key (integrations, the MCP) the contact stays unsubscribed, and the response
+    // says why
+    const contact = await ContactService.upsert(auth.projectId!, email, data, subscribed, true, {
+      explicit: auth.type === 'jwt' && subscribed !== false,
+    });
+    const suppressed =
+      subscribed !== false && !contact.subscribed
+        ? await SuppressionService.find(auth.projectId!, contact.email)
+        : null;
 
     return res.status(isUpdate ? 200 : 201).json({
       ...contact,
       _meta: {
         isNew: !isUpdate,
         isUpdate,
+        ...(suppressed && {suppressed}),
       },
     });
   }
@@ -585,6 +600,29 @@ export class Contacts {
         error: error instanceof Error ? error.message : 'Failed to delete field',
       });
     }
+  }
+
+  /**
+   * DELETE /contacts/:id/suppression
+   * Take the contact's address off the project's suppression list, so it can be subscribed and
+   * emailed again. Only from a dashboard session: an API key is how addresses are resubscribed
+   * in passing, which the list exists to stop.
+   */
+  @Delete(':id/suppression')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async liftSuppression(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const contactId = req.params.id;
+
+    if (auth.type !== 'jwt') {
+      throw new HttpException(403, 'A suppression can only be removed from the dashboard');
+    }
+
+    const contact = await ContactService.get(auth.projectId!, contactId!);
+    const lifted = await SuppressionService.lift(auth.projectId!, contact.email);
+
+    return res.status(200).json({success: true, lifted});
   }
 
   /**
