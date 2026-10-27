@@ -1,5 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {NextFunction, Request, Response} from 'express';
+import {prisma as appPrisma} from '../../database/prisma.js';
+import {logger} from '../../utils/logger.js';
 import {databaseRequestLogger} from '../requestLogger.js';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -376,6 +378,64 @@ describe('Request Logger Middleware', () => {
       await new Promise(resolve => setTimeout(resolve, 100));
 
       // The logging should have failed but not affected the response
+    });
+  });
+
+  describe('Rows not worth writing, and writes under load (Plunk Lite)', () => {
+    /** Respond with a status and say whether a row was written */
+    async function logged(path: string, statusCode: number, auth?: object): Promise<boolean> {
+      req.originalUrl = path;
+      res.locals = {requestId: crypto.randomUUID(), ...(auth ? {auth} : {})};
+      res.statusCode = statusCode;
+      databaseRequestLogger(req as Request, res as Response, next);
+      await res.json!({});
+      await waitForNoLog();
+      return (await prisma.apiRequest.count({where: {id: res.locals.requestId as string}})) === 1;
+    }
+
+    it('skips SNS notifications that were handled, but not the ones refused', async () => {
+      expect(await logged('/webhooks/sns', 200)).toBe(false);
+      expect(await logged('/webhooks/sns', 403)).toBe(true);
+    });
+
+    it('skips the 401s of made-up keys on the public API, but not failed logins', async () => {
+      expect(await logged('/v1/send', 401)).toBe(false);
+      expect(await logged('/auth/login', 401)).toBe(true);
+      expect(await logged('/v1/send', 200, {type: 'apiKey', projectId})).toBe(true);
+    });
+
+    it('writes at most 4 rows at once and drops the rest', async () => {
+      const pending: (() => void)[] = [];
+      const create = vi.spyOn(appPrisma.apiRequest, 'create').mockImplementation(
+        () => new Promise(resolve => pending.push(() => resolve({} as never))) as never,
+      );
+
+      for (let i = 0; i < 10; i++) {
+        res.locals = {requestId: crypto.randomUUID()};
+        databaseRequestLogger(req as Request, res as Response, next);
+        await res.json!({});
+      }
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(4));
+      // Settle them, so the next tests write again
+      pending.forEach(settle => settle());
+      await new Promise(resolve => setTimeout(resolve, 20));
+      create.mockRestore();
+
+      expect(await logged('/v1/send', 200)).toBe(true);
+    });
+
+    it('stays quiet about a request id a client sent twice', async () => {
+      const error = vi.spyOn(logger, 'error');
+      const id = crypto.randomUUID();
+      for (let i = 0; i < 2; i++) {
+        res.locals = {requestId: id};
+        databaseRequestLogger(req as Request, res as Response, next);
+        await res.json!({});
+        await waitForLog(prisma, id);
+      }
+      await waitForNoLog();
+
+      expect(error).not.toHaveBeenCalled();
     });
   });
 

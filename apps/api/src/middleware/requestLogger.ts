@@ -1,3 +1,4 @@
+import {Prisma} from '@plunk/db';
 import type {NextFunction, Request, Response} from 'express';
 import {prisma} from '../database/prisma.js';
 import {logger} from '../utils/logger.js';
@@ -120,6 +121,24 @@ export const databaseRequestLogger = (req: Request, res: Response, next: NextFun
   next();
 };
 
+/** Plunk Lite: most rows written to api_requests at once; past it, rows are dropped, not queued */
+const MAX_LOG_WRITES_IN_FLIGHT = 4;
+const DROPPED_WARNING_INTERVAL_MS = 60_000;
+let logWritesInFlight = 0;
+let droppedLogWrites = 0;
+let lastDroppedWarningAt = 0;
+
+/**
+ * Plunk Lite: responses not worth a row. SNS notifications that were handled -- two or three per
+ * email sent -- and the 401s of made-up keys on the public API, which cost nothing to send in bulk.
+ */
+function skipsRow(path: string, statusCode: number, authenticated: boolean): boolean {
+  if (path === '/webhooks/sns') {
+    return statusCode < 400;
+  }
+  return path.startsWith('/v1/') && statusCode === 401 && !authenticated;
+}
+
 /**
  * Log the request to the database
  * This runs asynchronously and failures are logged but don't affect the response
@@ -130,12 +149,30 @@ async function logRequestToDatabase(
   startTime: number,
   responseBody: unknown,
 ): Promise<void> {
+  let claimed = false;
   try {
     const requestId = res.locals.requestId as string | undefined;
     const auth = res.locals.auth as {type?: string; userId?: string; projectId?: string} | undefined;
 
     const duration = Date.now() - startTime;
     const statusCode = res.statusCode;
+
+    if (skipsRow(logger.path(req), statusCode, Boolean(auth))) {
+      return;
+    }
+
+    // Plunk Lite: under a burst, the log gives way rather than holding database connections
+    if (logWritesInFlight >= MAX_LOG_WRITES_IN_FLIGHT) {
+      droppedLogWrites++;
+      if (Date.now() - lastDroppedWarningAt >= DROPPED_WARNING_INTERVAL_MS) {
+        lastDroppedWarningAt = Date.now();
+        logger.warn('Dropped API request log rows under load', {dropped: droppedLogWrites}, res);
+        droppedLogWrites = 0;
+      }
+      return;
+    }
+    logWritesInFlight++;
+    claimed = true;
 
     // Extract error information if this is an error response
     let errorCode: string | undefined;
@@ -185,10 +222,18 @@ async function logRequestToDatabase(
       logger.debug('Request logged to database', {requestId}, res);
     }
   } catch (error) {
+    // Plunk Lite: a request id sent twice by a client is already logged; nothing to report
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return;
+    }
     // Log the error but don't throw - we don't want logging failures to affect the API
     logger.error('Failed to log request to database', error, {
       path: logger.path(req),
       method: req.method,
     });
+  } finally {
+    if (claimed) {
+      logWritesInFlight--;
+    }
   }
 }

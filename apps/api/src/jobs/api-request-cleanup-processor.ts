@@ -18,39 +18,41 @@ const RETENTION_DAYS = 30; // Keep logs for 30 days
 const BATCH_SIZE = 10000; // Delete in batches for performance
 
 /**
- * Process API request cleanup job
+ * Process API request cleanup job. Plunk Lite: each DELETE is bounded to `batchSize` rows by a
+ * subselect -- Prisma's deleteMany has no LIMIT, so it deleted every old row in one statement.
  */
-async function processCleanup(job: Job<ApiRequestCleanupJobData>): Promise<{deleted: number}> {
+export async function processCleanup(
+  job: Job<ApiRequestCleanupJobData>,
+  batchSize = BATCH_SIZE,
+): Promise<{deleted: number}> {
   signale.info('[API-REQUEST-CLEANUP] Starting cleanup of old API request logs...');
 
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - RETENTION_DAYS);
 
   let totalDeleted = 0;
-  let hasMore = true;
 
   try {
-    // Delete in batches to avoid locking the table for too long
-    while (hasMore) {
-      const result = await prisma.apiRequest.deleteMany({
-        where: {
-          createdAt: {
-            lt: cutoffDate,
-          },
-        },
-        // Note: Prisma doesn't support LIMIT in deleteMany, so we use a different approach
-      });
+    for (;;) {
+      const deleted = await prisma.$executeRaw`
+        DELETE FROM "api_requests"
+        WHERE "id" IN (
+          SELECT "id" FROM "api_requests"
+          WHERE "createdAt" < ${cutoffDate}
+          LIMIT ${batchSize}
+        )
+      `;
 
-      totalDeleted += result.count;
+      totalDeleted += deleted;
 
       // If we deleted fewer than batch size, we're done
-      hasMore = result.count >= BATCH_SIZE;
-
-      if (hasMore) {
-        signale.info(`[API-REQUEST-CLEANUP] Deleted ${totalDeleted} records so far, continuing...`);
-        // Small delay between batches to reduce database load
-        await new Promise(resolve => setTimeout(resolve, 100));
+      if (deleted < batchSize) {
+        break;
       }
+
+      signale.info(`[API-REQUEST-CLEANUP] Deleted ${totalDeleted} records so far, continuing...`);
+      // Small delay between batches to reduce database load
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     signale.success(
@@ -77,7 +79,7 @@ export function createApiRequestCleanupWorker(): Worker<ApiRequestCleanupJobData
     ...parseRedisUrl(REDIS_URL),
   };
 
-  const worker = new Worker<ApiRequestCleanupJobData>('api-request-cleanup', processCleanup, {
+  const worker = new Worker<ApiRequestCleanupJobData>('api-request-cleanup', job => processCleanup(job), {
     connection: redisConnection,
     concurrency: 1, // Only run one cleanup job at a time
   });
