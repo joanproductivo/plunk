@@ -1,3 +1,4 @@
+import type {Prisma} from '@plunk/db';
 import {StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
 import signale from 'signale';
 
@@ -9,12 +10,49 @@ const STALE_MS = 30 * 60_000;
 /** Most runs failed in one sweep; the next sweep takes the rest */
 const LIMIT = 500;
 
+/** A run as failRun needs it: enough to name it in the alert */
+export interface RunToFail {
+  id: string;
+  workflowId: string;
+  workflow: {name: string; projectId: string};
+  contact: {email: string};
+}
+
 /**
  * Plunk Lite: runs left RUNNING by a process that stopped in the middle of a step (a deploy, a
  * restart for memory, a database cut). Nothing would move them on, and while RUNNING they keep the
  * contact from entering the workflow again.
  */
 export class WorkflowRecoveryService {
+  /**
+   * Fail a run and tell the project, once: only a run still `where` says (by default one still
+   * running or waiting, so a cancelled, failed or finished run keeps its status). Returns whether
+   * this call failed it.
+   */
+  public static async failRun(
+    run: RunToFail,
+    {
+      error,
+      exitReason,
+      where = {status: {in: [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.WAITING]}},
+    }: {error: string; exitReason?: string; where?: Prisma.WorkflowExecutionWhereInput},
+  ): Promise<boolean> {
+    const {count} = await prisma.workflowExecution.updateMany({
+      where: {...where, id: run.id},
+      data: {status: WorkflowExecutionStatus.FAILED, completedAt: new Date(), exitReason},
+    });
+    if (count === 0) {
+      return false;
+    }
+    await FailureAlertService.record(run.workflow.projectId, {
+      sourceKey: `workflow:${run.workflowId}`,
+      label: run.workflow.name,
+      error,
+      contactEmail: run.contact.email,
+    });
+    return true;
+  }
+
   /**
    * Fail the runs that have been RUNNING without a write for 30 minutes, with an alert. Every step
    * writes its run (Prisma sets `updatedAt` on updateMany too), and the slowest one, a webhook, takes
@@ -38,15 +76,12 @@ export class WorkflowRecoveryService {
     let failed = 0;
     for (const run of stale) {
       // Only if it is still the run that was read: one that moved on meanwhile is alive
-      const {count} = await prisma.workflowExecution.updateMany({
-        where: {id: run.id, status: WorkflowExecutionStatus.RUNNING, updatedAt: {lt: cutoff}},
-        data: {
-          status: WorkflowExecutionStatus.FAILED,
-          completedAt: new Date(),
-          exitReason: 'Interrupted: the server stopped while this run was in progress',
-        },
+      const interrupted = await this.failRun(run, {
+        error: 'A run was interrupted by a restart and stopped where it was',
+        exitReason: 'Interrupted: the server stopped while this run was in progress',
+        where: {status: WorkflowExecutionStatus.RUNNING, updatedAt: {lt: cutoff}},
       });
-      if (count === 0) {
+      if (!interrupted) {
         continue;
       }
       failed++;
@@ -56,12 +91,6 @@ export class WorkflowRecoveryService {
           status: {in: [StepExecutionStatus.PENDING, StepExecutionStatus.RUNNING, StepExecutionStatus.WAITING]},
         },
         data: {status: StepExecutionStatus.FAILED, completedAt: new Date(), error: 'Interrupted'},
-      });
-      await FailureAlertService.record(run.workflow.projectId, {
-        sourceKey: `workflow:${run.workflowId}`,
-        label: run.workflow.name,
-        error: 'A run was interrupted by a restart and stopped where it was',
-        contactEmail: run.contact.email,
       });
     }
 

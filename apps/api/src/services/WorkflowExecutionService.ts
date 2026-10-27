@@ -23,10 +23,10 @@ import {readCapped} from '../utils/readCapped.js';
 
 import {RECIPIENT_OVERRIDE_HEADER} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
-import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SuppressionService} from './SuppressionService.js';
+import {WorkflowRecoveryService} from './WorkflowRecoveryService.js';
 
 // A step's error is rethrown through the catch of every step before it in the same run, which
 // had completed; the step it came from has handled it, so those pass it up untouched.
@@ -291,43 +291,20 @@ export class WorkflowExecutionService {
           : {status: StepExecutionStatus.FAILED, completedAt: new Date(), error: message},
       });
 
-      // Mark workflow execution as failed
-      const failedExecution = await prisma.workflowExecution.update({
-        where: {id: executionId},
-        data: {
-          status: WorkflowExecutionStatus.FAILED,
-          completedAt: new Date(),
-        },
-        include: {
-          workflow: {
-            select: {
-              name: true,
-              project: {
-                select: {name: true, id: true},
-              },
-            },
-          },
-          contact: {
-            select: {email: true},
-          },
-        },
-      });
-
-      await FailureAlertService.record(failedExecution.workflow.project.id, {
-        sourceKey: `workflow:${failedExecution.workflowId}`,
-        label: failedExecution.workflow.name,
-        error: message,
-        contactEmail: failedExecution.contact.email,
-      });
+      // Mark workflow execution as failed (Plunk Lite: unless it was stopped meanwhile -- a run the
+      // brake cancelled stays cancelled, one the sweep failed is not alerted twice)
+      const failed = await WorkflowRecoveryService.failRun(initialExecution, {error: message});
 
       // Send notification about workflow execution failure
-      await NtfyService.notifyWorkflowExecutionFailed(
-        failedExecution.workflow.name,
-        failedExecution.workflow.project.name,
-        failedExecution.workflow.project.id,
-        failedExecution.contact.email,
-        message,
-      );
+      if (failed) {
+        await NtfyService.notifyWorkflowExecutionFailed(
+          initialExecution.workflow.name,
+          initialExecution.workflow.project.name,
+          initialExecution.workflow.project.id,
+          initialExecution.contact.email,
+          message,
+        );
+      }
 
       throw error;
     }
@@ -1524,22 +1501,10 @@ export class WorkflowExecutionService {
     }
     signale.error(`[WORKFLOW] Resuming execution ${execution.id} after its event failed:`, error);
     try {
-      const {count} = await prisma.workflowExecution.updateMany({
-        where: {id: execution.id, status: {notIn: STOPPED_STATUSES}},
-        data: {
-          status: WorkflowExecutionStatus.FAILED,
-          completedAt: new Date(),
-          exitReason: 'Resuming after the event failed',
-        },
+      await WorkflowRecoveryService.failRun(execution, {
+        error: error instanceof Error ? error.message : 'Resuming after the event failed',
+        exitReason: 'Resuming after the event failed',
       });
-      if (count > 0) {
-        await FailureAlertService.record(execution.workflow.projectId, {
-          sourceKey: `workflow:${execution.workflowId}`,
-          label: execution.workflow.name,
-          error: error instanceof Error ? error.message : 'Resuming after the event failed',
-          contactEmail: execution.contact.email,
-        });
-      }
     } catch (failError) {
       // The database is out too: the run stays as it was, and the alert of the failure is lost
       signale.error(`[WORKFLOW] Could not fail execution ${execution.id}:`, failError);
@@ -1558,23 +1523,19 @@ export class WorkflowExecutionService {
    * on every retry of the job or completing the run without the rest of its route
    */
   private static async failDeletedStep(executionId: string): Promise<void> {
-    const {count} = await prisma.workflowExecution.updateMany({
-      where: {id: executionId, status: {notIn: STOPPED_STATUSES}},
-      data: {status: WorkflowExecutionStatus.FAILED, completedAt: new Date(), exitReason: 'Step deleted'},
-    });
-    if (count === 0) {
-      return;
-    }
     const run = await prisma.workflowExecution.findUnique({
       where: {id: executionId},
-      select: {workflowId: true, workflow: {select: {name: true, projectId: true}}, contact: {select: {email: true}}},
+      select: {
+        id: true,
+        workflowId: true,
+        workflow: {select: {name: true, projectId: true}},
+        contact: {select: {email: true}},
+      },
     });
     if (run) {
-      await FailureAlertService.record(run.workflow.projectId, {
-        sourceKey: `workflow:${run.workflowId}`,
-        label: run.workflow.name,
+      await WorkflowRecoveryService.failRun(run, {
         error: 'A step was deleted while a contact was on its way to it',
-        contactEmail: run.contact.email,
+        exitReason: 'Step deleted',
       });
     }
   }

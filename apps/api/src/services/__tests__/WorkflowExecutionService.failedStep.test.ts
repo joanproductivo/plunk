@@ -129,6 +129,28 @@ describe('WorkflowExecutionService - the step that failed', () => {
     expect(ntfy).toHaveBeenCalledTimes(1);
   });
 
+  it('leaves a run the brake cancelled during its step cancelled, without an alert', async () => {
+    const ntfy = vi.spyOn(NtfyService, 'notifyWorkflowExecutionFailed');
+    const run = await createRun([{type: WorkflowStepType.UPDATE_CONTACT, config: {updates: {stage: 'welcomed'}}}]);
+    vi.spyOn(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      WorkflowExecutionService as any,
+      'executeStep',
+    ).mockImplementation(async () => {
+      await prisma.workflowExecution.update({
+        where: {id: run.executionId},
+        data: {status: WorkflowExecutionStatus.CANCELLED},
+      });
+      throw new Error('step failed after the brake');
+    });
+
+    await expect(run.start()).rejects.toThrow('step failed after the brake');
+
+    expect(await run.status()).toBe(WorkflowExecutionStatus.CANCELLED);
+    expect(ntfy).not.toHaveBeenCalled();
+    expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(0);
+  });
+
   it('keeps the trigger completed when the only step after it fails', async () => {
     const run = await createRun([{type: WorkflowStepType.WEBHOOK, config: FAILING_WEBHOOK}]);
 
