@@ -78,7 +78,16 @@ export interface SecurityCheckJobData {
 }
 
 /**
+ * Job data for the check that SES events reach the webhook (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `sns-health`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface SnsHealthJobData {
+  // Empty - checks the recent emails of every project
+}
+
+/**
  * Job data of Plunk Lite's own checks
  * Used by: plunkLiteChecksQueue worker
  */
-export type PlunkLiteChecksJobData = SecurityCheckJobData;
+export type PlunkLiteChecksJobData = SecurityCheckJobData | SnsHealthJobData;

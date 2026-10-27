@@ -11,13 +11,14 @@ import {CampaignService} from './CampaignService.js';
 import {recipientAddress} from './EmailHeaderService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import type {SesMessageTags} from './SESService.js';
-import {SES_TAG} from './SESService.js';
+import {SES_TAG, verifyConfigurationSets} from './SESService.js';
 import {SuppressionService} from './SuppressionService.js';
 
 /**
  * Plunk Lite: reading what SNS delivers to the SES webhook, matching each event with the email it is
  * about, and the trouble with it that no single email shows -- an event with no email, a message
- * that cannot be read, a run of rejected deliveries.
+ * that cannot be read, a run of rejected deliveries, events that stopped arriving, a configuration
+ * set that does not publish them.
  */
 
 /** The SES notifications the webhook handles; anything else is acknowledged and left alone */
@@ -362,4 +363,96 @@ export async function noteSnsRejection(reason: SnsRejection): Promise<void> {
   } catch (error) {
     signale.warn(`[WEBHOOK] Could not note an SNS delivery rejected for its ${reason}:`, error);
   }
+}
+
+/** The rejected deliveries of the last `hours`, by reason, as the pipeline check reports them */
+async function recentRejections(hours: number): Promise<string> {
+  try {
+    const now = Date.now();
+    const counts: Partial<Record<SnsRejection, number>> = {};
+    for (let i = 0; i < hours; i++) {
+      const hour = new Date(now - i * 3_600_000).toISOString().slice(0, 13);
+      for (const [reason, count] of Object.entries(await redis.hgetall(snsRejectsHourKey(hour)))) {
+        counts[reason as SnsRejection] = (counts[reason as SnsRejection] ?? 0) + Number(count);
+      }
+    }
+    const lastSeen = await redis.hgetall(SNS_REJECTS_KEY);
+    const reasons = (Object.keys(counts) as SnsRejection[]).map(
+      reason => `${counts[reason]} for their ${reason} (last at ${lastSeen[reason] ?? 'an unknown time'})`,
+    );
+    return reasons.length > 0
+      ? ` The webhook rejected SNS deliveries in the last ${hours} hours: ${reasons.join(', ')}.`
+      : ` The webhook rejected no SNS delivery in the last ${hours} hours: check the event destination of the configuration set and the topic's subscription.`;
+  } catch (error) {
+    signale.warn('[WEBHOOK] Could not read the rejected SNS deliveries:', error);
+    return '';
+  }
+}
+
+/** Emails a project needs in the window before its share without events means anything */
+const PIPELINE_MIN_EMAILS = 20;
+const PIPELINE_STUCK_SHARE = 0.5;
+const PIPELINE_WINDOW_HOURS = 6;
+/** How long SES may take to report on an email before it counts as without events */
+const PIPELINE_GRACE_HOURS = 1;
+
+/**
+ * Whether SES events are reaching the webhook, for each project: of the emails SES accepted between
+ * one and six hours ago, half or more still SENT -- no delivery, bounce or complaint recorded, which
+ * both configuration sets publish -- means they are not. The project is told, with what the webhook
+ * rejected meanwhile; once its emails get their events again, the notice is closed.
+ */
+export async function checkEventPipeline(): Promise<void> {
+  const now = Date.now();
+  const from = new Date(now - PIPELINE_WINDOW_HOURS * 3_600_000).toISOString();
+  const to = new Date(now - PIPELINE_GRACE_HOURS * 3_600_000).toISOString();
+  const rows = await prisma.$queryRaw<{projectId: string; total: number; stuck: number}[]>`
+    SELECT "projectId", count(*)::int AS "total",
+           (count(*) FILTER (WHERE "status" = ${EmailStatus.SENT}::"EmailStatus"))::int AS "stuck"
+    FROM "emails"
+    WHERE "createdAt" >= (${from}::timestamptz AT TIME ZONE 'UTC')
+      AND "createdAt" < (${to}::timestamptz AT TIME ZONE 'UTC')
+      AND "sentAt" < (${to}::timestamptz AT TIME ZONE 'UTC')
+      AND "messageId" IS NOT NULL
+      AND "simulated" = false
+    GROUP BY "projectId"`;
+
+  let rejections: string | undefined;
+  for (const {projectId, total, stuck} of rows) {
+    if (total < PIPELINE_MIN_EMAILS) {
+      continue;
+    }
+    if (stuck / total < PIPELINE_STUCK_SHARE) {
+      await FailureAlertService.resolve('sns:events', projectId);
+      continue;
+    }
+    rejections ??= await recentRejections(PIPELINE_WINDOW_HOURS);
+    signale.error(`[WEBHOOK] ${stuck} of ${total} recent emails of project ${projectId} have no SES event`);
+    await FailureAlertService.record(projectId, {
+      sourceKey: 'sns:events',
+      label: 'SES events not arriving',
+      error: `${stuck} of the ${total} emails SES accepted between ${PIPELINE_GRACE_HOURS} and ${PIPELINE_WINDOW_HOURS} hours ago have had no delivery, bounce or complaint reported: SES events are not reaching Plunk, so bounces are not being suppressed.${rejections}`,
+    });
+  }
+}
+
+/**
+ * At startup: every project hears about a configuration set that does not publish its bounces,
+ * complaints and deliveries to SNS (see verifyConfigurationSets), and the notice is closed once
+ * they all do. Nothing changes when SES could not be asked. Never throws.
+ */
+export async function checkConfigurationSets(): Promise<void> {
+  const problems = await verifyConfigurationSets();
+  if (!problems) {
+    return;
+  }
+  if (problems.length === 0) {
+    await FailureAlertService.resolve('sns:config');
+    return;
+  }
+  await FailureAlertService.recordForAll({
+    sourceKey: 'sns:config',
+    label: 'SES configuration sets',
+    error: problems.join(' '),
+  });
 }

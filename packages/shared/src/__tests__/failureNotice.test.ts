@@ -15,6 +15,8 @@ describe('isFailureNotice', () => {
     'brake:campaign:abc',
     'brake:workflow:abc',
     'security:check',
+    'sns:events',
+    'sns:config',
   ])('reads %s as a condition that needs attention', sourceKey => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });

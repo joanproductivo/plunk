@@ -110,6 +110,11 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     path: () => SECURITY_PATH,
   },
   'sns:invalid': {name: {en: label => label, es: () => 'Eventos de SES ilegibles'}, path: () => SECURITY_PATH},
+  'sns:events': {name: {en: label => label, es: () => 'Los eventos de SES no llegan'}, path: () => SECURITY_PATH},
+  'sns:config': {
+    name: {en: label => label, es: () => 'Configuration sets de SES'},
+    path: () => SECURITY_PATH,
+  },
   // A CloudWatch alarm of the AWS account, by its name
   'aws:alarm': {
     name: {en: label => `AWS alarm "${label}"`, es: label => `Alarma de AWS «${label}»`},

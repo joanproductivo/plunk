@@ -411,6 +411,33 @@ describe('FailureAlertService', () => {
     });
   });
 
+  describe('Plunk Lite conditions', () => {
+    const CAMPAIGN = '33333333-3333-4333-8333-333333333333';
+
+    it.each([
+      [`brake:campaign:${CAMPAIGN}`, 'Promo', 'Campaña «Promo» detenida', `/campaigns/${CAMPAIGN}`],
+      ['brake:workflow:w1', 'Welcome', 'Workflow «Welcome» desactivado', '/workflows/w1'],
+      ['project:reactivated', 'Project reactivated', 'Proyecto reactivado', '/settings?tab=security'],
+      [
+        'security:check',
+        'Sending reputation check',
+        'Comprobación de la reputación de envío',
+        '/settings?tab=security',
+      ],
+      ['sns:events', 'SES events not arriving', 'Los eventos de SES no llegan', '/settings?tab=security'],
+      ['sns:config', 'SES configuration sets', 'Configuration sets de SES', '/settings?tab=security'],
+    ])('names %s and links to where it is reviewed, as needing attention', async (sourceKey, label, name, path) => {
+      await prisma.project.update({where: {id: projectId}, data: {language: 'es'}});
+      await FailureAlertService.record(projectId, {sourceKey, label, error: 'Details'});
+      await settle();
+
+      const [open] = await FailureAlertService.listOpen(projectId);
+      expect(open).toMatchObject({sourceKey, reviewPath: path});
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.subject).toMatch(new RegExp(`\\] Requiere atención: ${name}$`));
+    });
+  });
+
   describe('sources', () => {
     it('records a project disabled for its content, and emails the alert addresses about it', async () => {
       await SecurityService.disableProjectForPhishing(projectId, 'Subject', 99);

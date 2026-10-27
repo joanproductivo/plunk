@@ -340,7 +340,7 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
 
 /**
  * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
- * for a burst of them. Each job says how it is retried.
+ * for a burst of them, and whether SES events reach the webhook. Each job says how it is retried.
  */
 export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
   connection: redisConnection,

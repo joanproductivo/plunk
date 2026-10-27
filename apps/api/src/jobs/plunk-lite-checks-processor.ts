@@ -1,18 +1,22 @@
 /**
- * Plunk Lite's checks worker: the reputation check after bounces and complaints
+ * Plunk Lite's checks worker: the reputation check after bounces and complaints, and every 15
+ * minutes the check that SES events reach the webhook
  */
 
-import type {PlunkLiteChecksJobData} from '@plunk/types';
+import type {PlunkLiteChecksJobData, SecurityCheckJobData} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {plunkLiteChecksQueue} from '../services/QueueService.js';
 import {ReputationCheck} from '../services/ReputationCheck.js';
+import {checkEventPipeline} from '../services/SesEventMatch.js';
 
 export async function processPlunkLiteCheck(job: Job<PlunkLiteChecksJobData>): Promise<void> {
   switch (job.name) {
     case 'security-check':
-      return ReputationCheck.run(job.data);
+      return ReputationCheck.run(job.data as SecurityCheckJobData);
+    case 'sns-health':
+      return checkEventPipeline();
     default:
       throw new Error(`Unknown Plunk Lite check: ${job.name}`);
   }
@@ -24,7 +28,7 @@ export async function onPlunkLiteCheckFailed(job: Job<PlunkLiteChecksJobData>, e
     return;
   }
   if (job.name === 'security-check') {
-    await ReputationCheck.exhausted(job.data, error);
+    await ReputationCheck.exhausted(job.data as SecurityCheckJobData, error);
   }
 }
 
