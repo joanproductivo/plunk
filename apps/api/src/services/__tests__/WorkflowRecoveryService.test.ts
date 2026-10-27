@@ -45,7 +45,9 @@ describe('WorkflowRecoveryService.failInterrupted', () => {
     expect(await statusOf(run.executionId)).toBe(WorkflowExecutionStatus.FAILED);
     const step = await prisma.workflowStepExecution.findFirstOrThrow({where: {executionId: run.executionId}});
     expect(step).toMatchObject({status: StepExecutionStatus.FAILED, error: 'Interrupted'});
-    const alert = await prisma.plunkLiteFailure.findFirst({where: {projectId, sourceKey: `workflow:${run.workflow.id}`}});
+    const alert = await prisma.plunkLiteFailure.findFirst({
+      where: {projectId, sourceKey: `workflow:${run.workflow.id}`},
+    });
     expect(alert).not.toBeNull();
   });
 

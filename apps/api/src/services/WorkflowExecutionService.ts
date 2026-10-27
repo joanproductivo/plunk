@@ -140,7 +140,9 @@ export class WorkflowExecutionService {
       // DELAY that was deleted while the run waited: end the delay as it now stands
       const waitingOn = initialExecution.workflow.steps.find(s => s.id === initialExecution.currentStepId);
       if (initialExecution.status === WorkflowExecutionStatus.WAITING && waitingOn?.type === 'DELAY') {
-        signale.warn(`[WORKFLOW] Step ${stepId} after delay ${waitingOn.id} was deleted; ending the delay as it now stands`);
+        signale.warn(
+          `[WORKFLOW] Step ${stepId} after delay ${waitingOn.id} was deleted; ending the delay as it now stands`,
+        );
         return this.processDelayEnd(executionId, waitingOn.id);
       }
       signale.error(`[WORKFLOW] Step ${stepId} not found in workflow ${initialExecution.workflow.id}`);
@@ -707,7 +709,13 @@ export class WorkflowExecutionService {
       select: {id: true, createdAt: true},
     });
     if (sent) {
-      return {emailId: sent.id, sentAt: sent.createdAt, recipientType: recipientConfig.type, recipientEmail, repeated: true};
+      return {
+        emailId: sent.id,
+        sentAt: sent.createdAt,
+        recipientType: recipientConfig.type,
+        recipientEmail,
+        repeated: true,
+      };
     }
 
     const contactData =

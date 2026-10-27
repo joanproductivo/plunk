@@ -1,7 +1,6 @@
 import type {Segment} from '@plunk/db';
 import {segmentEventName} from '@plunk/shared';
 import type {BulkSegmentOperation, SegmentEventKind} from '@plunk/types';
-import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';

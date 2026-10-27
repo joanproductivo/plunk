@@ -169,7 +169,13 @@ describe('EventService', () => {
       });
       const trigger = await prisma.workflowStep.findFirstOrThrow({where: {workflowId: workflow.id, type: 'TRIGGER'}});
       const wait = await prisma.workflowStep.create({
-        data: {workflowId: workflow.id, type: 'WAIT_FOR_EVENT', name: 'Next order', position: {x: 0, y: 0}, config: {eventName: 'order'}},
+        data: {
+          workflowId: workflow.id,
+          type: 'WAIT_FOR_EVENT',
+          name: 'Next order',
+          position: {x: 0, y: 0},
+          config: {eventName: 'order'},
+        },
       });
       await prisma.workflowTransition.create({data: {fromStepId: trigger.id, toStepId: wait.id}});
 

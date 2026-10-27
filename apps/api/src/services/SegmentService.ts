@@ -744,7 +744,9 @@ export class SegmentService {
       data: {memberCount: total},
     });
 
-    signale.info(`[SEGMENT] Computed membership for segment ${segmentId}: added ${added}, removed ${removed}, total ${total}`);
+    signale.info(
+      `[SEGMENT] Computed membership for segment ${segmentId}: added ${added}, removed ${removed}, total ${total}`,
+    );
 
     return {added, removed, total};
   }

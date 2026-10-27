@@ -1269,7 +1269,11 @@ export class ContactService {
     // Plunk Lite: by queue, with progress and retries, rather than a loop nobody waits for that a
     // restart cut short and that ran beside the next batch of the same bulk action
     await QueueService.queueWithoutWaiting(
-      QueueService.queueContactSubscriptionEvents({projectId, eventName: 'contact.subscribed', contactIds: unsubscribedIds}),
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.subscribed',
+        contactIds: unsubscribedIds,
+      }),
       'bulk contact.subscribed events',
     );
 
@@ -1319,7 +1323,11 @@ export class ContactService {
 
     // Plunk Lite: by queue, as for bulkSubscribe
     await QueueService.queueWithoutWaiting(
-      QueueService.queueContactSubscriptionEvents({projectId, eventName: 'contact.unsubscribed', contactIds: subscribedIds}),
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.unsubscribed',
+        contactIds: subscribedIds,
+      }),
       'bulk contact.unsubscribed events',
     );
 

@@ -122,7 +122,10 @@ describe('WorkflowExecutionService - a repeated run of the same steps', () => {
     await prisma.workflowExecution.update({where: {id: execution.id}, data: {status: WorkflowExecutionStatus.RUNNING}});
     await WorkflowExecutionService.processStepExecution(execution.id, condition.id);
 
-    const ran = await prisma.workflowStepExecution.findMany({where: {executionId: execution.id}, select: {stepId: true}});
+    const ran = await prisma.workflowStepExecution.findMany({
+      where: {executionId: execution.id},
+      select: {stepId: true},
+    });
     expect(ran.map(step => step.stepId)).toContain(yes.id);
     expect(ran.map(step => step.stepId)).not.toContain(no.id);
     expect(await emails(execution.id)).toBe(1);
@@ -150,9 +153,9 @@ describe('WorkflowExecutionService - a repeated run of the same steps', () => {
     await route.run();
 
     expect(QueueService.queueWorkflowTimeout).toHaveBeenCalledTimes(1);
-    expect(await prisma.workflowStepExecution.count({where: {executionId: route.executionId, stepId: route.steps[0]}})).toBe(
-      1,
-    );
+    expect(
+      await prisma.workflowStepExecution.count({where: {executionId: route.executionId, stepId: route.steps[0]}}),
+    ).toBe(1);
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
   });
 

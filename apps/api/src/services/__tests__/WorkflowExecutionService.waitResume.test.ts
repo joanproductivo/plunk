@@ -189,7 +189,10 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
 
   it('never resumes a failed run, by its event or its timeout (Plunk Lite)', async () => {
     const run = await createRun();
-    await prisma.workflowExecution.update({where: {id: run.executionId}, data: {status: WorkflowExecutionStatus.FAILED}});
+    await prisma.workflowExecution.update({
+      where: {id: run.executionId},
+      data: {status: WorkflowExecutionStatus.FAILED},
+    });
 
     await ship();
     await run.timeOut();
@@ -250,4 +253,3 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     expect((await run.waitExecution()).status).toBe(StepExecutionStatus.WAITING);
   });
 });
-

@@ -246,4 +246,3 @@ describe('WorkflowExecutionService - a delay with a step after it (Plunk Lite)',
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.COMPLETED);
   });
 });
-
