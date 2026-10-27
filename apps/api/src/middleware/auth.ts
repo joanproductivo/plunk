@@ -140,7 +140,7 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
     if (!PLUNK_LITE_PUBLIC_TRACK) {
       throw new HttpException(
         403,
-        'Public keys are switched off on this server (PLUNK_LITE_PUBLIC_TRACK=off). Use POST /contacts with a secret key.',
+        'Public keys are switched off on this server (PLUNK_LITE_PUBLIC_TRACK=off). Use a secret key: POST /contacts, and POST /events/track for events.',
         ErrorCode.FORBIDDEN,
       );
     }

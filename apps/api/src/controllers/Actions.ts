@@ -12,6 +12,7 @@ import {EmailVerificationService} from '../services/EmailVerificationService.js'
 import {EventService} from '../services/EventService.js';
 import {describeError, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+import {logger} from '../utils/logger.js';
 import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
 
 /**
@@ -370,6 +371,8 @@ export class Actions {
           firstClientError ??= error;
           continue;
         }
+        // A 207 does not carry it to the error handler, so it is logged here
+        logger.error('Unexpected error sending to one recipient of /v1/send', error, {code}, res);
         // Without a known client error the rest would hit the same fault (a database outage) one by one
         firstServerError = error;
         for (const skipped of recipients.slice(index + 1)) {

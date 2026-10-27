@@ -1,5 +1,8 @@
 import {createHash} from 'node:crypto';
 
+/** A UUID in its canonical form, of any version */
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * A name-based UUID (version 5, RFC 9562 section 5.5): the same namespace and name always give
  * the same UUID. Used where a row's id has to be known before it is created, so that creating it

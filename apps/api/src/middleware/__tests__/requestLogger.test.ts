@@ -406,15 +406,16 @@ describe('Request Logger Middleware', () => {
 
     it('skips the 401s of made-up keys on the public API, but not failed logins', async () => {
       expect(await logged('/v1/send', 401)).toBe(false);
+      expect(await logged('/v1/track', 403)).toBe(false);
       expect(await logged('/auth/login', 401)).toBe(true);
       expect(await logged('/v1/send', 200, {type: 'apiKey', projectId})).toBe(true);
     });
 
     it('writes at most 4 rows at once and drops the rest', async () => {
       const pending: (() => void)[] = [];
-      const create = vi.spyOn(appPrisma.apiRequest, 'create').mockImplementation(
-        () => new Promise(resolve => pending.push(() => resolve({} as never))) as never,
-      );
+      const create = vi
+        .spyOn(appPrisma.apiRequest, 'create')
+        .mockImplementation(() => new Promise(resolve => pending.push(() => resolve({} as never))) as never);
 
       for (let i = 0; i < 10; i++) {
         res.json = json;
@@ -448,10 +449,12 @@ describe('Request Logger Middleware', () => {
     it('always writes sign-in requests, even at the cap', async () => {
       const pending: (() => void)[] = [];
       const real = appPrisma.apiRequest.create.bind(appPrisma.apiRequest);
-      const create = vi.spyOn(appPrisma.apiRequest, 'create').mockImplementation(((args: never) =>
-        (args as {data: {path: string}}).data.path === '/auth/login'
-          ? real(args)
-          : new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
+      const create = vi
+        .spyOn(appPrisma.apiRequest, 'create')
+        .mockImplementation(((args: never) =>
+          (args as {data: {path: string}}).data.path === '/auth/login'
+            ? real(args)
+            : new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
 
       for (let i = 0; i < 4; i++) {
         res.json = json;

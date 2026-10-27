@@ -53,7 +53,7 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         'on a verified domain unless the template already sets one.',
         '',
         '**This cannot be undone once sent.** Sending to multiple recipients asks for confirmation first.',
-        'With several recipients, one that fails does not stop the others: the result says which were',
+        'Up to 50 recipients. With several, one that fails does not stop the others: the result says which were',
         'not sent and why. Do not resend to the ones that went out.',
         '',
         '**New recipients:** an address whose domain does not exist, takes no email or is disposable is',
@@ -140,7 +140,7 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         const failed = result?.data?.failed ?? [];
         if (failed.length > 0) {
           const sent = result?.data?.emails?.length ?? 0;
-          const notSent = failed.map((f) => `${f.email} (${f.code}: ${f.message})`).join('; ');
+          const notSent = failed.map(f => `${f.email} (${f.code}: ${f.message})`).join('; ');
           return jsonResult(`Sent to ${sent} of ${recipients.length} recipient(s). Not sent: ${notSent}`, result);
         }
 

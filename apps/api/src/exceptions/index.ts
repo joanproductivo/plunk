@@ -183,5 +183,9 @@ export function describeError(error: unknown): {status: number; code: string; me
           : ErrorCode.BAD_REQUEST;
     return {status: error.code, code: error.errorCode ?? fallback, message: error.message};
   }
-  return {status: 500, code: ErrorCode.INTERNAL_SERVER_ERROR, message: 'An unexpected error occurred'};
+  return {
+    status: 500,
+    code: ErrorCode.INTERNAL_SERVER_ERROR,
+    message: 'An unexpected error occurred; the email may have been queued, so check before sending it again',
+  };
 }
