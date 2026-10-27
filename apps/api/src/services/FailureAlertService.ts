@@ -19,8 +19,8 @@ export interface FailureReport {
    * should hear about: `project` (disabled), `project:reactivated`, `brake:campaign:<id>` and
    * `brake:workflow:<id>` (stopped for their bounces), `security:warning`, `security:critical`,
    * `security:check` (the reputation not being checked), `domain:<id>`, `sns:<what>` (the SES event
-   * pipeline), `ses:<what>` (the SES account: its quota, a pause) and `aws:alarm:<name>`. Each kind
-   * is in SOURCE_KINDS.
+   * pipeline), `ses:<what>` (the SES account: its quota, a pause), `aws:alarm:<name>` and
+   * `aws:alarm-subscription`. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
   /** What the dashboard and the alert call the source, e.g. the workflow's name */
@@ -122,6 +122,11 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
   // A CloudWatch alarm of the AWS account, by its name
   'aws:alarm': {
     name: {en: label => `AWS alarm "${label}"`, es: label => `Alarma de AWS «${label}»`},
+    path: () => SECURITY_PATH,
+  },
+  // The webhook unsubscribed from the alarms' topic
+  'aws:alarm-subscription': {
+    name: {en: label => label, es: () => 'Las alarmas de AWS ya no llegan al panel; sus emails sí'},
     path: () => SECURITY_PATH,
   },
 };

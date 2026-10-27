@@ -15,6 +15,13 @@ export interface AwsAlarm {
   StateChangeTime?: unknown;
 }
 
+/**
+ * The name of the alarms' topic, as the skill that sets an installation up creates it
+ * (plunk-dokploy-ses). A topic renamed is not recognised, and what comes from it is treated as from
+ * any topic: reported, the side that tells.
+ */
+export const ALARMS_TOPIC_NAME = 'plunk-alarmas';
+
 // The latest state change applied, per alarm, as milliseconds since the epoch
 const LATEST_KEY = (alarmName: string) => `plunk-lite:alarm:${alarmName}`;
 // Far longer than SNS keeps retrying a notification
@@ -54,6 +61,27 @@ export class AwsAlarmService {
       !('mail' in fields) &&
       typeof fields.AWSAccountId === 'string' &&
       fields.AWSAccountId === snsTopicAccountId(topicArn)
+    );
+  }
+
+  /** Whether a topic is the alarms' one, by the last part of its ARN */
+  public static isAlarmsTopic(topicArn: unknown): boolean {
+    return typeof topicArn === 'string' && topicArn.split(':').pop() === ALARMS_TOPIC_NAME;
+  }
+
+  /**
+   * The webhook's subscription to the alarms' topic was removed: the alarms no longer reach the
+   * dashboard, while AWS still emails them. Shown in every project, disabled ones included.
+   */
+  public static async reportSubscriptionRemoved(topic: string): Promise<void> {
+    signale.warn(`[ALARMS] SNS subscription to ${topic} was removed`);
+    await FailureAlertService.recordForAll(
+      {
+        sourceKey: 'aws:alarm-subscription',
+        label: 'AWS alarms no longer reach the dashboard; their emails still do',
+        error: `This server was unsubscribed from ${topic}: the AWS account's alarms no longer show here, though AWS still emails them. Subscribe the webhook to it again.`,
+      },
+      {includeDisabled: true, alert: false},
     );
   }
 

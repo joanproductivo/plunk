@@ -8,6 +8,7 @@ import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {SES_EVENT_TRANSACTION, utcTimestamp} from '../utils/database.js';
 
+import {AwsAlarmService} from './AwsAlarmService.js';
 import {CampaignService} from './CampaignService.js';
 import {recipientAddress} from './EmailHeaderService.js';
 import {FailureAlertService} from './FailureAlertService.js';
@@ -83,6 +84,31 @@ export function readSesNotification(body: unknown): SesNotification {
   return {kind: 'event', eventType: type as SesEventType, mail: parsed.data.mail};
 }
 
+/** What SES publishes, as plain text, to a topic it is given as an event destination */
+const SES_TOPIC_TEST = /^Successfully validated SNS topic/i;
+// How much of a message that is not JSON the log shows
+const NOT_JSON_SHOWN = 200;
+
+/**
+ * A notification whose message is not JSON, from one of the installation's topics. SES's own test
+ * of a new event destination and anything on the alarms' topic are only logged; anything else is
+ * reported as unreadable. True when it was not.
+ */
+export async function readNotJson(message: unknown, topicArn: unknown): Promise<boolean> {
+  const text = String(message).slice(0, NOT_JSON_SHOWN);
+  if (SES_TOPIC_TEST.test(text)) {
+    signale.info(`[WEBHOOK] SES tested its topic: ${text}`);
+    return true;
+  }
+  if (AwsAlarmService.isAlarmsTopic(topicArn)) {
+    signale.warn(`[WEBHOOK] Ignoring a message of the alarms' topic that is not JSON: ${text}`);
+    return true;
+  }
+  signale.warn(`[WEBHOOK] SNS message that is not JSON, from ${String(topicArn)}: ${text}`);
+  await reportUnreadable('the message is not JSON');
+  return false;
+}
+
 /**
  * A notification from this installation's own topic, with a valid signature, that cannot be read.
  * Delivering it again would not change it, so it is acknowledged; every project hears about it,
@@ -99,9 +125,14 @@ export async function reportUnreadable(reason: string): Promise<void> {
 
 /**
  * This endpoint's subscription to one of the installation's topics was removed: no SES event will
- * arrive from it again, and nothing else would show it, so every project hears about it.
+ * arrive from it again, and nothing else would show it, so every project hears about it. The
+ * alarms' topic only takes the alarms off the dashboard (AwsAlarmService).
  */
 export async function reportSubscriptionRemoved(topic: string): Promise<void> {
+  if (AwsAlarmService.isAlarmsTopic(topic)) {
+    await AwsAlarmService.reportSubscriptionRemoved(topic);
+    return;
+  }
   signale.error(`[WEBHOOK] SNS subscription to ${topic} was removed`);
   await FailureAlertService.recordForAll({
     sourceKey: 'sns:subscription',

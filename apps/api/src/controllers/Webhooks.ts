@@ -40,6 +40,7 @@ import {
   matchEmail,
   noteSnsRejection,
   parseSnsMessage,
+  readNotJson,
   readSesNotification,
   recordReject,
   reportSubscriptionRemoved,
@@ -227,8 +228,8 @@ export class Webhooks {
       // Parse the nested SES event from the Message field
       const body = parseSnsMessage(req.body.Message);
       if (body === undefined) {
-        await reportUnreadable('the message is not JSON');
-        return res.status(200).json({success: false, message: 'Unreadable message'});
+        const read = await readNotJson(req.body.Message, req.body.TopicArn);
+        return res.status(200).json(read ? {success: true} : {success: false, message: 'Unreadable message'});
       }
 
       // The account's CloudWatch alarms come through the same webhook

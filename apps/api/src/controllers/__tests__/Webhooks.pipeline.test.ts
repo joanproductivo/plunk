@@ -81,6 +81,17 @@ describe('Webhooks - SES event pipeline', () => {
       expect(recorded.map(failure => failure.projectId)).toEqual([projectId]);
     });
 
+    it('acknowledges the test message SES publishes to a new event destination, telling no one', async () => {
+      const captured = await postSns({
+        Type: 'Notification',
+        TopicArn: OWN_TOPIC,
+        Message: 'Successfully validated SNS topic for Amazon SES event publishing.',
+      });
+
+      expect(captured.status).toBe(200);
+      expect(await failures('sns:invalid')).toEqual([]);
+    });
+
     it('acknowledges a handled type without a message id, and tells the projects', async () => {
       const captured = await post({eventType: 'Bounce', mail: {}, bounce: {bounceType: 'Permanent'}});
 
