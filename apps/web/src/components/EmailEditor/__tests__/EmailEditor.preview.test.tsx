@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import {joinEmailMarkers, textToPreheader} from '@plunk/shared';
 import {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {SWRConfig} from 'swr';
@@ -33,11 +34,11 @@ let root: Root;
 let container: HTMLDivElement;
 const changes = vi.fn<(value: string) => void>();
 
-async function render(subject: string) {
+async function render(subject: string, value = '<p>Hello</p>') {
   await act(async () => {
     root.render(
       <SWRConfig value={{fetcher: () => Promise.resolve(null), provider: () => new Map(), dedupingInterval: 0}}>
-        <EmailEditor value="<p>Hello</p>" onChange={changes} subject={subject} from="hi@example.com" fillHeight />
+        <EmailEditor value={value} onChange={changes} subject={subject} from="hi@example.com" fillHeight />
       </SWRConfig>,
     );
   });
@@ -89,10 +90,13 @@ describe('Preview tab', () => {
     expect(changes).not.toHaveBeenCalled();
   });
 
-  it('runs no scripts from the email', async () => {
+  it('runs no scripts from the email, and still opens its links', async () => {
     await render('Hi');
     await click('Preview');
-    expect(iframe()?.getAttribute('sandbox')).toBe('allow-same-origin');
+    const sandbox = iframe()?.getAttribute('sandbox')?.split(' ') ?? [];
+    expect(sandbox).toContain('allow-same-origin');
+    expect(sandbox).toContain('allow-popups');
+    expect(sandbox).not.toContain('allow-scripts');
   });
 
   it('renders the first contact by default', async () => {
@@ -108,9 +112,21 @@ describe('Preview tab', () => {
     expect(subjectShown()?.textContent).toBe('For friend');
   });
 
-  it("shows a template that doesn't parse as written", async () => {
-    await render('For {% if name %}');
+  it("keeps previewing a template that doesn't parse yet, with its plain variables", async () => {
+    await render('For {{name}} {% if name %}');
     await click('Preview');
-    expect(subjectShown()?.textContent).toBe('For {% if name %}');
+    expect(subjectShown()?.textContent).toBe('For Ana {% if name %}');
+  });
+
+  it('shows the preview text as typed, not as stored', async () => {
+    await render(
+      'Hi',
+      joinEmailMarkers({preheader: textToPreheader('Tom & "Jerry"'), brand: null, body: '<p>Hello</p>'}),
+    );
+    await click('Preview');
+    const shown = [...container.querySelectorAll('p')].find(
+      p => p.previousElementSibling?.textContent === 'Preview text',
+    );
+    expect(shown?.textContent).toBe('Tom & "Jerry"');
   });
 });
