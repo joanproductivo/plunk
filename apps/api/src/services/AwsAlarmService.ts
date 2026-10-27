@@ -20,13 +20,16 @@ const LATEST_KEY = (alarmName: string) => `plunk-lite:alarm:${alarmName}`;
 // Far longer than SNS keeps retrying a notification
 const LATEST_SECONDS = 30 * 86400;
 
-// Moves the latest state change forward only: an older one arriving late leaves it as it is
+// Moves the latest state change forward only, and says whether it did: 1 for a newer one, 0 for one
+// that is not, arriving late or again. Compared and set at once, so of two notifications handled
+// together only the newer one is applied.
 const RAISE_LATEST = `
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
 if tonumber(ARGV[1]) > current then
   redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  return 1
 end
-return 1`;
+return 0`;
 
 /**
  * Plunk Lite: the AWS account's CloudWatch alarms (bounce and complaint rates, the dead-letter queue
@@ -66,7 +69,7 @@ export class AwsAlarmService {
     }
 
     const changedAt = Date.parse(typeof alarm.StateChangeTime === 'string' ? alarm.StateChangeTime : '');
-    if (Number.isFinite(changedAt) && !(await this.isLatest(alarm.AlarmName, changedAt))) {
+    if (Number.isFinite(changedAt) && !(await this.claimLatest(alarm.AlarmName, changedAt))) {
       signale.info(`[ALARMS] Ignoring an older state change of ${alarm.AlarmName}`);
       return;
     }
@@ -90,24 +93,25 @@ export class AwsAlarmService {
       signale.info(`[ALARMS] ${alarm.AlarmName} is back to OK`);
       await FailureAlertService.resolve(sourceKey);
     }
-
-    if (Number.isFinite(changedAt)) {
-      await redis
-        .eval(RAISE_LATEST, 1, LATEST_KEY(alarm.AlarmName), String(changedAt), String(LATEST_SECONDS))
-        .catch((error: unknown) => signale.warn(`[ALARMS] Could not keep the state of ${alarm.AlarmName}:`, error));
-    }
   }
 
   /**
-   * Whether a state change is newer than the last one applied. If Redis cannot say, it is applied:
-   * showing a state that may be stale beats missing an alarm.
+   * Whether a state change is newer than the last one applied, keeping it as the latest if it is,
+   * before it is applied. If Redis cannot say, it is applied: showing a state that may be stale
+   * beats missing an alarm.
    */
-  private static async isLatest(alarmName: string, changedAt: number): Promise<boolean> {
+  private static async claimLatest(alarmName: string, changedAt: number): Promise<boolean> {
     try {
-      const latest = Number((await redis.get(LATEST_KEY(alarmName))) ?? 0);
-      return changedAt > latest;
+      const raised = await redis.eval(
+        RAISE_LATEST,
+        1,
+        LATEST_KEY(alarmName),
+        String(changedAt),
+        String(LATEST_SECONDS),
+      );
+      return raised === 1;
     } catch (error) {
-      signale.warn(`[ALARMS] Could not read the last state change of ${alarmName}:`, error);
+      signale.warn(`[ALARMS] Could not compare the state change of ${alarmName} with the last one:`, error);
       return true;
     }
   }

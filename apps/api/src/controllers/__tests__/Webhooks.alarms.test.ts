@@ -96,6 +96,14 @@ describe('Webhooks - CloudWatch alarms', () => {
     expect(await openAlarms()).toEqual([]);
   });
 
+  it('applies once a state change whose copies arrive together', async () => {
+    const changedAt = new Date();
+
+    await Promise.all([alarm('ALARM', changedAt), alarm('ALARM', changedAt), alarm('ALARM', changedAt)]);
+
+    expect(await openAlarms()).toMatchObject([{count: 1}]);
+  });
+
   it('changes nothing for INSUFFICIENT_DATA', async () => {
     await alarm('ALARM', new Date());
 
