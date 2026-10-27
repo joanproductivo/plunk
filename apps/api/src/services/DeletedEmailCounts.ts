@@ -13,9 +13,11 @@ import {utcTimestamp} from '../utils/database.js';
  * project's rates add those up (ReputationPolicy.rates). The brakes of a campaign or a workflow do
  * not: a deleted email no longer says which one sent it.
  *
- * The column that holds the minute is still called "hour": counts were kept by the hour at first,
- * and their rows stay valid as the minute :00. Renaming it would break the image before this one,
- * which is what a rollback deploys.
+ * The column that holds the minute is still called "hour": counts were kept by the hour at first.
+ * Renaming it would break the image before this one, which is what a rollback deploys. Those rows
+ * read as the minute :00 of their hour, so a window that starts later in that hour leaves them out,
+ * though some of their emails were created inside it: it counts less, by at most that hour's
+ * deletes, and only until the rows kept by the hour are older than the window.
  */
 
 /**

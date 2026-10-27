@@ -967,8 +967,9 @@ model PlunkLiteSuppression {
 /// project deletes its rows explicitly.
 model PlunkLiteDeletedEmailCount {
   projectId  String
-  /// The start of the minute the emails were created in, which is what the rates window by; at
-  /// first, of the hour, whose rows still count as the minute :00
+  /// The start of the minute the emails were created in, which is what the rates window by. At
+  /// first, of the hour: those rows read as the minute :00, and a window that starts later in their
+  /// hour leaves them out (see DeletedEmailCounts)
   hour       DateTime
   sent       Int      @default(0)
   bounced    Int      @default(0)
