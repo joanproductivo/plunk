@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
+import {ALARMS_TOPIC_NAME} from '../../services/AwsAlarmService';
 import {FailureAlertService} from '../../services/FailureAlertService';
 import {getAwsAccountId, sendRawEmail} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
@@ -14,7 +15,7 @@ vi.mock('../../services/SESService', async importOriginal => ({
   sendRawEmail: vi.fn(async () => ({messageId: 'alert-message-id'})),
 }));
 
-const ALARMS_TOPIC = 'arn:aws:sns:eu-north-1:111111111111:plunk-alarmas';
+const ALARMS_TOPIC = `arn:aws:sns:eu-north-1:111111111111:${ALARMS_TOPIC_NAME}`;
 
 /**
  * The AWS account's CloudWatch alarms, delivered by their own topic to the SES webhook, shown on

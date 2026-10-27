@@ -23,7 +23,8 @@ import {SourceBrakeService} from './SourceBrakeService.js';
  */
 const PENDING_KEY = (projectId: string) => `plunk-lite:security:pending-z:${projectId}`;
 const PENDING_SEQ_KEY = (projectId: string) => `plunk-lite:security:pending-seq:${projectId}`;
-// The plain set the items were kept in before, merged into the sorted one by the next check
+// The plain set the items were kept in before, merged into the sorted one by the next check. A
+// day after this is deployed none is left (PENDING_SECONDS), and this can go.
 const LEGACY_PENDING_KEY = (projectId: string) => `plunk-lite:security:pending:${projectId}`;
 // A check runs within seconds; this only bounds a set no check ever takes
 const PENDING_SECONDS = 86400;

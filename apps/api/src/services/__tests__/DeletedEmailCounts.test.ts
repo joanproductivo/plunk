@@ -1,3 +1,5 @@
+import {randomUUID} from 'node:crypto';
+
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
@@ -22,12 +24,16 @@ describe('DeletedEmailCounts', () => {
     projectId = project.id;
   });
 
-  /** An email as the send path and the webhook leave it; sent unless `unsent` */
+  /**
+   * An email as the send path and the webhook leave it; sent unless `unsent`, or taken by SES with
+   * its message id but failed before it was marked sent (`failed`)
+   */
   const email = (
     contactId: string,
     options: {
       ago?: number;
       unsent?: boolean;
+      failed?: boolean;
       bounced?: boolean;
       complained?: boolean;
       simulated?: boolean;
@@ -46,8 +52,9 @@ describe('DeletedEmailCounts', () => {
         sourceType: options.campaignId ? 'CAMPAIGN' : options.workflowExecutionId ? 'WORKFLOW' : 'TRANSACTIONAL',
         campaignId: options.campaignId,
         workflowExecutionId: options.workflowExecutionId,
-        status: options.unsent ? EmailStatus.PENDING : EmailStatus.SENT,
-        sentAt: options.unsent ? null : createdAt,
+        status: options.unsent ? EmailStatus.PENDING : options.failed ? EmailStatus.FAILED : EmailStatus.SENT,
+        sentAt: options.unsent || options.failed ? null : createdAt,
+        messageId: options.failed ? `ses-${randomUUID()}` : null,
         bouncedAt: options.bounced ? createdAt : null,
         complainedAt: options.complained ? createdAt : null,
         simulated: options.simulated ?? false,
@@ -93,19 +100,7 @@ describe('DeletedEmailCounts', () => {
     const contact = await factories.createContact({projectId});
     await email(contact.id);
     // SES took it and gave it its message id, then the send failed before stamping sentAt
-    await prisma.email.create({
-      data: {
-        projectId,
-        contactId: contact.id,
-        subject: 'Hi',
-        body: '<p>Hi</p>',
-        from: 'hello@plunk.test',
-        sourceType: 'TRANSACTIONAL',
-        status: EmailStatus.FAILED,
-        messageId: `ses-${contact.id}`,
-        bouncedAt: new Date(),
-      },
-    });
+    await email(contact.id, {failed: true, bounced: true});
     // Neither sent nor taken by SES: not counted
     await email(contact.id, {unsent: true});
 
