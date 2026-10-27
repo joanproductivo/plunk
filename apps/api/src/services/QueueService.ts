@@ -312,8 +312,9 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
 });
 
 /**
- * Static segment entry/exit events fired outside the request that changed the membership, and
- * (Plunk Lite) the subscription events of bulk subscription changes.
+ * Segment entry/exit events fired outside the request that changed the membership (static, or
+ * Plunk Lite: a dynamic segment recomputed from the dashboard), and (Plunk Lite) the subscription
+ * events of bulk subscription changes.
  * Retries are safe: the worker records how far it got and resumes from there.
  */
 export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('segment-membership-events', {
@@ -347,7 +348,8 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
 
 /**
  * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
- * for a burst of them, and whether SES events reach the webhook. Each job says how it is retried.
+ * for a burst of them, whether SES events reach the webhook, Redis memory, and the workflow runs a
+ * restart left RUNNING. Each job says how it is retried.
  */
 export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
   connection: redisConnection,
@@ -682,15 +684,19 @@ export class QueueService {
   }
 
   /**
-   * Queue the entry/exit events of a static segment membership change. The job ID is set here so
+   * Queue the entry/exit events of a segment membership change. The job ID is set here so
    * a command the Redis client resends after a dropped connection cannot add the job twice.
    */
   public static async queueSegmentMembershipEvents(
     data: SegmentMembershipEventsJobData,
   ): Promise<Job<MembershipEventsJobData>> {
-    return segmentMembershipEventsQueue.add('track-segment-membership-events', data, {
-      jobId: `segment-events-${crypto.randomUUID()}`,
-    });
+    return segmentMembershipEventsQueue.add(
+      'track-segment-membership-events',
+      {...data, type: 'segment-membership'},
+      {
+        jobId: `segment-events-${crypto.randomUUID()}`,
+      },
+    );
   }
 
   /**

@@ -1,15 +1,12 @@
 /**
  * Segment Membership Events Worker
- * Fires the entry/exit events of static segment membership changes made over HTTP, and (Plunk
- * Lite) the subscription events of bulk subscription changes, in one ordered queue
+ * Fires the entry/exit events of segment membership changes made over HTTP (static, or Plunk Lite:
+ * a dynamic segment recomputed from the dashboard), and (Plunk Lite) the subscription events of
+ * bulk subscription changes, in one ordered queue
  */
 
 import {segmentEventName} from '@plunk/shared';
-import type {
-  ContactSubscriptionEventsJobData,
-  MembershipEventsJobData,
-  SegmentMembershipEventsJobData,
-} from '@plunk/types';
+import type {MembershipEventsJobData} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
@@ -33,7 +30,7 @@ export async function processSegmentMembershipEvents(job: Job<MembershipEventsJo
 
   // Plunk Lite: the events of a bulk subscription change, with the same progress
   if (job.data.type === 'contact-subscription') {
-    const {projectId, eventName, contactIds} = job.data as ContactSubscriptionEventsJobData;
+    const {projectId, eventName, contactIds} = job.data;
     await EventService.trackEventsSequentially(projectId, eventName, contactIds.slice(start), undefined, {
       onTracked: async done => job.updateProgress(start + done),
     });
@@ -41,7 +38,7 @@ export async function processSegmentMembershipEvents(job: Job<MembershipEventsJo
   }
 
   // A segment's, also the ones queued before the queue carried a type
-  const {projectId, segmentId, segmentName, kind, contactIds} = job.data as SegmentMembershipEventsJobData;
+  const {projectId, segmentId, segmentName, kind, contactIds} = job.data;
 
   const segment = await prisma.segment.findFirst({
     where: {id: segmentId, projectId},
