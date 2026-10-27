@@ -156,7 +156,7 @@ describe('POST /users/@me/projects/:id/reactivate', () => {
     // Only the grace period's key: a cache write that fails is not fatal (wrapRedis)
     const set = redis.set.bind(redis);
     vi.spyOn(redis, 'set').mockImplementation(((key: string, ...rest: unknown[]) =>
-      key.startsWith('plunk-lite:reactivated:')
+      key === graceKey()
         ? Promise.reject(new Error('Redis down'))
         : (set as (...args: unknown[]) => Promise<unknown>)(key, ...rest)) as typeof redis.set);
 

@@ -10,7 +10,14 @@ describe('API request cleanup', () => {
 
   it('deletes the old rows batch by batch and keeps the recent ones', async () => {
     const old = new Date(Date.now() - 40 * 24 * 3600 * 1000);
-    const row = (createdAt?: Date) => ({id: crypto.randomUUID(), method: 'GET', path: '/x', statusCode: 200, duration: 1, createdAt});
+    const row = (createdAt?: Date) => ({
+      id: crypto.randomUUID(),
+      method: 'GET',
+      path: '/x',
+      statusCode: 200,
+      duration: 1,
+      createdAt,
+    });
     await prisma.apiRequest.createMany({data: Array.from({length: 25}, () => row(old))});
     await prisma.apiRequest.createMany({data: Array.from({length: 3}, () => row())});
 

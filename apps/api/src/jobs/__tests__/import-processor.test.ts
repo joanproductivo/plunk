@@ -1,12 +1,11 @@
 import type {ContactImportJobData} from '@plunk/types';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createMockJob, factories, getPrismaClient} from '../../../../../test/helpers';
-import {ContactService} from '../../services/ContactService.js';
+import {CONTACT_FIELDS_MAX, ContactService} from '../../services/ContactService.js';
 import {SegmentService} from '../../services/SegmentService.js';
 import {coerceCustomValue, importCustomData, importFieldKey, parseImportCsv, splitImportRecord} from '../import-csv.js';
 import {dropFinishedCsv, processContactImport} from '../import-processor.js';
 import {importQueue, QueueService} from '../../services/QueueService.js';
-import {CONTACT_FIELDS_MAX} from '../../services/ContactService.js';
 
 /**
  * Tests for Contact Import Processor - Subscription Status Preservation

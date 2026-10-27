@@ -25,7 +25,10 @@ describe('isFailureNotice', () => {
     expect(isFailureNotice(sourceKey)).toBe(true);
   });
 
-  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx', 'sesx', 'redisx'])('reads %s as a failure', sourceKey => {
-    expect(isFailureNotice(sourceKey)).toBe(false);
-  });
+  it.each(['workflow:abc', 'campaign:abc', 'transactional', 'projects', 'snsx', 'sesx', 'redisx'])(
+    'reads %s as a failure',
+    sourceKey => {
+      expect(isFailureNotice(sourceKey)).toBe(false);
+    },
+  );
 });
