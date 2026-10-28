@@ -284,6 +284,24 @@ describe('Webhooks - the unsubscribe a bounce or complaint causes', () => {
       });
     });
 
+    it('does not take off more than the bounces counted so far while the sweep is half done', async () => {
+      const other = await factories.createContact({projectId, subscribed: true});
+      await sentEmail('ses-unsub-campaign-swept', campaignId);
+      await sentEmail('ses-unsub-campaign-unswept', campaignId, other.id);
+      const permanent = {bounce: {bounceType: 'Permanent'}};
+
+      await post(notification('Bounce', 'ses-unsub-campaign-swept', permanent));
+      await CampaignService.sweepDirtyStats(10);
+      await post(notification('Bounce', 'ses-unsub-campaign-unswept', permanent));
+
+      // Both emails carry a bounce and an unsubscribe, but the counters hold one bounce so far
+      expect(await CampaignService.getStats(projectId, campaignId)).toMatchObject({
+        bouncedCount: 1,
+        unsubscribedCount: 2,
+        lostCount: 2,
+      });
+    });
+
     it('counts every unsubscribe of a burst of bounces of the campaign', async () => {
       const recipients = await Promise.all(
         Array.from({length: 6}, async (_, index) => {
@@ -403,6 +421,51 @@ describe('Webhooks - the unsubscribe a bounce or complaint causes', () => {
       ).rejects.toBe(failure);
 
       expect(await unsubscribes()).toMatchObject([{emailId: email.id, data: {reason: 'bounce'}}]);
+    });
+
+    it('tracks the unsubscribe without its email when the email is gone by then', async () => {
+      const email = await sentEmail('ses-unsub-gone');
+      await prisma.email.delete({where: {id: email.id}});
+
+      await expect(
+        processEventTracking({
+          id: 'sns-gone',
+          data: {
+            projectId,
+            eventName: 'email.bounce',
+            contactId,
+            emailId: email.id,
+            data: {},
+            followUp: {eventName: 'contact.unsubscribed', data: {reason: 'bounce'}},
+          },
+        } as Job<EventTrackingJobData>),
+      ).rejects.toThrow();
+
+      // The bounce of an email that is gone cannot be tracked; the unsubscribe can, and is
+      expect(await unsubscribes()).toMatchObject([{emailId: null, data: {reason: 'bounce'}}]);
+    });
+
+    it('does not track the unsubscribe twice when it fails for another reason', async () => {
+      const email = await sentEmail('ses-unsub-other-failure');
+      const failure = new Error('workflow went wrong');
+      const track = vi.spyOn(EventService, 'trackEvent');
+      track.mockResolvedValueOnce({} as never).mockRejectedValueOnce(failure);
+
+      await expect(
+        processEventTracking({
+          id: 'sns-other-failure',
+          data: {
+            projectId,
+            eventName: 'email.bounce',
+            contactId,
+            emailId: email.id,
+            data: {},
+            followUp: {eventName: 'contact.unsubscribed', data: {reason: 'bounce'}},
+          },
+        } as Job<EventTrackingJobData>),
+      ).rejects.toBe(failure);
+
+      expect(track).toHaveBeenCalledTimes(2);
     });
   });
 });

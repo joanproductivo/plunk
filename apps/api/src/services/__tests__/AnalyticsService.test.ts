@@ -211,6 +211,14 @@ describe('AnalyticsService - unsubscribes a bounce or complaint caused', () => {
     expect(totals).toMatchObject({unsubscribed: 2, suppressed: 1, lost: 2});
   });
 
+  it('counts among the contacts lost one who bounced after unsubscribing, and so was not unsubscribed again', async () => {
+    await sentWith([{name: 'email.bounce', data: {bounceType: 'Permanent'}}]);
+
+    const {totals} = await AnalyticsService.getAudience(query());
+
+    expect(totals).toMatchObject({unsubscribed: 2, suppressed: 2, lost: 3});
+  });
+
   it('counts a complaint of no stored email, which tracks only the unsubscribe, under both', async () => {
     const contact = await factories.createContact({projectId});
     await prisma.event.create({

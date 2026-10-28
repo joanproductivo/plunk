@@ -214,7 +214,10 @@ export function audienceBalance(p: Omit<AnalyticsAudiencePoint, 'bucket'>) {
     net: p.newContacts - p.lost,
     /** Unsubscribed without a bounce or complaint: the bar stacked on top of the suppressed one */
     unsubscribedOnly: p.lost - p.suppressed,
-    /** Counted under both figures */
+    /**
+     * Counted under both figures: unsubscribed by a bounce or complaint, but also an opt-out and a
+     * spam report, or a snooze and a bounce, in the same bucket
+     */
     inBoth: p.unsubscribed + p.suppressed - p.lost,
   };
 }

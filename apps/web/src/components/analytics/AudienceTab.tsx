@@ -151,7 +151,7 @@ function GrowthChart({data}: {data: AnalyticsAudience}) {
                     ))}
                     {row.inBoth > 0 && (
                       <div className="flex items-center justify-between gap-4 text-neutral-500">
-                        <dt>Unsubscribed by a bounce or spam report</dt>
+                        <dt>Unsubscribed and bounced or reported spam</dt>
                         <dd className="tabular-nums">{formatCount(row.inBoth)}</dd>
                       </div>
                     )}
