@@ -103,7 +103,7 @@ export function safeToRetrySend(error: unknown): boolean {
 }
 
 /** Plunk Lite: what a refusal from SES calls for */
-export type SesRefusal = 'rate' | 'daily-quota' | 'account-paused' | 'config-set' | 'rejected' | 'other';
+type SesRefusal = 'rate' | 'daily-quota' | 'account-paused' | 'config-set' | 'rejected' | 'other';
 
 /**
  * How SES words a pause of the whole account. A pause AWS imposes for reputation may come as a
@@ -574,10 +574,6 @@ export const verifyConfigurationSets = async (): Promise<string[] | undefined> =
 };
 
 /**
- * Get AWS SES account sending quota and rate limit
- * @returns MaxSendRate (emails per second) or null if the call fails
- */
-/**
  * Plunk Lite: the account's 24-hour quota and what it has sent, for a campaign about to start: at
  * most 3 seconds, without the SDK's retries, and null when SES does not answer or leaves a figure out
  * (rather than the sandbox's figure getSendingQuota assumes). A negative maximum means no limit.
@@ -597,6 +593,10 @@ export async function getDailyQuotaQuick(): Promise<{max24HourSend: number; sent
   }
 }
 
+/**
+ * Get AWS SES account sending quota and rate limit
+ * @returns MaxSendRate (emails per second) or null if the call fails
+ */
 export const getSendingQuota = async (): Promise<{
   maxSendRate: number;
   max24HourSend: number;

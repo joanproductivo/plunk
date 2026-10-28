@@ -239,8 +239,8 @@ export class WorkflowExecutionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Pass up untouched an error a later step of this run already handled. An error of this step
-      // itself is always handled (Plunk Lite: another run it resumes through an event keeps its own
-      // failure, see handleEvent).
+      // itself is handled here (Plunk Lite: unless the step already waits or ended, below; another
+      // run it resumes through an event keeps its own failure, see handleEvent).
       const isObject = typeof error === 'object' && error !== null;
       if (stepCompleted && isObject && handledFailures.has(error)) {
         throw error;
