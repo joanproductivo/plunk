@@ -2,9 +2,6 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 const getCallerIdentity = vi.fn();
 
-// Plunk Lite: the real module, reloaded fresh by each test, rather than the test setup's stand-in
-vi.unmock('../SESService');
-
 vi.mock('@aws-sdk/client-sts', () => ({
   STS: class {
     getCallerIdentity = getCallerIdentity;

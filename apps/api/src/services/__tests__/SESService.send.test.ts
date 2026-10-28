@@ -187,6 +187,29 @@ describe('sendRawEmail against an SES endpoint', () => {
 
     expect(service.safeToRetrySend(error)).toBe(true);
   });
+
+  it('reads the 24-hour quota quickly, and gives null without an answer or without a figure', async () => {
+    const quota = (body: string) => (res: http.ServerResponse) => {
+      res.writeHead(200, {'Content-Type': 'text/xml'});
+      res.end(
+        '<GetSendQuotaResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><GetSendQuotaResult>' +
+          body +
+          '</GetSendQuotaResult><ResponseMetadata><RequestId>r-q</RequestId></ResponseMetadata></GetSendQuotaResponse>',
+      );
+    };
+    const service = await sesServiceAt(local());
+
+    respond = quota(
+      '<Max24HourSend>50000.0</Max24HourSend><SentLast24Hours>120.0</SentLast24Hours><MaxSendRate>14.0</MaxSendRate>',
+    );
+    expect(await service.getDailyQuotaQuick()).toEqual({max24HourSend: 50_000, sentLast24Hours: 120});
+
+    respond = quota('<MaxSendRate>14.0</MaxSendRate>');
+    expect(await service.getDailyQuotaQuick()).toBeNull();
+
+    // The test setup's endpoint, where nothing listens
+    expect(await (await sesServiceAt('http://127.0.0.1:1')).getDailyQuotaQuick()).toBeNull();
+  });
 });
 
 describe('safeToRetrySend', () => {
