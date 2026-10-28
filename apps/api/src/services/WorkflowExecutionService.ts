@@ -157,17 +157,9 @@ export class WorkflowExecutionService {
       select: {status: true, output: true},
     });
     if (previous) {
-      // A wait set up by the order of writes from before they were one transaction, cut before the
-      // run was marked: the run waits there
-      if (previous.status === StepExecutionStatus.WAITING) {
-        await prisma.workflowExecution.updateMany({
-          where: {id: executionId, status: WorkflowExecutionStatus.RUNNING},
-          data: {status: WorkflowExecutionStatus.WAITING, currentStepId: stepId},
-        });
-        return;
-      }
-      // A delay or wait already done: the run either waits there (marked with the step, in one
-      // transaction) or was moved on by whoever ended it -- a copy of a job must not pull it back
+      // A delay or wait already set up or done: the run either waits there (marked with the step,
+      // in one transaction) or was moved on by whoever ended it -- a copy of a job must not pull it
+      // back, nor set the wait up twice
       if (step.type === 'DELAY' || step.type === 'WAIT_FOR_EVENT') {
         return;
       }
@@ -260,12 +252,26 @@ export class WorkflowExecutionService {
       signale.error(`[WORKFLOW] Error executing step ${step.id}:`, error);
       // Mark step as failed, unless it completed: then moving on from it is what failed, and the
       // step keeps its result with the error
-      await prisma.workflowStepExecution.update({
-        where: {id: stepExecution.id},
-        data: stepCompleted
-          ? {error: message}
-          : {status: StepExecutionStatus.FAILED, completedAt: new Date(), error: message},
-      });
+      if (stepCompleted) {
+        await prisma.workflowStepExecution.update({where: {id: stepExecution.id}, data: {error: message}});
+      } else {
+        // Plunk Lite: only a step still in progress. One that reached its wait, or that an event or
+        // a timeout completed meanwhile, is left as it is with its run: what failed after it was set
+        // up (queueing its timer) the recovery sweep makes up for, and the run may be moving on
+        const {count} = await prisma.workflowStepExecution.updateMany({
+          where: {
+            id: stepExecution.id,
+            status: {in: [StepExecutionStatus.PENDING, StepExecutionStatus.RUNNING]},
+          },
+          data: {status: StepExecutionStatus.FAILED, completedAt: new Date(), error: message},
+        });
+        if (count === 0) {
+          signale.warn(
+            `[WORKFLOW] Step ${step.id} of execution ${executionId} already waits or ended; leaving its run as it is`,
+          );
+          throw error;
+        }
+      }
 
       // Mark workflow execution as failed (Plunk Lite: unless it was stopped meanwhile -- a run the
       // brake cancelled stays cancelled, one the sweep failed is not alerted twice)
@@ -323,7 +329,7 @@ export class WorkflowExecutionService {
     // Mark step as completed with timeout, unless the event claimed the wait since it was read.
     // Plunk Lite: the execution is claimed with it, as RUNNING, so a failure or a restart from here
     // on leaves a running run the recovery sweep sees, not a waiting one with its wait used up
-    const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, {
+    const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, stepExecution.stepId, {
       timedOut: true,
       eventName:
         stepExecution.step.config &&
@@ -543,7 +549,7 @@ export class WorkflowExecutionService {
         // step out of WAITING resumes it; everyone else leaves it alone.
         // Plunk Lite: the execution is claimed with it, as RUNNING, so a failure or a restart from
         // here on leaves a running run the recovery sweep sees, not a waiting one with its wait used up
-        const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, {
+        const claimed = await this.claimWait(stepExecution.id, stepExecution.executionId, stepExecution.stepId, {
           eventName,
           eventData: data ? toPrismaJson(data) : undefined,
           receivedAt: new Date().toISOString(),
@@ -1529,6 +1535,7 @@ export class WorkflowExecutionService {
   private static async claimWait(
     stepExecutionId: string,
     executionId: string,
+    stepId: string,
     output: Record<string, unknown>,
   ): Promise<boolean> {
     try {
@@ -1540,8 +1547,10 @@ export class WorkflowExecutionService {
         if (step.count === 0) {
           return false;
         }
+        // Only while the run still waits on this very step, like a delay's end: a wait it left
+        // behind (an old one still WAITING) must not pull it out of the one it is on now
         const run = await tx.workflowExecution.updateMany({
-          where: {id: executionId, status: WorkflowExecutionStatus.WAITING},
+          where: {id: executionId, status: WorkflowExecutionStatus.WAITING, currentStepId: stepId},
           data: {status: WorkflowExecutionStatus.RUNNING},
         });
         if (run.count === 0) {

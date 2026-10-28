@@ -212,6 +212,32 @@ describe('WorkflowExecutionService - resuming a wait once', () => {
     expect((await run.waitExecution()).status).toBe(StepExecutionStatus.COMPLETED);
   });
 
+  it('leaves a run waiting on another step alone when the event of an old wait arrives (Plunk Lite)', async () => {
+    const run = await createRun();
+    // The run waits further along (a delay, say) while an old wait step is still WAITING
+    await prisma.workflowExecution.update({where: {id: run.executionId}, data: {currentStepId: run.sendStepId}});
+
+    await ship();
+
+    expect(await outcome(run)).toEqual({sends: 0, emails: 0});
+    const execution = await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}});
+    expect(execution).toMatchObject({status: WorkflowExecutionStatus.WAITING, currentStepId: run.sendStepId});
+    expect((await run.waitExecution()).status).toBe(StepExecutionStatus.WAITING);
+  });
+
+  it('leaves the run an event resumed alone when queueing the timeout then fails (Plunk Lite)', async () => {
+    vi.mocked(QueueService.queueWorkflowTimeout).mockImplementationOnce(async () => {
+      await ship();
+      throw new Error('redis down');
+    });
+
+    await expect(createRun({parked: false})).rejects.toThrow('redis down');
+
+    const execution = await prisma.workflowExecution.findFirstOrThrow({where: {contactId}});
+    expect(execution.status).toBe(WorkflowExecutionStatus.COMPLETED);
+    expect(await prisma.email.count({where: {workflowExecutionId: execution.id}})).toBe(1);
+  });
+
   it('leaves a finished run with an old wait step alone when its event arrives (Plunk Lite)', async () => {
     const run = await createRun();
     await prisma.workflowExecution.update({
