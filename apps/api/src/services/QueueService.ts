@@ -913,6 +913,15 @@ export class QueueService {
   }
 
   /**
+   * Plunk Lite: give a job that failed for good another round of its attempts, counting the rounds
+   * in its data. BullMQ keeps the attempts already made, so they are reset for the round.
+   */
+  public static async retryForAnotherRound<T extends {sweepRetries?: number}>(job: Job<T>): Promise<void> {
+    await job.updateData({...job.data, sweepRetries: (job.data.sweepRetries ?? 0) + 1});
+    await job.retry('failed', {resetAttemptsMade: true});
+  }
+
+  /**
    * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time
    * (every page is read before anything is removed, so removing cannot shift the pages). A job that
    * has started meanwhile cannot be removed, and is left to find what it should do. Returns how many

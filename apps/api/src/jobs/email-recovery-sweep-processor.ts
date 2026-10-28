@@ -27,9 +27,10 @@ import {prisma} from '../database/prisma.js';
 import {errorMessage} from '../database/redis.js';
 import {POSSIBLY_SENT_NOTE} from '../services/EmailService.js';
 import {FailureAlertService} from '../services/FailureAlertService.js';
-import {emailQueue, emailRecoverySweepQueue} from '../services/QueueService.js';
+import {emailQueue, emailRecoverySweepQueue, QueueService} from '../services/QueueService.js';
 import {resumeSendingIfDue} from '../services/SesSendGate.js';
 
+import {retryFailedCampaignBatches} from './campaign-processor.js';
 import {finalizeCampaignSafely} from './email-processor.js';
 
 /** Younger than this, a PENDING or SENDING email is most likely just waiting its turn */
@@ -163,10 +164,8 @@ export async function sweepStuckEmails(now = new Date()): Promise<RecoverySweepR
 
       if (job && state === 'failed' && job.data.accepted && sweepRetries < MAX_SWEEP_RETRIES) {
         // SES accepted it and recording the send failed on every attempt: a retry records it
-        // from the job data, without sending it again. BullMQ keeps the attempts already made,
-        // so they are reset for the retry to get its own round, and the rounds are counted.
-        await job.updateData({...job.data, sweepRetries: sweepRetries + 1});
-        await job.retry('failed', {resetAttemptsMade: true});
+        // from the job data, without sending it again, in a round of its own
+        await QueueService.retryForAnotherRound(job);
         result.retried++;
         continue;
       }
@@ -195,6 +194,12 @@ async function processSweep(_job: Job<EmailRecoverySweepJobData>): Promise<Recov
     await resumeSendingIfDue();
   } catch (error) {
     signale.error(`[EMAIL-RECOVERY-SWEEP] Could not check whether to resume sending: ${errorMessage(error)}`);
+  }
+  // Plunk Lite: campaign batches out of attempts, which would leave their campaign SENDING
+  try {
+    await retryFailedCampaignBatches();
+  } catch (error) {
+    signale.error(`[EMAIL-RECOVERY-SWEEP] Could not retry failed campaign batches: ${errorMessage(error)}`);
   }
 
   const result = await sweepStuckEmails();

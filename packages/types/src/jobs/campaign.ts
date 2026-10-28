@@ -18,6 +18,8 @@ export interface CampaignBatchJobData {
    * matches and is dropped, and the emails a batch creates take their ids from it.
    */
   generation: number;
+  /** Plunk Lite: how many times the email recovery sweep has given this batch another round */
+  sweepRetries?: number;
 }
 
 /**

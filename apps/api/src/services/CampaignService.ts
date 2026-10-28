@@ -1650,12 +1650,12 @@ export class CampaignService {
   ): Promise<{contacts: Contact[]; nextCursor?: string; hasMore: boolean}> {
     const where = await this.buildRecipientWhereAsync(projectId, campaign);
 
-    // Fetch one extra to determine if there are more results
+    // Fetch one extra to determine if there are more results. Plunk Lite: the contacts after the
+    // cursor by id, rather than Prisma's cursor, which starts from the cursor's row -- and skipped
+    // one, or failed, when that contact had been deleted or had left the audience since
     const contacts = await prisma.contact.findMany({
-      where,
+      where: cursor ? {AND: [where, {id: {gt: cursor}}]} : where,
       take: limit + 1,
-      skip: cursor ? 1 : 0,
-      cursor: cursor ? {id: cursor} : undefined,
       orderBy: {id: 'asc'}, // Use ID for consistent cursor ordering
     });
 
