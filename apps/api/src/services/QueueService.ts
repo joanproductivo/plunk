@@ -930,14 +930,15 @@ export class QueueService {
    * every page before anything is removed. The worker still takes jobs meanwhile, which can shift a
    * page so that one is read twice (its second removal fails and is skipped) or never: the job left
    * behind is one the caller has already made pointless, and finds so when it runs. A job that has
-   * started meanwhile cannot be removed either. Returns how many were removed.
+   * started meanwhile cannot be removed either. Only the ids picked are kept, and they are removed
+   * a page at a time, all of a page at once. Returns how many were removed.
    */
   private static async removeQueuedJobs<T>(
     queue: Queue<T>,
     pick: (jobs: Job<T>[]) => Promise<Job<T>[]>,
   ): Promise<number> {
     const PAGE = 1000;
-    const picked: Job<T>[] = [];
+    const picked: string[] = [];
     for (let start = 0; ; start += PAGE) {
       // The range is per state, so a page holds up to one range of each
       const jobs = (await queue.getJobs(['waiting', 'prioritized', 'delayed'], start, start + PAGE - 1)).filter(
@@ -946,17 +947,17 @@ export class QueueService {
       if (jobs.length === 0) {
         break;
       }
-      picked.push(...(await pick(jobs)));
+      picked.push(...(await pick(jobs)).map(job => job.id!));
     }
 
     let removed = 0;
-    for (const job of picked) {
-      try {
-        await job.remove();
-        removed++;
-      } catch {
-        // Started since it was read: it finds the project disabled, or the campaign cancelled
-      }
+    for (let start = 0; start < picked.length; start += PAGE) {
+      const codes = await Promise.all(
+        // A job started since it was read is not removed: it finds the project disabled, or the
+        // campaign cancelled
+        picked.slice(start, start + PAGE).map(id => queue.remove(id).catch(() => 0)),
+      );
+      removed += codes.filter(code => code === 1).length;
     }
     return removed;
   }
