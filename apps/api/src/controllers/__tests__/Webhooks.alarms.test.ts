@@ -3,7 +3,9 @@ import {randomUUID} from 'node:crypto';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {ALARMS_TOPIC_NAME} from '../../services/AwsAlarmService';
+import {DLQ_ALARM_SOURCE, DLQ_NAME} from '../../services/dlqConstants';
 import {FailureAlertService} from '../../services/FailureAlertService';
+import {QueueService} from '../../services/QueueService';
 import {getAwsAccountId, sendRawEmail} from '../../services/SESService';
 import {SnsSignature} from '../../services/SnsSignature';
 import {FOREIGN_TOPIC, postSns} from './snsWebhook';
@@ -171,5 +173,49 @@ describe('Webhooks - CloudWatch alarms', () => {
     expect(await failures('sns:subscription')).toEqual([]);
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(sendRawEmail).not.toHaveBeenCalled();
+  });
+
+  describe('the alarm on the dead-letter queue', () => {
+    const queueTrigger = {
+      Trigger: {
+        MetricName: 'ApproximateNumberOfMessagesVisible',
+        Namespace: 'AWS/SQS',
+        Dimensions: [{value: DLQ_NAME, name: 'QueueName'}],
+      },
+    };
+    const queueNotice = async () =>
+      (await FailureAlertService.listOpen(projectId)).filter(failure => failure.sourceKey === DLQ_ALARM_SOURCE);
+
+    beforeEach(() => {
+      vi.spyOn(QueueService, 'queueDlqDrain').mockResolvedValue({} as never);
+    });
+
+    it('queues a drain, by the queue it watches whatever its name, and shows it under one source', async () => {
+      expect((await alarm('ALARM', new Date(), queueTrigger)).status).toBe(200);
+
+      expect(QueueService.queueDlqDrain).toHaveBeenCalledOnce();
+      expect(await queueNotice()).toHaveLength(1);
+    });
+
+    it('keeps its notice open when it is OK again: the drain closes it once the queue is empty', async () => {
+      const changedAt = Date.now();
+      await alarm('ALARM', new Date(changedAt), queueTrigger);
+      await alarm('OK', new Date(changedAt + 60_000), queueTrigger);
+
+      expect(await queueNotice()).toHaveLength(1);
+      expect(QueueService.queueDlqDrain).toHaveBeenCalledOnce();
+    });
+
+    it('still shows the alarm when the drain cannot be queued', async () => {
+      vi.mocked(QueueService.queueDlqDrain).mockRejectedValue(new Error('Redis down'));
+
+      expect((await alarm('ALARM', new Date(), queueTrigger)).status).toBe(200);
+      expect(await queueNotice()).toHaveLength(1);
+    });
+
+    it('queues no drain for another alarm', async () => {
+      await alarm('ALARM', new Date());
+      expect(QueueService.queueDlqDrain).not.toHaveBeenCalled();
+    });
   });
 });

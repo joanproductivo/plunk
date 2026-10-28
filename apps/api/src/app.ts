@@ -723,7 +723,8 @@ async function addRepeatables(): Promise<void> {
   signale.info('[BACKGROUND-JOB] Email recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
 
   // Plunk Lite: every 15 minutes, whether SES events reach the webhook. One grouped query over the
-  // emails of the last six hours, by the `createdAt` index; it only records and alerts.
+  // emails of the last six hours, by the `createdAt` index; it only records and alerts. And one
+  // question to SQS: whether the dead-letter queue holds events SNS could not deliver, drained if so.
   await plunkLiteChecksQueue.add(
     'sns-health',
     {},

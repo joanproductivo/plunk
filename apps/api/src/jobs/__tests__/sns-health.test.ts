@@ -1,12 +1,14 @@
 import {randomUUID} from 'node:crypto';
 
 import type {Job} from 'bullmq';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailSourceType, EmailStatus} from '@plunk/db';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {redis} from '../../database/redis';
+import {DlqDrainService} from '../../services/DlqDrainService';
+import {QueueService} from '../../services/QueueService';
 import {checkEventPipeline, noteSnsRejection} from '../../services/SesEventMatch';
 import {processPlunkLiteCheck} from '../plunk-lite-checks-processor';
 
@@ -109,5 +111,39 @@ describe('the SES events check', () => {
 
     const closed = (await notice())!;
     expect(closed.reviewedAt).toEqual(closed.lastAt);
+  });
+
+  describe('and the dead-letter queue', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('asks for a drain when the queue holds messages', async () => {
+      vi.spyOn(DlqDrainService, 'check').mockResolvedValue(true);
+      const queued = vi.spyOn(QueueService, 'queueDlqDrain').mockResolvedValue({} as never);
+
+      await processPlunkLiteCheck({name: 'sns-health', data: {}} as Job);
+
+      expect(queued).toHaveBeenCalledOnce();
+    });
+
+    it('asks for none when it is empty', async () => {
+      vi.spyOn(DlqDrainService, 'check').mockResolvedValue(false);
+      const queued = vi.spyOn(QueueService, 'queueDlqDrain').mockResolvedValue({} as never);
+
+      await processPlunkLiteCheck({name: 'sns-health', data: {}} as Job);
+
+      expect(queued).not.toHaveBeenCalled();
+    });
+
+    it('still checks the SES events when the drain cannot be asked for', async () => {
+      vi.spyOn(DlqDrainService, 'check').mockResolvedValue(true);
+      vi.spyOn(QueueService, 'queueDlqDrain').mockRejectedValue(new Error('Redis down'));
+      await sent(20, EmailStatus.SENT, hoursAgo(2));
+
+      await processPlunkLiteCheck({name: 'sns-health', data: {}} as Job);
+
+      expect(await notice()).not.toBeNull();
+    });
   });
 });
