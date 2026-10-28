@@ -6,6 +6,8 @@ import {EventEmitter} from 'node:events';
 
 import type {NextFunction, Request, Response} from 'express';
 
+import {invokeHandler} from '../../apps/api/src/utils/invokeHandler';
+
 /** What a handler answered, or the error it passed on (its status, if it is an HttpException) */
 export interface HandlerOutcome<TBody = Record<string, unknown>> {
   status: number;
@@ -32,20 +34,15 @@ export function runHandler<TBody = Record<string, unknown>>(
   res: Response & {statusCode: number},
   middleware?: (req: Request, res: Response, next: NextFunction) => unknown,
 ): Promise<HandlerOutcome<TBody>> {
-  return new Promise<HandlerOutcome<TBody>>(resolve => {
-    const failed = (error?: unknown) => {
+  const run = middleware
+    ? (rq: Request, rs: Response, next: NextFunction) =>
+        middleware(rq, rs, (error?: unknown) => (error ? next(error) : handler(rq, rs, next)))
+    : handler;
+  return invokeHandler<TBody>(run, req.body, {req, res}).then(
+    answer => answer,
+    (error: unknown) => {
       const code = (error as {code?: unknown} | undefined)?.code;
-      resolve({status: typeof code === 'number' ? code : 500, error});
-    };
-    res.json = ((json: TBody) => {
-      resolve({status: res.statusCode, body: json});
-      return res;
-    }) as Response['json'];
-    const go = () => void handler(req, res, failed);
-    if (middleware) {
-      void middleware(req, res, (error?: unknown) => (error ? failed(error) : go()));
-    } else {
-      go();
-    }
-  });
+      return {status: typeof code === 'number' ? code : 500, error};
+    },
+  );
 }

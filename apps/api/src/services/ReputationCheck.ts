@@ -2,6 +2,7 @@ import type {SecurityCheckJobData} from '@plunk/types';
 import signale from 'signale';
 
 import {redis, redisReady} from '../database/redis.js';
+import {TimedOut, withTimeout} from '../utils/withTimeout.js';
 
 import {FailureAlertService} from './FailureAlertService.js';
 import {QueueService} from './QueueService.js';
@@ -64,18 +65,6 @@ const QUEUE_TIMEOUT_MS = 3000;
  * reset still reads as connected, and only this bounds it.
  */
 const RUN_TIMEOUT_MS = 10_000;
-
-/** What withTimeout rejects with: the work may still finish later */
-class TimedOut extends Error {}
-
-/** Rejects once `ms` have passed without `promise` settling */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new TimedOut(`Timed out after ${ms} ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 export class ReputationCheck {
   /**
