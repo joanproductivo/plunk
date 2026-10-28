@@ -6,6 +6,7 @@ import {prisma} from '../database/prisma.js';
 import {csvRow} from '../utils/csv.js';
 import {ContactSegmentsService} from './ContactSegmentsService.js';
 import {ContactService} from './ContactService.js';
+import {OptInService} from './OptInService.js';
 
 /** Fixed columns, in order. Custom `data` fields follow them, sorted by key. */
 const FIXED_COLUMNS = ['email', 'subscribed', 'status', 'createdAt', 'updatedAt', 'segments', 'dynamicSegments'];
@@ -87,10 +88,19 @@ export class ContactExportService {
           const ids = contacts.map(contact => contact.id);
           const staticSegments = await ContactSegmentsService.staticSegmentsOf(projectId, ids);
           const dynamicMatches = await ContactSegmentsService.dynamicSegmentsOf(projectId, ids, dynamicSegments);
+          // Plunk Lite: the contacts still to confirm a sign-up read `pending` in the status column
+          const pending = await OptInService.pendingAmong(projectId, ids);
 
           let chunk = '';
           for (const contact of contacts) {
-            chunk += csvRow(ContactExportService.rowFor(contact, customKeys, staticSegments, dynamicMatches));
+            chunk += csvRow(
+              ContactExportService.rowFor(
+                {...contact, pendingConfirmation: pending.has(contact.id)},
+                customKeys,
+                staticSegments,
+                dynamicMatches,
+              ),
+            );
           }
           yield chunk;
           // Counted once the stream has taken the batch, so an interrupted export logs what was sent.
@@ -106,7 +116,7 @@ export class ContactExportService {
   }
 
   private static rowFor(
-    contact: ExportedContact,
+    contact: ExportedContact & {pendingConfirmation: boolean},
     customKeys: string[],
     staticSegments: Map<string, SegmentRef[]>,
     dynamicSegments: Map<string, SegmentRef[]>,

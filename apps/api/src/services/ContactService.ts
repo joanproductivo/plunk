@@ -6,6 +6,7 @@ import type {
   CursorPaginatedResponse,
   FilterCondition,
   FilterGroup,
+  OptInOutcome,
   SnoozeDuration,
 } from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
@@ -20,6 +21,7 @@ import {DeletedEmailCounts} from './DeletedEmailCounts.js';
 import {EmailVerificationService} from './EmailVerificationService.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
+import {type OptInKey, OptInService} from './OptInService.js';
 import {QueueService} from './QueueService.js';
 import {SuppressionService} from './SuppressionService.js';
 
@@ -34,6 +36,20 @@ const RECEIVED_STATUSES = new Set<EmailStatus>([
 /** Plunk Lite: most custom fields a contact can hold, and their largest size as JSON (see mergeContactData) */
 export const CONTACT_FIELDS_MAX = 200;
 export const CONTACT_DATA_MAX_BYTES = 64 * 1024;
+
+/** Options of {@link ContactService.upsert} and {@link ContactService.upsertWithOptIn} */
+interface UpsertOptions {
+  createdAt?: Date;
+  explicit?: boolean;
+  verifySignup?: boolean;
+  retried?: boolean;
+  /** Plunk Lite: who stands behind a sign-up, for the double opt-in (see upsertWithOptIn) */
+  consent?: 'unconfirmed' | 'operator' | 'import' | 'none';
+  /** Plunk Lite: the key of the request; the public one sends no confirmation email */
+  key?: OptInKey;
+  /** Plunk Lite: static segments to join on confirming a sign-up */
+  segmentIds?: string[];
+}
 
 export class ContactService {
   /**
@@ -349,6 +365,12 @@ export class ContactService {
     const isSubscriptionChanging = data.subscribed !== undefined && existing.subscribed !== data.subscribed;
     const wasSubscribed = existing.subscribed;
 
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write, so a link
+    // pressed meanwhile cannot subscribe the contact after it
+    if (data.subscribed === false) {
+      await OptInService.cancel(contactId);
+    }
+
     try {
       const updated = await prisma.contact.update({
         where: {id: contactId},
@@ -405,6 +427,8 @@ export class ContactService {
    * A suppressed address (Plunk Lite) is never subscribed: it stays unsubscribed, or with
    * `options.explicit` -- the dashboard's add-contact form -- the request is refused.
    * `options.verifySignup` (Plunk Lite) refuses a new contact whose address takes no email (422).
+   * With the double opt-in on (Plunk Lite), a sign-up waits for the contact to confirm: see
+   * {@link upsertWithOptIn}.
    */
   public static async upsert(
     projectId: string,
@@ -412,8 +436,35 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
-    options: {createdAt?: Date; explicit?: boolean; verifySignup?: boolean; retried?: boolean} = {},
+    options: UpsertOptions = {},
   ): Promise<Contact> {
+    return (await ContactService.upsertWithOptIn(projectId, email, data, subscribed, defaultSubscribed, options))
+      .contact;
+  }
+
+  /**
+   * {@link upsert}, telling also what became of a sign-up under the double opt-in (Plunk Lite).
+   *
+   * `options.consent` says who stands behind a sign-up -- whatever would subscribe the contact,
+   * `subscribed: true` or a new contact subscribed by default:
+   * - `unconfirmed` (the default, so a new caller waits for confirmation): with the opt-in on, the
+   *   contact stays as it was (a new one unsubscribed) and is emailed a link to confirm, unless
+   *   `options.key` is the public one. `options.segmentIds` are joined on confirming.
+   * - `operator`: the dashboard's own form; subscribed as always.
+   * - `import`: with the opt-in on, a new contact is subscribed and an existing one stays as it was.
+   * - `none` (an inbound email): an existing contact is never subscribed by it, opt-in or not; a
+   *   new one, as an `import` would be with the opt-in off and unsubscribed with it on.
+   *
+   * `optIn` is set when the opt-in kept the contact from being subscribed.
+   */
+  public static async upsertWithOptIn(
+    projectId: string,
+    email: string,
+    data?: Record<string, unknown>,
+    subscribed?: boolean,
+    defaultSubscribed: boolean = true,
+    options: UpsertOptions = {},
+  ): Promise<{contact: Contact; optIn?: OptInOutcome}> {
     const normalizedEmail = ContactService.normalizeEmail(email);
     // What the caller asked for, before a suppression turns it down: a retry asks the same
     const requestedSubscribed = subscribed;
@@ -440,15 +491,36 @@ export class ContactService {
       subscribed = false;
     }
 
+    // Plunk Lite: a sign-up the double opt-in holds back leaves the contact as it was -- a new one
+    // unsubscribed -- and, from a form, asks it to confirm once it is written
+    const consent = options.consent ?? 'unconfirmed';
+    let optIn: 'request' | 'held' | undefined;
+    if (subscribesNow && subscribed !== false && consent !== 'operator') {
+      if (consent === 'none' && existing) {
+        optIn = 'held';
+      } else if (await OptInService.isRequired(projectId)) {
+        optIn = consent === 'unconfirmed' ? 'request' : consent === 'import' && !existing ? undefined : 'held';
+      }
+      if (optIn) {
+        subscribed = existing ? undefined : false;
+      }
+    }
+
     const mergedData = ContactService.mergeContactData(existing?.data ?? null, data ?? {});
 
+    let contact: Contact;
     if (existing) {
       // Track subscription status change
       const isSubscriptionChanging = subscribed !== undefined && existing.subscribed !== subscribed;
       const wasSubscribed = existing.subscribed;
 
+      // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write (see update)
+      if (requestedSubscribed === false) {
+        await OptInService.cancel(existing.id);
+      }
+
       try {
-        const updated = await prisma.contact.update({
+        contact = await prisma.contact.update({
           where: {id: existing.id},
           data: {
             data: Object.keys(mergedData).length > 0 ? toPrismaJson(mergedData) : Prisma.JsonNull,
@@ -461,13 +533,11 @@ export class ContactService {
         // Track subscription event if status changed
         if (isSubscriptionChanging) {
           if (subscribed && !wasSubscribed) {
-            await EventService.trackEvent(projectId, 'contact.subscribed', updated.id);
+            await EventService.trackEvent(projectId, 'contact.subscribed', contact.id);
           } else if (!subscribed && wasSubscribed) {
-            await EventService.trackEvent(projectId, 'contact.unsubscribed', updated.id);
+            await EventService.trackEvent(projectId, 'contact.unsubscribed', contact.id);
           }
         }
-
-        return updated;
       } catch (error) {
         // Provide helpful error message for database/validation issues
         throw new HttpException(
@@ -477,7 +547,7 @@ export class ContactService {
       }
     } else {
       try {
-        return await prisma.contact.create({
+        contact = await prisma.contact.create({
           data: {
             projectId,
             email: normalizedEmail,
@@ -490,7 +560,7 @@ export class ContactService {
         // Plunk Lite: created meanwhile by a concurrent request for the same address (a form sent
         // twice), so this one updates it instead
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && !options.retried) {
-          return ContactService.upsert(projectId, email, data, requestedSubscribed, defaultSubscribed, {
+          return ContactService.upsertWithOptIn(projectId, email, data, requestedSubscribed, defaultSubscribed, {
             ...options,
             retried: true,
           });
@@ -502,6 +572,11 @@ export class ContactService {
         );
       }
     }
+
+    if (optIn === 'request') {
+      return {contact, optIn: await OptInService.request(contact, {segmentIds: options.segmentIds, key: options.key})};
+    }
+    return {contact, ...(optIn ? {optIn} : {})};
   }
 
   /** Plunk Lite: refuse, with the reasons and any likely correction, an address that takes no email */
@@ -687,16 +762,22 @@ export class ContactService {
    * PUBLIC: Subscribe a contact. A suppressed address (Plunk Lite) is subscribed only from an email
    * that reached the contact's mailbox, which lifts the suppression; otherwise 409.
    *
+   * With the double opt-in on (Plunk Lite), a contact not yet subscribed who comes without an email
+   * of theirs is sent a link to confirm instead, and `pendingConfirmation` says so.
+   *
    * @param source - Optional originating email, for attributing the change in
    *                 the activity feed. See {@link resolveSourceEmail}.
    */
-  public static async subscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
+  public static async subscribe(
+    contactId: string,
+    source?: {emailId?: string},
+  ): Promise<Contact & {pendingConfirmation?: true}> {
     const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
 
     // A suppressed address is resubscribed here only by its owner: from an email of theirs that
     // reached their mailbox. The page is public and needs only the contact's id, which a public
     // key hands out, so without that email the request is refused rather than trusted.
-    const current = await prisma.contact.findUnique({where: {id: contactId}, select: {projectId: true, email: true}});
+    const current = await prisma.contact.findUnique({where: {id: contactId}});
     if (current && (await SuppressionService.find(current.projectId, current.email))) {
       if (!sourceEmail?.received) {
         throw new ConflictError(
@@ -706,6 +787,28 @@ export class ContactService {
         );
       }
       await SuppressionService.lift(current.projectId, current.email);
+    }
+
+    // Plunk Lite: for the same reason, with the double opt-in on, the page subscribes directly only
+    // from an email that reached the contact's mailbox. Otherwise it asks the address to confirm --
+    // if it signed up or received an email before, so the page cannot email any address
+    if (
+      current &&
+      !current.subscribed &&
+      !sourceEmail?.received &&
+      (await OptInService.isRequired(current.projectId))
+    ) {
+      const outcome = (await OptInService.mayAskWithoutKey(current.id)) ? await OptInService.request(current) : 'held';
+      if (outcome === 'sent' || outcome === 'throttled') {
+        return {...current, pendingConfirmation: true};
+      }
+      throw new ConflictError(
+        outcome === 'held'
+          ? 'This address cannot be subscribed from here. Use the subscribe link in an email you received from us.'
+          : 'The confirmation email could not be sent. Try again later.',
+        undefined,
+        outcome === 'held' ? ErrorCode.CONFIRMATION_NEEDS_EMAIL : ErrorCode.CONFLICT,
+      );
     }
 
     const contact = await prisma.contact.update({
@@ -729,6 +832,9 @@ export class ContactService {
    */
   public static async unsubscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
     const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
+
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write (see update)
+    await OptInService.cancel(contactId);
 
     const contact = await prisma.contact.update({
       where: {id: contactId},
@@ -826,15 +932,23 @@ export class ContactService {
     // counts against the campaign, and the row has to be confirmed to exist anyway.
     const existing = await prisma.contact.findUnique({
       where: {id: contactId},
-      select: {subscribed: true},
+      select: {subscribed: true, snoozedUntil: true},
     });
 
     if (!existing) {
       throw new HttpException(404, 'Contact not found');
     }
+    // Plunk Lite: only a contact on the list pauses. The sweep subscribes a paused contact when the
+    // pause ends, so pausing an unsubscribed one -- which the public page needs only its id for --
+    // would subscribe someone who never asked, or who unsubscribed.
+    if (!existing.subscribed && !existing.snoozedUntil) {
+      throw new ConflictError('Only a subscribed contact can pause its emails.', undefined, ErrorCode.CONFLICT);
+    }
 
     const snoozedUntil = this.addSnoozeWindow(new Date(), duration);
 
+    // Plunk Lite: a pause withdraws a sign-up still to confirm, as unsubscribing does
+    await OptInService.cancel(contactId);
     const contact = await prisma.contact.update({
       where: {id: contactId},
       data: {subscribed: false, snoozedUntil},
@@ -1307,6 +1421,9 @@ export class ContactService {
     // See SNOOZE_CLEARED_ON_WRITE.
     const snoozedIds = contacts.filter(c => !c.subscribed && c.snoozedUntil !== null).map(c => c.id);
     const idsToWrite = [...subscribedIds, ...snoozedIds];
+
+    // Plunk Lite: unsubscribing withdraws the sign-ups still to confirm, of every contact selected
+    await OptInService.cancel(contacts.map(c => c.id));
 
     if (idsToWrite.length === 0) {
       return {updated: 0, unchanged};

@@ -53,6 +53,7 @@ import {DashboardLayout} from '../../components/DashboardLayout';
 import {BrandSettings} from '../../components/BrandSettings';
 import {DomainsSettings} from '../../components/DomainsSettings';
 import {FooterSettings} from '../../components/FooterSettings';
+import {OptInSettings} from '../../components/OptInSettings';
 import {BillingLimits} from '../../components/BillingLimits';
 import {BillingConsumption} from '../../components/BillingConsumption';
 import {BillingInvoices} from '../../components/BillingInvoices';
@@ -838,6 +839,12 @@ export default function Settings() {
                   canEdit={currentUserRole !== 'MEMBER'}
                 />
                 <FooterSettings
+                  projectId={activeProject.id}
+                  projectName={activeProject.name}
+                  language={activeProject.language}
+                  canEdit={currentUserRole !== 'MEMBER'}
+                />
+                <OptInSettings
                   projectId={activeProject.id}
                   projectName={activeProject.name}
                   language={activeProject.language}

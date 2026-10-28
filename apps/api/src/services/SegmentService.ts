@@ -11,7 +11,6 @@ import {LONG_TRANSACTION} from '../utils/database.js';
 import {ContactService} from './ContactService.js';
 import {NtfyService} from './NtfyService.js';
 import {SegmentMembershipService} from './SegmentMembershipService.js';
-import {SuppressionService} from './SuppressionService.js';
 
 export type {FilterCondition, FilterGroup, SegmentFilter} from '@plunk/types';
 
@@ -560,14 +559,14 @@ export class SegmentService {
 
   /**
    * Add contacts to a static segment by email. Contacts already in it re-enter it
-   * (see SegmentMembershipService); entry events are fired in the background.
+   * (see SegmentMembershipService); entry events are fired in the background. Plunk Lite: with
+   * `createMissing`, the contacts created for addresses that had none are unsubscribed.
    */
   public static async addContacts(
     projectId: string,
     segmentId: string,
     emails: string[],
     createMissing = false,
-    subscribed = true,
   ): Promise<{added: number; created: number; notFound: string[]}> {
     // Checked before any contact is created for a segment that cannot take them
     await SegmentMembershipService.getStaticSegment(projectId, segmentId, 'add contacts to');
@@ -589,10 +588,9 @@ export class SegmentService {
 
     let created = 0;
     if (createMissing && missing.length > 0) {
-      // A suppressed address is created unsubscribed
-      const suppressed = subscribed ? await SuppressionService.suppressedAmong(projectId, missing) : new Map();
+      // Plunk Lite: created unsubscribed -- adding an address to a segment is not a sign-up
       await prisma.contact.createMany({
-        data: missing.map(email => ({projectId, email, subscribed: subscribed && !suppressed.has(email)})),
+        data: missing.map(email => ({projectId, email, subscribed: false})),
         skipDuplicates: true,
       });
       created = missing.length;

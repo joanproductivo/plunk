@@ -42,6 +42,14 @@ export const CONTACT_SUBSCRIPTION_STATUSES = ['subscribed', 'snoozed', 'unsubscr
 export type ContactSubscriptionStatus = (typeof CONTACT_SUBSCRIPTION_STATUSES)[number];
 
 /**
+ * The states a contact's subscription is shown in (Plunk Lite): `pending` is an unsubscribed
+ * contact asked to confirm a sign-up who has not yet (see OptInService). It is derived from Plunk
+ * Lite's own table, so it is not a filter of the shared contact queries; the contact list filters on
+ * it with a query of its own.
+ */
+export type ContactDisplayStatus = ContactSubscriptionStatus | 'pending';
+
+/**
  * How a contact's subscription state reads, wherever it is reported (the dashboard, the CSV export).
  *
  * `snoozed` is derived rather than stored: a snooze is `subscribed = false` plus a date, which
@@ -49,13 +57,21 @@ export type ContactSubscriptionStatus = (typeof CONTACT_SUBSCRIPTION_STATUSES)[n
  * already has. The cost of that is exactly this -- the two "not subscribed" states look
  * identical until you check the date, so every surface that reports status has to go through
  * here rather than branching on the boolean.
+ *
+ * Plunk Lite: given `pendingConfirmation` (OptInService.pendingAmong), an unsubscribed contact still
+ * to confirm a sign-up reads `pending`; a snooze reads first.
  */
-export function contactStatus(contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>): ContactSubscriptionStatus {
+export function contactStatus(
+  contact: Pick<Contact, 'subscribed' | 'snoozedUntil'> & {pendingConfirmation?: boolean},
+): ContactDisplayStatus {
   if (contact.subscribed) {
     return 'subscribed';
   }
+  if (contact.snoozedUntil) {
+    return 'snoozed';
+  }
 
-  return contact.snoozedUntil ? 'snoozed' : 'unsubscribed';
+  return contact.pendingConfirmation ? 'pending' : 'unsubscribed';
 }
 
 /** Why an address is on the project's suppression list (Plunk Lite) */

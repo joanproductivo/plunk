@@ -8,12 +8,13 @@ export interface AddSegmentMembersResult {
 }
 
 /**
- * Add emails to a static segment, in as many requests as the endpoint's per-call limit needs
+ * Add emails to a static segment, in as many requests as the endpoint's per-call limit needs. With
+ * `createMissing`, the addresses without a contact get one, unsubscribed (Plunk Lite).
  */
 export async function addSegmentMembers(
   segmentId: string,
   emails: string[],
-  options: {createMissing?: boolean; subscribed?: boolean} = {},
+  options: {createMissing?: boolean} = {},
 ): Promise<AddSegmentMembersResult> {
   const total: AddSegmentMembersResult = {added: 0, created: 0, notFound: []};
 

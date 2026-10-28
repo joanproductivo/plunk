@@ -11,7 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
-import {contactStatus, type ContactSuppression} from '@plunk/types';
+import {contactStatus, type ContactSuppression, type OptInRequestInfo} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -36,7 +36,14 @@ export default function ContactDetailPage() {
     data: contact,
     mutate,
     isLoading,
-  } = useSWR<Contact & {suppression?: ContactSuppression<string> | null}>(id ? `/contacts/${id}` : null);
+  } = useSWR<
+    Contact & {
+      suppression?: ContactSuppression<string> | null;
+      // Plunk Lite: its sign-up confirmation request (double opt-in), confirmed or not
+      optIn?: OptInRequestInfo<string> | null;
+      pendingConfirmation?: boolean;
+    }
+  >(id ? `/contacts/${id}` : null);
   const {mutate: mutateKey} = useSWRConfig();
 
   const [email, setEmail] = useState('');
@@ -169,14 +176,18 @@ export default function ContactDetailPage() {
                         ? 'bg-green-100 text-green-800'
                         : status === 'snoozed'
                           ? 'bg-neutral-100 text-neutral-700'
-                          : 'bg-red-100 text-red-800'
+                          : status === 'pending'
+                            ? 'bg-amber-100 text-amber-900'
+                            : 'bg-red-100 text-red-800'
                     }`}
                   >
                     {status === 'snoozed'
                       ? `Snoozed until ${formatSnoozedUntil(contact.snoozedUntil)}`
                       : status === 'subscribed'
                         ? 'Subscribed'
-                        : 'Unsubscribed'}
+                        : status === 'pending'
+                          ? 'Pending confirmation'
+                          : 'Unsubscribed'}
                   </span>
                 </p>
               </div>
@@ -221,7 +232,9 @@ export default function ContactDetailPage() {
                                 // this reverses itself, and that turning the switch on here is
                                 // what ends it early.
                                 `Snoozed — resumes automatically on ${formatSnoozedUntil(contact.snoozedUntil)}`
-                              : 'Will not receive emails'}
+                              : status === 'pending'
+                                ? 'Waiting for the contact to confirm its sign-up'
+                                : 'Will not receive emails'}
                         </p>
                       </div>
                       <Switch id="subscribed" checked={subscribed} onCheckedChange={setSubscribed} />
@@ -251,6 +264,37 @@ export default function ContactDetailPage() {
                         </Button>
                       </div>
                     )}
+
+                    {contact?.optIn &&
+                      (status === 'pending' || (contact.optIn.confirmedAt && !contact.optIn.withdrawnAt)) && (
+                        // Plunk Lite: a sign-up through the double opt-in, waiting for its link or confirmed
+                        <div
+                          className={`rounded-lg border px-4 py-3 text-sm ${
+                            contact.optIn.confirmedAt
+                              ? 'border-neutral-200 bg-neutral-50 text-neutral-700'
+                              : 'border-amber-200 bg-amber-50 text-amber-900'
+                          }`}
+                        >
+                          {contact.optIn.confirmedAt ? (
+                            <p>
+                              Confirmed its sign-up on {dayjs(contact.optIn.confirmedAt).format('D MMM YYYY, HH:mm')}
+                            </p>
+                          ) : (
+                            <>
+                              <p className="font-medium">
+                                Waiting for confirmation since {dayjs(contact.optIn.createdAt).format('D MMM YYYY')}
+                              </p>
+                              <p className="mt-1 text-xs text-amber-800">
+                                {contact.optIn.lastSentAt
+                                  ? `Last confirmation email sent on ${dayjs(contact.optIn.lastSentAt).format('D MMM YYYY, HH:mm')}. `
+                                  : 'No confirmation email went out for the last sign-up. '}
+                                It is subscribed when it clicks the link in that email; switching it on above subscribes
+                                it now.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      )}
 
                     <div>
                       {contact && (

@@ -17,7 +17,19 @@
       "button": "Abonnieren",
       "buttonLoading": "Abonnement wird bearbeitet...",
       "successTitle": "Sie sind abonniert!",
-      "successDescription": "{email} erhält jetzt E-Mails von {projectName}."
+      "successDescription": "{email} erhält jetzt E-Mails von {projectName}.",
+      "pendingTitle": "Prüfen Sie Ihr Postfach",
+      "pendingDescription": "Wir haben eine E-Mail an {email} gesendet. Klicken Sie auf den Link darin, um Ihr Abonnement bei {projectName} zu bestätigen."
+    },
+    "confirm": {
+      "title": "Bestätigen Sie Ihr Abonnement",
+      "description": "Bestätigen Sie, dass Sie unter {email} E-Mails von {projectName} erhalten möchten.",
+      "button": "Abonnement bestätigen",
+      "buttonLoading": "Wird bestätigt...",
+      "successTitle": "Sie sind angemeldet!",
+      "successDescription": "{email} erhält jetzt E-Mails von {projectName}.",
+      "invalidTitle": "Dieser Link funktioniert nicht mehr",
+      "invalidDescription": "Er wurde durch eine neuere E-Mail ersetzt, oder die Adresse hat sich geändert. Melden Sie sich erneut an, um einen neuen Link zu erhalten."
     },
     "manage": {
       "title": "Einstellungen verwalten",
@@ -58,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Sie erhalten diese E-Mail, weil Sie dem Empfang von E-Mails von {projectName} zugestimmt haben. Wenn Sie solche E-Mails nicht mehr erhalten möchten, bitte",
       "updatePreferences": "aktualisieren Sie Ihre Einstellungen"
+    },
+    "optin": {
+      "subject": "Bestätigen Sie Ihr Abonnement bei {projectName}",
+      "text": "Danke für Ihre Anmeldung zu den E-Mails von {projectName}.\n\nBestätigen Sie, dass dies Ihre Adresse ist, um sie zu erhalten:",
+      "button": "Abonnement bestätigen",
+      "ignore": "Wenn Sie sich nicht angemeldet haben, ignorieren Sie diese E-Mail: Sie werden nicht angemeldet."
     }
   }
 }

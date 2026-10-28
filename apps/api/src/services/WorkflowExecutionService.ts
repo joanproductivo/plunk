@@ -1346,6 +1346,20 @@ export class WorkflowExecutionService {
     ) {
       desiredSubscribed = undefined;
     }
+    // Plunk Lite: nor, with the double opt-in on, before the contact confirms. It is asked to confirm
+    // instead (once the step has written its data, so in its language), but only if it signed up
+    // or received an email before: an event anyone can send with the public key may have started
+    // the workflow, for any address.
+    const {OptInService} = await import('./OptInService.js');
+    let askToConfirm = false;
+    if (
+      desiredSubscribed === true &&
+      !contact.subscribed &&
+      (await OptInService.isRequired(execution.workflow.projectId))
+    ) {
+      askToConfirm = await OptInService.mayAskWithoutKey(contact.id);
+      desiredSubscribed = undefined;
+    }
     const subscriptionChanging = desiredSubscribed !== undefined && desiredSubscribed !== contact.subscribed;
 
     const updateData: Prisma.ContactUpdateInput = {};
@@ -1362,11 +1376,18 @@ export class WorkflowExecutionService {
       updateData.snoozedUntil = null;
     }
 
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write
+    if (desiredSubscribed === false) {
+      await OptInService.cancel(contact.id);
+    }
     if (Object.keys(updateData).length > 0) {
       await prisma.contact.update({
         where: {id: contact.id},
         data: updateData,
       });
+    }
+    if (askToConfirm) {
+      await OptInService.request({...contact, data: newData as Prisma.JsonObject});
     }
 
     if (subscriptionChanging) {

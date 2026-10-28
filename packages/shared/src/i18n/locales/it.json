@@ -17,7 +17,19 @@
       "button": "Iscriviti",
       "buttonLoading": "Iscrizione in corso...",
       "successTitle": "Ti sei iscritto!",
-      "successDescription": "{email} riceverà ora le e-mail di {projectName}."
+      "successDescription": "{email} riceverà ora le e-mail di {projectName}.",
+      "pendingTitle": "Controlla la tua casella",
+      "pendingDescription": "Abbiamo inviato un'email a {email}. Clicca sul link che contiene per confermare l'iscrizione a {projectName}."
+    },
+    "confirm": {
+      "title": "Conferma l'iscrizione",
+      "description": "Conferma di voler ricevere email da {projectName} all’indirizzo {email}.",
+      "button": "Conferma l'iscrizione",
+      "buttonLoading": "Conferma in corso...",
+      "successTitle": "Iscrizione confermata!",
+      "successDescription": "{email} riceverà ora le email di {projectName}.",
+      "invalidTitle": "Questo link non funziona più",
+      "invalidDescription": "È stato sostituito da un'email più recente, oppure l'indirizzo è cambiato. Iscriviti di nuovo per ricevere un nuovo link."
     },
     "manage": {
       "title": "Gestisci le preferenze",
@@ -58,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Hai ricevuto questa e-mail perché hai accettato di ricevere e-mail da {projectName}. Se non desideri più ricevere e-mail di questo tipo, ti preghiamo di",
       "updatePreferences": "aggiornare le tue preferenze"
+    },
+    "optin": {
+      "subject": "Conferma la tua iscrizione a {projectName}",
+      "text": "Grazie per esserti iscritto alle email di {projectName}.\n\nPer iniziare a riceverle, conferma che questo è il tuo indirizzo:",
+      "button": "Conferma la mia iscrizione",
+      "ignore": "Se non ti sei iscritto, ignora questa email: non verrai iscritto."
     }
   }
 }

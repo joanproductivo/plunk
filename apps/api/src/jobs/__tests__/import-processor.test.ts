@@ -453,6 +453,26 @@ describe('processContactImport', () => {
     expect(result.warnings).toContainEqual(expect.stringContaining('Bounced, cleaned or complained in 3 rows'));
   });
 
+  it('with the double opt-in on, subscribes new contacts and leaves unsubscribed ones so, saying why', async () => {
+    await prisma.plunkLiteOptInSettings.create({
+      data: {projectId, enabled: true, fromEmail: 'hello@plunk.test', texts: {}},
+    });
+    await factories.createContact({projectId, email: 'left@plunk.test', subscribed: false});
+
+    const result = await runImport(['email,subscribed', 'left@plunk.test,true', 'new@plunk.test,true'].join('\n'));
+
+    expect((await contactNamed('left@plunk.test')).subscribed).toBe(false);
+    expect((await contactNamed('new@plunk.test')).subscribed).toBe(true);
+    expect(await prisma.email.count({where: {projectId}})).toBe(0);
+    expect(result.warnings).toContainEqual(expect.stringContaining('1 row would subscribe a contact'));
+  });
+
+  it('reads a `pending` status, as an export writes it, as not subscribed', async () => {
+    const result = await runImport(['email,status', 'waiting@plunk.test,pending'].join('\n'));
+    expect((await contactNamed('waiting@plunk.test')).subscribed).toBe(false);
+    expect(result.warnings).toEqual([]);
+  });
+
   it('imports a dotted date column that within and olderThan filters can use', async () => {
     // Flodesk writes dates without milliseconds; the filters compare against toISOString(), with them
     const daysAgo = (days: number) =>

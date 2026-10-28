@@ -263,7 +263,7 @@ describe('tool behaviour', () => {
     await close();
   });
 
-  it('creates missing contacts with the subscription asked for', async () => {
+  it('creates missing contacts, which the API leaves unsubscribed', async () => {
     const writes = segmentApi({added: 1, created: 1, notFound: []});
 
     const {client, close} = await connect(baseConfig);
@@ -274,12 +274,11 @@ describe('tool behaviour', () => {
         segmentId: '11111111-1111-4111-8111-111111111111',
         emails: ['new@example.com'],
         createMissing: true,
-        subscribed: false,
       },
     });
 
     expect(result.isError).toBeFalsy();
-    expect(writes.map(w => w.body)).toEqual([{emails: ['new@example.com'], createMissing: true, subscribed: false}]);
+    expect(writes.map(w => w.body)).toEqual([{emails: ['new@example.com'], createMissing: true}]);
 
     await close();
   });

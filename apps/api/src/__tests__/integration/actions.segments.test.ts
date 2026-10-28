@@ -1,10 +1,9 @@
-import {EventEmitter} from 'node:events';
 import {TemplateType} from '@plunk/db';
-import type {NextFunction, Request, Response} from 'express';
+import type {Request} from 'express';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ZodError} from 'zod';
 
-import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {createResponse, factories, getPrismaClient, runHandler} from '../../../../../test/helpers';
 import {prisma as servicePrisma} from '../../database/prisma.js';
 import {Actions} from '../../controllers/Actions.js';
 import {HttpException} from '../../exceptions/index.js';
@@ -13,41 +12,7 @@ import {EventService} from '../../services/EventService.js';
 import {QueueService} from '../../services/QueueService.js';
 import {SegmentMembershipService} from '../../services/SegmentMembershipService.js';
 
-type Outcome = {status: number; body?: {success: boolean; data: Record<string, unknown>}; error?: unknown};
-
-/** A Response stand-in that records what the handler answered */
-function createResponse(locals: Record<string, unknown> = {}) {
-  const res = new EventEmitter() as unknown as Response & {statusCode: number};
-  res.locals = locals;
-  res.statusCode = 200;
-  res.status = (code: number) => {
-    res.statusCode = code;
-    return res;
-  };
-  return res;
-}
-
-/** Run a handler (behind `middleware`, if given) until it answers */
-function run(
-  handler: (req: Request, res: Response, next: NextFunction) => unknown,
-  req: Request,
-  res: Response & {statusCode: number},
-  middleware?: (req: Request, res: Response, next: NextFunction) => unknown,
-): Promise<Outcome> {
-  return new Promise<Outcome>(resolve => {
-    const failed = (error?: unknown) => resolve({status: error instanceof HttpException ? error.code : 500, error});
-    res.json = ((json: Outcome['body']) => {
-      resolve({status: res.statusCode, body: json});
-      return res;
-    }) as Response['json'];
-    const go = () => void handler(req, res, failed);
-    if (middleware) {
-      void middleware(req, res, (error?: unknown) => (error ? failed(error) : go()));
-    } else {
-      go();
-    }
-  });
-}
+type Body = {success: boolean; data: Record<string, unknown>};
 
 /**
  * Plunk Lite: /v1/track and /v1/send take `segments`, the static segments their contacts join in the
@@ -78,13 +43,13 @@ describe('segments on /v1/track and /v1/send', () => {
   function track(key: string, body: Record<string, unknown>) {
     const req = {method: 'POST', path: '/v1/track', headers: {authorization: `Bearer ${key}`}, body} as Request;
     const actions = new Actions();
-    return run(actions.track.bind(actions), req, createResponse(), requireTrackKey);
+    return runHandler<Body>(actions.track.bind(actions), req, createResponse(), requireTrackKey);
   }
 
   function send(body: Record<string, unknown>) {
     const req = {method: 'POST', path: '/v1/send', headers: {}, body} as unknown as Request;
     const actions = new Actions();
-    return run(
+    return runHandler<Body>(
       actions.send.bind(actions),
       req,
       createResponse({auth: {type: 'apiKey', projectId: project.id, key: 'secret'}}),

@@ -30,6 +30,8 @@ const PUBLIC_ROUTES = [
   '/unsubscribe',
   '/subscribe',
   '/manage',
+  // Plunk Lite: the double opt-in's confirmation page
+  '/confirm',
 ];
 
 // Routes that don't require a project. /account has to be here: deleting your account is

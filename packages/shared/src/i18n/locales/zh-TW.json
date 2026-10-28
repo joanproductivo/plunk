@@ -17,7 +17,19 @@
       "button": "訂閱",
       "buttonLoading": "處理中...",
       "successTitle": "訂閱成功！",
-      "successDescription": "{email} 現在會收到 {projectName} 的郵件。"
+      "successDescription": "{email} 現在會收到 {projectName} 的郵件。",
+      "pendingTitle": "請查看收件匣",
+      "pendingDescription": "我們已寄送郵件至 {email}。點擊其中的連結即可確認訂閱 {projectName}。"
+    },
+    "confirm": {
+      "title": "確認你的訂閱",
+      "description": "確認你要在 {email} 接收 {projectName} 的電子郵件。",
+      "button": "確認訂閱",
+      "buttonLoading": "確認中...",
+      "successTitle": "訂閱成功！",
+      "successDescription": "{email} 現在會收到 {projectName} 的電子郵件。",
+      "invalidTitle": "此連結已失效",
+      "invalidDescription": "它已被較新的郵件取代，或地址已變更。請重新訂閱以取得新連結。"
     },
     "manage": {
       "title": "管理偏好設定",
@@ -58,6 +70,12 @@
     "footer": {
       "unsubscribeText": "你收到這封信是因為你訂閱了 {projectName} 的郵件。如果你不想再收到這類郵件，請",
       "updatePreferences": "更新你的偏好設定"
+    },
+    "optin": {
+      "subject": "確認訂閱 {projectName}",
+      "text": "感謝你訂閱 {projectName} 的電子郵件。\n\n請確認這是你的地址，以開始接收郵件：",
+      "button": "確認訂閱",
+      "ignore": "如果你沒有訂閱，請忽略此郵件：你不會被訂閱。"
     }
   }
 }

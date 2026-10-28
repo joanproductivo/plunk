@@ -176,7 +176,8 @@ export class Segments {
 
   /**
    * POST /segments/:id/members
-   * Add contacts to a static segment by email
+   * Add contacts to a static segment by email. Plunk Lite: `createMissing` creates the missing ones
+   * unsubscribed; joining a segment never subscribes anyone.
    */
   @Post(':id/members')
   @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
@@ -194,8 +195,8 @@ export class Segments {
       return res.status(400).json({error: membersPayloadError(parsed.error)});
     }
 
-    const {emails, createMissing, subscribed} = parsed.data;
-    const result = await SegmentService.addContacts(auth.projectId!, segmentId, emails, createMissing ?? false, subscribed ?? true);
+    const {emails, createMissing} = parsed.data;
+    const result = await SegmentService.addContacts(auth.projectId!, segmentId, emails, createMissing ?? false);
 
     return res.status(200).json(result);
   }
