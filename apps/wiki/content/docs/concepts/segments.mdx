@@ -53,6 +53,7 @@ Programmatically, use:
 
 - `POST /segments/:id/members` — add contacts by email. Body: `{ emails: string[], createMissing?: boolean, subscribed?: boolean }`. With `createMissing: true`, contacts that don't exist yet are created (and start subscribed unless you pass `subscribed: false`). The response reports `{ added, created, notFound }`.
 - `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`, the number of contacts that were in the segment and left it.
+- `segments` on `POST /v1/track` (with the secret key) and `POST /v1/send` — a list of up to 20 static segment ids the contact, or each recipient sent to, joins in the same call. With `/v1/track` the contact joins before the event is recorded, so the workflows the event starts see it in them. These are entries like the ones above, with their events.
 
 Both endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`.
 

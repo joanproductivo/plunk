@@ -1,9 +1,10 @@
-import type {Segment} from '@plunk/db';
+import {Prisma, type Segment} from '@plunk/db';
 import {segmentEventName} from '@plunk/shared';
 import type {BulkSegmentOperation, SegmentEventKind} from '@plunk/types';
+import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
-import {HttpException} from '../exceptions/index.js';
+import {HttpException, ValidationError} from '../exceptions/index.js';
 
 import {EventService} from './EventService.js';
 import {QueueService} from './QueueService.js';
@@ -74,10 +75,97 @@ export class SegmentMembershipService {
     const segment = await this.getStaticSegment(projectId, segmentId, 'add contacts to');
     const ids = await this.projectContactIds(projectId, contactIds);
 
-    if (ids.length === 0) {
-      return {added: 0};
+    const entered = await this.enter(segment, ids, {reenter: mode !== 'silent'});
+    await this.trackMembershipEvents(projectId, segment, entered, 'entry', mode);
+
+    return {added: entered.length};
+  }
+
+  /**
+   * Plunk Lite: the static segments of the project with these ids, for a request that adds
+   * contacts to them (/v1/track, /v1/send). All of them, in one query, or a 422 naming each id that
+   * is not one by its place in `ids`, so the request writes nothing.
+   */
+  public static async resolveStaticSegments(projectId: string, ids: string[]): Promise<Segment[]> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) {
+      return [];
     }
 
+    const found = new Map(
+      (await prisma.segment.findMany({where: {projectId, id: {in: unique}}})).map(segment => [segment.id, segment]),
+    );
+    const errors = ids.flatMap((id, index) => {
+      const segment = found.get(id);
+      if (!segment) {
+        return [{field: `segments.${index}`, message: 'Segment not found', code: 'segment_not_found', received: id}];
+      }
+      if (segment.type !== 'STATIC') {
+        return [
+          {
+            field: `segments.${index}`,
+            message: 'Only STATIC segments take contacts',
+            code: 'segment_not_static',
+            received: id,
+          },
+        ];
+      }
+      return [];
+    });
+    if (errors.length > 0) {
+      throw new ValidationError(errors, 'Some segments cannot take contacts');
+    }
+
+    return unique.map(id => found.get(id)!);
+  }
+
+  /**
+   * Plunk Lite: add contacts of the project (as the request just wrote them) to segments already
+   * resolved, each as an entry, a current member included (D1). Returns who entered each one; the
+   * caller fires the entry events with `fireEntryEvents` when it suits its order. A segment deleted
+   * since it was resolved is skipped.
+   */
+  public static async enterSegments(
+    segments: Segment[],
+    contactIds: string[],
+  ): Promise<{segment: Segment; entered: string[]}[]> {
+    const ids = [...new Set(contactIds)];
+    const entries = [];
+    for (const segment of segments) {
+      try {
+        entries.push({segment, entered: await this.enter(segment, ids, {reenter: true})});
+      } catch (error) {
+        const gone =
+          error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2003' || error.code === 'P2025');
+        if (!gone) {
+          throw error;
+        }
+        signale.warn(`[SEGMENTS] Segment ${segment.id} was deleted before its contacts were added; skipping it`);
+      }
+    }
+    return entries;
+  }
+
+  /** Plunk Lite: the entry events of `enterSegments`, queued for the worker */
+  public static async fireEntryEvents(
+    projectId: string,
+    entries: {segment: Segment; entered: string[]}[],
+  ): Promise<void> {
+    for (const {segment, entered} of entries) {
+      await this.trackMembershipEvents(projectId, segment, entered, 'entry', 'background');
+    }
+  }
+
+  /**
+   * Write the entry of contacts of the project into a static segment, and return who entered: a
+   * new or returning member, and (with `reenter`) a current one, whose `enteredAt` is renewed
+   */
+  private static async enter(segment: Segment, ids: string[], {reenter}: {reenter: boolean}): Promise<string[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const segmentId = segment.id;
     const now = new Date();
 
     const created = await prisma.segmentMembership.createManyAndReturn({
@@ -99,7 +187,7 @@ export class SegmentMembershipService {
 
     const enteredIds = new Set([...created, ...returning].map(m => m.contactId));
 
-    if (mode !== 'silent') {
+    if (reenter) {
       // Members who were already in the segment re-enter it
       const reentered = await prisma.segmentMembership.updateManyAndReturn({
         where: {segmentId, contactId: {in: ids.filter(id => !enteredIds.has(id))}, exitedAt: null},
@@ -109,10 +197,7 @@ export class SegmentMembershipService {
       reentered.forEach(m => enteredIds.add(m.contactId));
     }
 
-    const entered = ids.filter(id => enteredIds.has(id));
-    await this.trackMembershipEvents(projectId, segment, entered, 'entry', mode);
-
-    return {added: entered.length};
+    return ids.filter(id => enteredIds.has(id));
   }
 
   /**
