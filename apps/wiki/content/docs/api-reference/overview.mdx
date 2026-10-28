@@ -204,17 +204,17 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 
 | Method | Path         | Description                                                                                  | Key      |
 | ------ | ------------ | -------------------------------------------------------------------------------------------- | -------- |
-| POST   | `/v1/send`   | Send a transactional email. Single or multiple recipients, template or inline content, attachments, headers, custom data. | `sk_*` |
-| POST   | `/v1/track`  | Track an event for a contact. Auto-creates or upserts the contact. Triggers workflows.       | `pk_*` or `sk_*` |
+| POST   | `/v1/send`   | Send a transactional email. Single or multiple recipients, template or inline content, attachments, headers, custom data. With the [double opt-in](/concepts/double-opt-in) on, `subscribed: true` waits for confirmation and needs a transactional template. | `sk_*` |
+| POST   | `/v1/track`  | Track an event for a contact. Auto-creates or upserts the contact. Triggers workflows. With the [double opt-in](/concepts/double-opt-in) on, `data.pendingConfirmation` says a sign-up waits. | `pk_*` or `sk_*` |
 | POST   | `/v1/verify` | Validate an email address — format, MX records, disposable domains, typo detection.          | `sk_*`   |
 
 ### Contacts
 
 | Method | Path                                  | Description                                                                                  |
 | ------ | ------------------------------------- | -------------------------------------------------------------------------------------------- |
-| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`. |
-| POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`.             |
-| GET    | `/contacts/:id`                       | Get a single contact.                                                                        |
+| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`, and `status` (`subscribed`, `snoozed`, `unsubscribed`, or `pending` for the contacts waiting for the [double opt-in](/concepts/double-opt-in)). Each row says `pendingConfirmation`. |
+| POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`, and `_meta.pendingConfirmation` when a sign-up waits for the [double opt-in](/concepts/double-opt-in). |
+| GET    | `/contacts/:id`                       | Get a single contact, with `optIn`, its sign-up confirmation request (`createdAt`, `lastSentAt`, `sends`, `confirmedAt`, `withdrawnAt`), and `pendingConfirmation`. |
 | GET    | `/contacts/:id/segments`              | The contact's segments: `{ static, dynamic }`, each a list of `{ id, name }` sorted by name. Dynamic ones are those whose filter it matches now. |
 | PATCH  | `/contacts/:id`                       | Update a contact's email, subscription state, or `data` fields.                              |
 | DELETE | `/contacts/:id`                       | Delete a contact.                                                                            |
@@ -273,7 +273,7 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 | PATCH  | `/segments/:id`               | Update name, description, condition (dynamic only), or `trackMembership`.                    |
 | DELETE | `/segments/:id`               | Delete a segment. Returns 409 if used by an active campaign or by a workflow's Update contact or Condition step. |
 | GET    | `/segments/:id/contacts`      | Page-based list of segment members. `page`, `pageSize` (max 100). Live for dynamic segments. |
-| POST   | `/segments/:id/members`       | Add emails to a **static** segment (max 500). Body: `{ emails, createMissing?, subscribed? }`. See [Segments](/concepts/segments). |
+| POST   | `/segments/:id/members`       | Add emails to a **static** segment (max 500). Body: `{ emails, createMissing? }`; the contacts created are unsubscribed. See [Segments](/concepts/segments). |
 | DELETE | `/segments/:id/members`       | Remove emails from a **static** segment (max 500). Body: `{ emails }`.                         |
 | POST   | `/segments/:id/compute`       | Recompute membership for a tracked dynamic segment — fires entry/exit events.                |
 | POST   | `/segments/:id/refresh`       | Cheap count refresh — no events, no membership writes.                                       |

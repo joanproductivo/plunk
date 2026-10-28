@@ -17,7 +17,19 @@
       "button": "Prenumerera",
       "buttonLoading": "Prenumererar...",
       "successTitle": "Du prenumererar nu!",
-      "successDescription": "{email} får nu e-post från {projectName}."
+      "successDescription": "{email} får nu e-post från {projectName}.",
+      "pendingTitle": "Kolla din inkorg",
+      "pendingDescription": "Vi har skickat ett mejl till {email}. Klicka på länken i det för att bekräfta din prenumeration på {projectName}."
+    },
+    "confirm": {
+      "title": "Bekräfta din prenumeration",
+      "description": "Bekräfta att du vill få e-post från {projectName} på {email}.",
+      "button": "Bekräfta prenumeration",
+      "buttonLoading": "Bekräftar...",
+      "successTitle": "Du prenumererar nu!",
+      "successDescription": "{email} får nu e-post från {projectName}.",
+      "invalidTitle": "Den här länken fungerar inte längre",
+      "invalidDescription": "Den har ersatts av ett nyare mejl, eller så har adressen ändrats. Anmäl dig igen för att få en ny länk."
     },
     "manage": {
       "title": "Hantera inställningar",
@@ -58,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Du fick det här e-postmeddelandet eftersom du anmält dig till att ta emot e-post från {projectName}. Om du inte längre vill ha den här typen av e-post kan du",
       "updatePreferences": "uppdatera dina inställningar"
+    },
+    "optin": {
+      "subject": "Bekräfta din prenumeration på {projectName}",
+      "text": "Tack för att du anmält dig till e-post från {projectName}.\n\nBekräfta att det här är din adress för att börja ta emot den:",
+      "button": "Bekräfta min prenumeration",
+      "ignore": "Om du inte har anmält dig kan du ignorera det här mejlet: du kommer inte att prenumerera."
     }
   }
 }

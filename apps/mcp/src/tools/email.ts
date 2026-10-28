@@ -69,6 +69,10 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         'either. Do not resend: `plunk_get_contact` shows the `suppression`, and only the Plunk dashboard',
         "can lift it, from the contact's page.",
         '',
+        '**Double opt-in (Plunk Lite):** with it on, `subscribed: true` does not subscribe a recipient who is not',
+        'yet: they also get a confirmation email, and join the `segments` when they confirm. A marketing template',
+        'with `subscribed: true` is refused with 422 OPT_IN_NEEDS_TRANSACTIONAL.',
+        '',
         '**Key trigger phrases:** "send an email", "email this to", "notify", "send them a message"',
       ].join('\n'),
       inputSchema: z.object({

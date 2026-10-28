@@ -11,7 +11,7 @@ import {type ContactInfo, SNOOZE_OPTIONS, snoozeDurationLabel} from '../../lib/s
 
 /**
  * Shared pieces of the recipient-facing list-management pages: `/unsubscribe`, `/subscribe`
- * and `/manage`.
+ * and `/manage`, and Plunk Lite's `/confirm`.
  *
  * These are the only Plunk surfaces a sender's recipients ever see, reached from a link in an
  * email with no account and no context. They share one shell so the three pages cannot drift
@@ -29,7 +29,7 @@ type RecipientState =
  * not be loaded. Tries the browser's preferred languages, exact tag first (`zh-HK`), then the
  * base language (`nl-BE` -> `nl`), and settles on English.
  */
-function browserLanguage(): string {
+export function browserLanguage(): string {
   if (typeof navigator === 'undefined') {
     return 'en';
   }
@@ -99,7 +99,7 @@ export function useRecipient(id: string | string[] | undefined) {
  * the marketing site, matching the `?ref=badge` the email footer badge uses, so each surface can
  * be told apart in analytics.
  */
-export type RecipientPage = 'unsubscribe' | 'subscribe' | 'manage';
+export type RecipientPage = 'unsubscribe' | 'subscribe' | 'manage' | 'confirm';
 
 /**
  * The page frame: dot-grid ground, a narrow centred column, the card, and the mail provider

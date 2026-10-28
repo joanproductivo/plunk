@@ -17,7 +17,19 @@
       "button": "登録する",
       "buttonLoading": "登録中...",
       "successTitle": "登録が完了しました！",
-      "successDescription": "{email} で {projectName} からのメールを受け取るよう登録しました。"
+      "successDescription": "{email} で {projectName} からのメールを受け取るよう登録しました。",
+      "pendingTitle": "受信トレイを確認してください",
+      "pendingDescription": "{email} にメールを送信しました。メール内のリンクをクリックして、{projectName} の購読を確認してください。"
+    },
+    "confirm": {
+      "title": "購読の確認",
+      "description": "{email} で {projectName} からのメールを受け取ることを確認してください。",
+      "button": "購読を確認",
+      "buttonLoading": "確認中...",
+      "successTitle": "購読が完了しました！",
+      "successDescription": "{email} に {projectName} からのメールが届くようになります。",
+      "invalidTitle": "このリンクは無効です",
+      "invalidDescription": "新しいメールに置き換えられたか、アドレスが変更されました。新しいリンクを受け取るには、もう一度登録してください。"
     },
     "manage": {
       "title": "配信設定の管理",
@@ -58,6 +70,12 @@
     "footer": {
       "unsubscribeText": "このメールは、{projectName} からのメール配信に同意いただいたため送信されています。今後このようなメールを受け取りたくない場合は、",
       "updatePreferences": "配信設定を変更してください"
+    },
+    "optin": {
+      "subject": "{projectName} の購読を確認してください",
+      "text": "{projectName} のメール配信にご登録いただきありがとうございます。\n\n受信を開始するには、このアドレスがご本人のものであることを確認してください：",
+      "button": "購読を確認する",
+      "ignore": "登録した覚えがない場合は、このメールを無視してください。購読は開始されません。"
     }
   }
 }

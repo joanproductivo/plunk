@@ -32,12 +32,14 @@ export interface Translations {
   pages: {
     unsubscribe: Record<string, string>;
     subscribe: Record<string, string>;
+    confirm: Record<string, string>;
     manage: Record<string, string>;
     snooze: Record<string, string>;
     common: Record<string, string>;
   };
   email: {
     footer: Record<string, string>;
+    optin: Record<string, string>;
   };
 }
 

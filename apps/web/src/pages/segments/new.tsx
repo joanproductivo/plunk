@@ -196,7 +196,7 @@ export default function NewSegmentPage() {
                   <ContactPicker
                     selected={selectedContacts}
                     onChange={setSelectedContacts}
-                    onAdd={async (emails, _subscribed) => setSelectedContacts(prev => [...new Set([...prev, ...emails])])}
+                    onAdd={async emails => setSelectedContacts(prev => [...new Set([...prev, ...emails])])}
                     placeholder="Search and select contacts…"
                   />
                 </CardContent>

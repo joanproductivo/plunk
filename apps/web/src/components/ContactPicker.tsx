@@ -1,6 +1,6 @@
 import type {Contact} from '@plunk/db';
 import type {CursorPaginatedResponse} from '@plunk/types';
-import {Button, Input, Label, Popover, PopoverContent, PopoverTrigger, Switch} from '@plunk/ui';
+import {Button, Input, Popover, PopoverContent, PopoverTrigger} from '@plunk/ui';
 import {Check, ChevronsUpDown, ClipboardList, Loader2, MailCheck, MailX, Search, Sparkles, X} from 'lucide-react';
 import {useEffect, useRef, useState} from 'react';
 import useSWR from 'swr';
@@ -16,9 +16,9 @@ interface ContactPickerProps {
   onChange: (emails: string[]) => void;
   /**
    * Called by paste mode to submit directly — skips the chip staging area.
-   * Receives the parsed email list and whether new contacts should be subscribed.
+   * Receives the parsed email list; addresses without a contact are created unsubscribed.
    */
-  onAdd: (emails: string[], subscribed: boolean) => Promise<void>;
+  onAdd: (emails: string[]) => Promise<void>;
   /** Emails already in the segment (shown as disabled in search mode) */
   existing?: string[];
   placeholder?: string;
@@ -50,7 +50,6 @@ export function ContactPicker({
 
   // Paste mode
   const [pasteText, setPasteText] = useState('');
-  const [subscribeNew, setSubscribeNew] = useState(true);
   const [debouncedPaste, setDebouncedPaste] = useState('');
   const pasteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -99,7 +98,7 @@ export function ContactPicker({
 
   const handlePasteSubmit = async () => {
     if (newPastedEmails.length === 0) return;
-    await onAdd(newPastedEmails, subscribeNew);
+    await onAdd(newPastedEmails);
     setPasteText('');
   };
 
@@ -257,15 +256,12 @@ export function ContactPicker({
                 </div>
               )}
               {preview.notFound.length > 0 && (
-                <div className="flex items-center justify-between px-3 py-2.5">
-                  <div className="flex items-center gap-2 text-neutral-700">
-                    <Sparkles className="h-4 w-4 text-amber-500 shrink-0" />
-                    <span><span className="font-medium">{preview.notFound.length}</span> new — will be created</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Label htmlFor="subscribe-new" className="text-xs text-neutral-500 cursor-pointer">Subscribe</Label>
-                    <Switch id="subscribe-new" checked={subscribeNew} onCheckedChange={setSubscribeNew} />
-                  </div>
+                <div className="flex items-center gap-2 px-3 py-2.5 text-neutral-700">
+                  <Sparkles className="h-4 w-4 text-amber-500 shrink-0" />
+                  {/* Plunk Lite: joining a segment is not a sign-up */}
+                  <span>
+                    <span className="font-medium">{preview.notFound.length}</span> new — will be created, not subscribed
+                  </span>
                 </div>
               )}
             </div>

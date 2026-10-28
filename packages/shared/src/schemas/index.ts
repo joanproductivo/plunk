@@ -1,5 +1,5 @@
 import {CampaignAudienceType, TemplateType, TrackingMode, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
-import type {FilterCondition, FilterGroup} from '@plunk/types';
+import type {FilterCondition, FilterGroup, OptInTexts} from '@plunk/types';
 import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
@@ -274,8 +274,8 @@ export const SegmentSchemas = {
     // No format check: contacts are matched by their stored email, and imports accept addresses
     // a strict validator would reject
     emails: z.array(z.string().trim().min(1).max(320)).min(1).max(SEGMENT_MEMBERS_MAX),
+    // Plunk Lite: contacts created here are never subscribed -- adding to a segment is not a sign-up
     createMissing: z.boolean().optional(),
-    subscribed: z.boolean().optional(),
   }),
 };
 
@@ -763,6 +763,21 @@ export const FooterSchemas = {
     value => typeof value === 'object' && value !== null && !Array.isArray(value),
     'The footers must be an object',
   ),
+} as const;
+
+/** A project's double opt-in (Plunk Lite): the texts are checked by toOptInTexts, with their reasons */
+export const OptInSchemas = {
+  update: z.object({
+    enabled: z.boolean(),
+    fromEmail: z.string().max(320).nullable(),
+    fromName: z.string().max(100).nullable(),
+    texts: z.custom<OptInTexts>(
+      value => typeof value === 'object' && value !== null && !Array.isArray(value),
+      'The texts must be an object',
+    ),
+  }),
+  /** The link's token, sent by the confirmation page in the body rather than the path */
+  token: z.object({token: z.string().max(200)}),
 } as const;
 
 /** How many addresses a project's failure alerts can go to (Plunk Lite) */

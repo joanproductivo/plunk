@@ -21,6 +21,10 @@ export enum ErrorCode {
   WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND',
   CONFLICT = 'CONFLICT',
   ADDRESS_SUPPRESSED = 'ADDRESS_SUPPRESSED',
+  // Plunk Lite: a sign-up through /v1/send with a marketing template, while the double opt-in is on
+  OPT_IN_NEEDS_TRANSACTIONAL = 'OPT_IN_NEEDS_TRANSACTIONAL',
+  // Plunk Lite: the public subscribe page, for a contact that never signed up nor received an email
+  CONFIRMATION_NEEDS_EMAIL = 'CONFIRMATION_NEEDS_EMAIL',
   IDEMPOTENCY_KEY_REUSED = 'IDEMPOTENCY_KEY_REUSED',
 
   // Validation & Input Errors (400, 422)

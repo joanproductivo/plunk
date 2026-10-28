@@ -20,9 +20,9 @@ import {ContactSchemas} from '@plunk/shared';
 import type {
   BulkContactActionSelector,
   BulkContactOperation,
+  ContactDisplayStatus,
   ContactImportResult,
   ContactListFilter,
-  ContactSubscriptionStatus,
   CursorPaginatedResponse,
 } from '@plunk/types';
 import {SEGMENT_IMPORT_ERROR_ROW} from '@plunk/types';
@@ -83,7 +83,7 @@ import {toast} from 'sonner';
 import useSWR from 'swr';
 import dayjs from 'dayjs';
 
-type StatusFilter = 'ALL' | ContactSubscriptionStatus;
+type StatusFilter = 'ALL' | ContactDisplayStatus;
 
 const VIEW_STORAGE_KEY = 'plunk:contacts:view';
 const COLUMNS_STORAGE_KEY = 'plunk:contacts:columns';
@@ -95,6 +95,8 @@ const STATUS_OPTIONS: FacetedFilterOption[] = [
   // where they read as churn rather than as people who are coming back.
   {value: 'snoozed', label: 'Snoozed'},
   {value: 'unsubscribed', label: 'Unsubscribed'},
+  // Plunk Lite: signed up but has not clicked the confirmation link; also counted in Unsubscribed
+  {value: 'pending', label: 'Pending confirmation'},
 ];
 
 // select + email + actions are locked-visible (see lockedColumnIds). `updatedAt`
@@ -140,10 +142,13 @@ export default function ContactsPage() {
   // The active list filters, as the API's selector takes them. The list below is fetched from
   // these too, so the list, its count, "select all matching", the bulk actions and the export
   // always see the same contacts.
+  // Plunk Lite: the contacts waiting for confirmation are listed by a query of their own, which the
+  // bulk actions and the export do not take: with that filter, only the rows ticked on the page
+  const pendingFilter = statusFilter === 'pending';
   const listFilter = useMemo<ContactListFilter>(
     () => ({
       ...(search ? {search} : {}),
-      ...(statusFilter !== 'ALL' ? {status: statusFilter} : {}),
+      ...(statusFilter !== 'ALL' && statusFilter !== 'pending' ? {status: statusFilter} : {}),
       ...(segmentFilter ? {segmentId: segmentFilter} : {}),
     }),
     [search, statusFilter, segmentFilter],
@@ -157,7 +162,7 @@ export default function ContactsPage() {
     `limit=${pageSize}`,
     cursor ? `cursor=${cursor}` : '',
     listFilter.search ? `search=${encodeURIComponent(listFilter.search)}` : '',
-    listFilter.status ? `status=${listFilter.status}` : '',
+    listFilter.status ? `status=${listFilter.status}` : pendingFilter ? 'status=pending' : '',
     listFilter.segmentId ? `segmentId=${listFilter.segmentId}` : '',
     sortParam ? `sort=${sortParam}&dir=${dirParam}` : '',
   ]
@@ -522,7 +527,11 @@ export default function ContactsPage() {
                 <span className="hidden sm:inline">Import CSV</span>
                 <span className="sm:hidden">Import</span>
               </Button>
-              <ExportContactsButton selector={exportSelector} selectionCount={effectiveSelectionCount} />
+              <ExportContactsButton
+                selector={exportSelector}
+                selectionCount={effectiveSelectionCount}
+                exportsAll={pendingFilter}
+              />
               <Button onClick={() => setShowCreateDialog(true)} className="flex-1 sm:flex-none">
                 <Plus className="h-4 w-4" />
                 <span className="hidden sm:inline">Add contact</span>
@@ -584,7 +593,7 @@ export default function ContactsPage() {
               itemNoun="contact"
               onClear={clearSelection}
               note={
-                !selectAllMatching && allOnPageSelected && totalCount > contacts.length ? (
+                !selectAllMatching && !pendingFilter && allOnPageSelected && totalCount > contacts.length ? (
                   <button
                     type="button"
                     onClick={handleSelectAllMatching}

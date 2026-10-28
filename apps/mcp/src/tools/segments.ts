@@ -123,7 +123,7 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
       title: 'Add contacts to a segment',
       description: [
         '**Purpose:** Add contacts to a STATIC segment by email. With `createMissing`, contacts that do',
-        'not exist yet are created first.',
+        'not exist yet are created first, unsubscribed: joining a segment never subscribes anyone (Plunk Lite).',
         '',
         '**NOT for:** DYNAMIC segments — their filter decides who is in them, and the API refuses.',
         '',
@@ -142,10 +142,7 @@ export function registerSegmentTools(ctx: ToolContext, client: PlunkClient): voi
         createMissing: z
           .boolean()
           .default(false)
-          .describe(
-            'Create contacts for emails that do not exist yet (subscribed unless `subscribed` is false; an address on the suppression list is created unsubscribed).',
-          ),
-        subscribed: z.boolean().optional().describe('With createMissing: subscription state of the created contacts.'),
+          .describe('Create contacts, unsubscribed, for emails that do not exist yet.'),
       }),
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true},
     },

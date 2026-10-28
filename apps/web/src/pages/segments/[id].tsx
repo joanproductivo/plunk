@@ -148,10 +148,10 @@ export default function SegmentDetailPage() {
     }
   };
 
-  const handleAddMembers = async (emails: string[], subscribed = true) => {
+  const handleAddMembers = async (emails: string[]) => {
     setIsAddingMembers(true);
     try {
-      const result = await addSegmentMembers(String(id), emails, {createMissing: true, subscribed});
+      const result = await addSegmentMembers(String(id), emails, {createMissing: true});
 
       const msg = result.created > 0
         ? `Added ${result.added} contact${result.added !== 1 ? 's' : ''} (${result.created} new)`

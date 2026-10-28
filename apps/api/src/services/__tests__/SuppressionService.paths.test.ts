@@ -132,14 +132,15 @@ describe('suppressed addresses stay unsubscribed', () => {
       await prisma.contact.delete({where: {id: contact.id}});
       const segment = await prisma.segment.create({data: {projectId, name: 'List', type: 'STATIC'}});
 
-      await SegmentService.addContacts(projectId, segment.id, [contact.email], true, true);
+      await SegmentService.addContacts(projectId, segment.id, [contact.email], true);
 
       expect((await prisma.contact.findFirstOrThrow({where: {projectId, email: contact.email}})).subscribed).toBe(
         false,
       );
-      await SegmentService.addContacts(projectId, segment.id, ['fresh@plunk.test'], true, true);
+      // Plunk Lite: so is any other, since joining a segment is not a sign-up
+      await SegmentService.addContacts(projectId, segment.id, ['fresh@plunk.test'], true);
       expect((await prisma.contact.findFirstOrThrow({where: {projectId, email: 'fresh@plunk.test'}})).subscribed).toBe(
-        true,
+        false,
       );
     });
 

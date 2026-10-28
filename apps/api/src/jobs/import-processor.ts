@@ -53,6 +53,8 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
   const unknownStatusRows = new Map<string, number>();
   let otherUnknownStatusRows = 0;
   let suppressedRows = 0;
+  // Plunk Lite: unsubscribed contacts the import would have subscribed, kept so by the double opt-in
+  let heldRows = 0;
 
   try {
     // Decode base64 CSV data
@@ -137,14 +139,18 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
             suppressedRows++;
           }
 
-          const contact = await ContactService.upsert(
+          // With the double opt-in on, an import subscribes new contacts only: an unsubscribed one stays so
+          const {contact, optIn} = await ContactService.upsertWithOptIn(
             projectId,
             email,
             row.data,
             row.suppression ? false : importedSubscription(row, true),
             row.suppression ? false : (importedSubscription(row, false) ?? true),
-            {createdAt: row.createdAt},
+            {createdAt: row.createdAt, consent: 'import'},
           );
+          if (optIn) {
+            heldRows++;
+          }
           imported.push({contactId: contact.id, segments: row.segments});
 
           if (row.invalidCreatedAt && !isUpdate) {
@@ -187,7 +193,13 @@ export async function processContactImport(job: Job<ContactImportJobData>): Prom
     result.segmentAssignments = segments.segmentAssignments;
     // Segment problems go first: there is one per name, and the dashboard lists only the first few errors.
     result.errors.unshift(...segments.errors);
-    result.warnings = importWarnings(invalidCreatedAtRows, unknownStatusRows, otherUnknownStatusRows, suppressedRows);
+    result.warnings = importWarnings(
+      invalidCreatedAtRows,
+      unknownStatusRows,
+      otherUnknownStatusRows,
+      suppressedRows,
+      heldRows,
+    );
     if (segmentsCreated.length > 0) {
       signale.info(`[IMPORT-PROCESSOR] Created static segments: ${segmentsCreated.join(', ')}`);
     }
@@ -272,6 +284,7 @@ function importWarnings(
   unknownStatusRows: Map<string, number>,
   otherUnknownStatusRows: number,
   suppressedRows: number,
+  heldRows: number,
 ): string[] {
   const rows = (count: number) => `${count} row${count === 1 ? '' : 's'}`;
   const warnings: string[] = [];
@@ -293,6 +306,11 @@ function importWarnings(
   if (suppressedRows > 0) {
     warnings.push(
       `Bounced, cleaned or complained in ${rows(suppressedRows)}: those addresses were suppressed and their contacts unsubscribed`,
+    );
+  }
+  if (heldRows > 0) {
+    warnings.push(
+      `${rows(heldRows)} would subscribe a contact that is unsubscribed: with the double opt-in on, an import only subscribes new contacts, so those stay unsubscribed`,
     );
   }
   return warnings;

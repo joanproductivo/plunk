@@ -10,8 +10,9 @@ import {DomainService} from '../services/DomainService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EmailVerificationService} from '../services/EmailVerificationService.js';
 import {EventService} from '../services/EventService.js';
+import {OptInService} from '../services/OptInService.js';
 import {SegmentMembershipService} from '../services/SegmentMembershipService.js';
-import {describeError, HttpException, NotAllowed, NotFound, ValidationError} from '../exceptions/index.js';
+import {describeError, ErrorCode, HttpException, NotAllowed, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {logger} from '../utils/logger.js';
 import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
@@ -80,18 +81,19 @@ export class Actions {
     // Event tracking should subscribe new contacts by default (subscribed=true in ContactService)
     // but preserve existing subscription state for existing contacts
     // Plunk Lite: a new contact whose address takes no email is refused (422) and the event is not
-    // stored, so the form can ask for the address again
-    const contact = await ContactService.upsert(
+    // stored, so the form can ask for the address again. With the double opt-in on, a sign-up waits
+    // for the contact to confirm, and joins its segments then.
+    const {contact, optIn} = await ContactService.upsertWithOptIn(
       auth.projectId,
       email,
       data as Record<string, unknown> | undefined,
       subscribed,
       true,
-      {verifySignup: true},
+      {verifySignup: true, key: auth.key === 'secret' ? 'secret' : 'public', segmentIds: segments.map(s => s.id)},
     );
 
     // Plunk Lite: into its segments before the event, so the workflows the event starts see it there
-    const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, [contact.id]);
+    const entries = optIn ? [] : await SegmentMembershipService.enterSegments(auth.projectId, segments, [contact.id]);
 
     // Track the event with ALL data (persistent + non-persistent)
     // Non-persistent data flows to workflows via execution context
@@ -117,6 +119,8 @@ export class Actions {
         contact: contact.id,
         event: eventRecord.id,
         timestamp: eventRecord.createdAt.toISOString(),
+        // Plunk Lite: the double opt-in kept the sign-up waiting; `optIn` says why when no email went
+        ...(optIn ? {pendingConfirmation: optIn !== 'held', optIn} : {}),
       },
     });
   }
@@ -263,6 +267,7 @@ export class Actions {
     let emailBody = body;
     let emailReplyTo = reply;
     let templateId: string | undefined;
+    let templateType: string | undefined;
 
     if (template) {
       const templateRecord = await prisma.template.findUnique({
@@ -290,6 +295,7 @@ export class Actions {
 
       emailReplyTo = reply || templateRecord.replyTo || undefined;
       templateId = templateRecord.id;
+      templateType = templateRecord.type;
     }
 
     if (!emailFrom) {
@@ -306,6 +312,16 @@ export class Actions {
     }
 
     await DomainService.verifyEmailDomain(emailFrom, auth.projectId);
+
+    // Plunk Lite: with the double opt-in on, a sign-up stays unsubscribed until confirmed, and a
+    // marketing template cannot go to an unsubscribed contact -- refused before anything is written
+    if (subscribed === true && templateType === 'MARKETING' && (await OptInService.isRequired(auth.projectId))) {
+      throw new HttpException(
+        422,
+        'With the double opt-in on, a sign-up through /v1/send waits for confirmation, so it cannot use a marketing template. Use a transactional template, or none.',
+        ErrorCode.OPT_IN_NEEDS_TRANSACTIONAL,
+      );
+    }
 
     const replyToEmail = emailReplyTo;
 
@@ -336,9 +352,15 @@ export class Actions {
         // New contacts default to unsubscribed unless explicitly opted in
         // Existing contacts preserve their subscription state unless explicitly changed
         // Plunk Lite: a new recipient whose address takes no email fails with 422 INVALID_EMAIL
-        const contact = await ContactService.upsert(auth.projectId, recipient.email, recipientData, subscribed, false, {
-          verifySignup: true,
-        });
+        // With the double opt-in on, a sign-up waits for confirmation and joins the segments then
+        const {contact, optIn} = await ContactService.upsertWithOptIn(
+          auth.projectId,
+          recipient.email,
+          recipientData,
+          subscribed,
+          false,
+          {verifySignup: true, key: 'secret', segmentIds: segments.map(s => s.id)},
+        );
 
         // Get merged data including non-persistent fields for template rendering
         const mergedData = ContactService.getMergedData(contact, data as Record<string, unknown> | undefined);
@@ -393,7 +415,9 @@ export class Actions {
           },
           email: email.id,
         });
-        sentContactIds.push(contact.id);
+        if (!optIn) {
+          sentContactIds.push(contact.id);
+        }
       } catch (error) {
         const {status, code, message} = describeError(error);
         // An address refused at sign-up comes with its likely correction, kept out of the message

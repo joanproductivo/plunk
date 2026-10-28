@@ -366,12 +366,16 @@ export class Webhooks {
                 continue;
               }
 
-              // Find or create a contact for the sender in this project
+              // Find or create a contact for the sender in this project. Plunk Lite: an email in is not
+              // a sign-up -- an existing contact keeps its subscription, and with the double opt-in on
+              // a new one is created unsubscribed
               const contact = await ContactService.upsert(
                 domainRecord.projectId,
                 senderEmail,
                 undefined, // No additional data
-                true, // Subscribe by default for inbound email senders
+                true, // New senders subscribe by default; an existing contact never does (see consent)
+                true,
+                {consent: 'none'},
               );
 
               // Create an Email record for tracking with parsed content

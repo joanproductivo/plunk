@@ -108,6 +108,27 @@ describe('ContactExportService', () => {
     expect(excluding.records.map(r => r.email)).toEqual([emailOf(0), emailOf(2), emailOf(3)]);
   });
 
+  it('writes `pending` for a contact still to confirm a sign-up, and a snooze before it', async () => {
+    const waiting = await factories.createContact({projectId, email: 'a@example.com', subscribed: false});
+    const paused = await factories.createContact({projectId, email: 'b@example.com', subscribed: false});
+    await prisma.contact.update({where: {id: paused.id}, data: {snoozedUntil: new Date(Date.now() + 86_400_000)}});
+    for (const [contactId, email] of [
+      [waiting.id, waiting.email],
+      [paused.id, paused.email],
+    ]) {
+      await prisma.plunkLiteOptInRequest.create({
+        data: {contactId: contactId!, projectId, email: email!, tokenHash: contactId!},
+      });
+    }
+
+    const {records} = await exportCsv(all);
+
+    expect(records.map(row => [row.email, row.subscribed, row.status])).toEqual([
+      ['a@example.com', 'false', 'pending'],
+      ['b@example.com', 'false', 'snoozed'],
+    ]);
+  });
+
   it('lists active static segments and live dynamic segments in separate columns', async () => {
     await seed(10);
     const club = await SegmentService.create(projectId, {name: 'Club', type: 'STATIC'});

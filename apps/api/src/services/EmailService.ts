@@ -7,10 +7,10 @@ import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, TRACKING_TOGGLE_ENABLED} fro
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
 import {
+  contactLanguage,
   footerParagraph,
   type ProjectFooters,
   renderTemplate,
-  resolveContactLanguage,
   unsubscribeFooterHtml,
 } from '@plunk/shared';
 
@@ -468,14 +468,9 @@ export class EmailService {
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
           // The contact's language (their locale, else the project's), with its own footer or Plunk's
-          const locale =
-            contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
-              ? (contact.data as Record<string, unknown>).locale
-              : undefined;
-
           return unsubscribeFooterHtml(
             footerParagraph({
-              language: resolveContactLanguage(locale, project.language),
+              language: contactLanguage(contact.data, project.language),
               projectName: project.name,
               href: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
               footers,

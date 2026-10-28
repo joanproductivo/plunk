@@ -67,24 +67,77 @@ const NAMES_MAX = 3;
 const ERRORS_MAX = 5;
 
 const CODES = SUPPORTED_LANGUAGES.map(language => language.code);
-const count = (text: string, token: string) => text.split(token).length - 1;
+/** How many times `token` appears in `text`. */
+export const countOccurrences = (text: string, token: string) => text.split(token).length - 1;
+
+/**
+ * Whether `label` is fit to stand alone as the text of a link or button: on one line, with no
+ * characters that render as nothing, and `min` to `max` characters holding at least `min` letters
+ * or digits.
+ */
+export function isVisibleLabel(label: string, min: number, max: number): boolean {
+  return (
+    label.length <= max &&
+    !/[\p{Default_Ignorable_Code_Point}\n]/u.test(label) &&
+    (label.match(/[\p{L}\p{N}]/gu) ?? []).length >= min
+  );
+}
 
 // The reason a footer cannot be kept, or null. The link must stay visible and plain: no characters
 // that render as nothing (zero-width, fillers) or reorder text, and at least three letters or digits
 function footerProblem(text: string, linkText: string): string | null {
   if (text.length < 1 || text.length > TEXT_MAX) return `the text needs 1 to ${TEXT_MAX} characters`;
-  if (count(text, '\n') >= LINES_MAX) return `the text can have at most ${LINES_MAX} lines`;
+  if (countOccurrences(text, '\n') >= LINES_MAX) return `the text can have at most ${LINES_MAX} lines`;
   if (/\p{Bidi_Control}/u.test(text)) return 'the text cannot hold characters that reorder it';
-  if (count(text, '{link}') > LINKS_MAX) return `the text can place the link at most ${LINKS_MAX} times`;
-  if (count(text, '{projectName}') > NAMES_MAX) return `the text can name the project at most ${NAMES_MAX} times`;
-  if (
-    linkText.length > LINK_MAX ||
-    /[\p{Default_Ignorable_Code_Point}\n]/u.test(linkText) ||
-    (linkText.match(/[\p{L}\p{N}]/gu) ?? []).length < LINK_MIN
-  ) {
+  if (countOccurrences(text, '{link}') > LINKS_MAX) return `the text can place the link at most ${LINKS_MAX} times`;
+  if (countOccurrences(text, '{projectName}') > NAMES_MAX)
+    return `the text can name the project at most ${NAMES_MAX} times`;
+  if (!isVisibleLabel(linkText, LINK_MIN, LINK_MAX)) {
     return `the link text needs ${LINK_MIN} to ${LINK_MAX} visible letters or digits, on one line`;
   }
   return null;
+}
+
+/** A text as it is kept: line breaks made plain and runs of blank lines kept to one, trimmed */
+export function plainText(value: unknown): string {
+  return typeof value === 'string'
+    ? value
+        .replace(/\r\n?/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+    : '';
+}
+
+/**
+ * Texts by language from untrusted data (a project's footers, its confirmation emails), keeping
+ * the valid ones, with the reasons the others were left out (the first few). `read` takes each
+ * language's fields, and `problem` says why they cannot be kept, or null.
+ */
+export function readTextsByLanguage<T>(
+  value: unknown,
+  read: (fields: Record<string, unknown>) => T,
+  problem: (text: T) => string | null,
+): {texts: Partial<Record<string, T>>; errors: string[]} {
+  const data = (value && typeof value === 'object' && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  const texts: Partial<Record<string, T>> = {};
+  const errors: string[] = [];
+
+  for (const [code, entry] of Object.entries(data)) {
+    const text = read((entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>);
+    const reason = isValidLanguageCode(code) ? problem(text) : 'not a supported language';
+
+    if (reason) {
+      errors.push(`${code.slice(0, 20)}: ${reason}`);
+    } else {
+      texts[code] = text;
+    }
+  }
+
+  return {
+    texts,
+    errors:
+      errors.length > ERRORS_MAX ? [...errors.slice(0, ERRORS_MAX), `and ${errors.length - ERRORS_MAX} more`] : errors,
+  };
 }
 
 /**
@@ -92,34 +145,15 @@ function footerProblem(text: string, linkText: string): string | null {
  * were left out (the first few). Line breaks are made plain and runs of blank lines kept to one.
  */
 export function toProjectFooters(value: unknown): {footers: ProjectFooters; errors: string[]} {
-  const data = (value && typeof value === 'object' && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
-  const footers: ProjectFooters = {};
-  const errors: string[] = [];
-
-  for (const [code, entry] of Object.entries(data)) {
-    const fields = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
-    const text =
-      typeof fields.text === 'string'
-        ? fields.text
-            .replace(/\r\n?/g, '\n')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim()
-        : '';
-    const linkText = typeof fields.linkText === 'string' ? fields.linkText.trim() : '';
-    const problem = isValidLanguageCode(code) ? footerProblem(text, linkText) : 'not a supported language';
-
-    if (problem) {
-      errors.push(`${code.slice(0, 20)}: ${problem}`);
-    } else {
-      footers[code] = {text, linkText};
-    }
-  }
-
-  return {
-    footers,
-    errors:
-      errors.length > ERRORS_MAX ? [...errors.slice(0, ERRORS_MAX), `and ${errors.length - ERRORS_MAX} more`] : errors,
-  };
+  const {texts, errors} = readTextsByLanguage(
+    value,
+    fields => ({
+      text: plainText(fields.text),
+      linkText: typeof fields.linkText === 'string' ? fields.linkText.trim() : '',
+    }),
+    footer => footerProblem(footer.text, footer.linkText),
+  );
+  return {footers: texts, errors};
 }
 
 /** Whether `footer` says just what Plunk's would in `language`, so it needs no footer of its own. */
@@ -142,6 +176,16 @@ export function resolveContactLanguage(locale: unknown, projectLanguage: string 
   };
 
   return find(locale) ?? find(projectLanguage) ?? DEFAULT_LANGUAGE;
+}
+
+/**
+ * The language of a contact's footer, pages and confirmation email: `resolveContactLanguage` with the
+ * `locale` in the contact's data, whatever that data holds.
+ */
+export function contactLanguage(data: unknown, projectLanguage: string | null | undefined): string {
+  const locale =
+    data && typeof data === 'object' && !Array.isArray(data) ? (data as {locale?: unknown}).locale : undefined;
+  return resolveContactLanguage(locale, projectLanguage);
 }
 
 // A project's own footer text with its link: escaped, the link where {link} is or else at the end,

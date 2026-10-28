@@ -129,6 +129,8 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
     name: {en: label => label, es: () => 'Las alarmas de AWS ya no llegan al panel; sus emails sí'},
     path: () => SECURITY_PATH,
   },
+  // Confirmation emails of the double opt-in that could not be sent, or the project's limit reached
+  'optin': {name: {en: () => 'Double opt-in', es: () => 'Doble opt-in'}, path: () => '/settings?tab=brand'},
   // The installation's Redis close to its maxmemory (RedisMemoryCheck)
   'redis': {name: {en: label => label, es: () => 'Redis se está quedando sin memoria'}, path: () => '/activity'},
 };

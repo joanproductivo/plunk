@@ -9,7 +9,7 @@ import type {
   WorkflowStepExecution,
 } from '@plunk/db';
 import {StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
-import type {SegmentChangesResult, UpdateContactSegmentChanges} from '@plunk/types';
+import type {OptInOutcome, SegmentChangesResult, UpdateContactSegmentChanges} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
 import {canScopeWaitToExecution, renderTemplate, WorkflowStepConfigSchemas} from '@plunk/shared';
 import dns from 'node:dns/promises';
@@ -1346,6 +1346,27 @@ export class WorkflowExecutionService {
     ) {
       desiredSubscribed = undefined;
     }
+    // Plunk Lite: nor, with the double opt-in on, before the contact confirms. It is asked to confirm
+    // instead (once the step has written its data, so in its language), but only if it is still
+    // waiting to confirm a sign-up: an event anyone can send with the public key may have started
+    // the workflow, for any address. What became of it goes in the step's result.
+    const {OptInService} = await import('./OptInService.js');
+    let askToConfirm = false;
+    let optIn: OptInOutcome | undefined;
+    if (
+      desiredSubscribed === true &&
+      !contact.subscribed &&
+      (await OptInService.isRequired(execution.workflow.projectId))
+    ) {
+      askToConfirm = await OptInService.mayAskWithoutKey(contact.id);
+      if (!askToConfirm) {
+        optIn = 'held';
+        signale.info(
+          `[WORKFLOW] Not subscribing ${contact.email}: the double opt-in only asks a contact waiting to confirm a sign-up`,
+        );
+      }
+      desiredSubscribed = undefined;
+    }
     const subscriptionChanging = desiredSubscribed !== undefined && desiredSubscribed !== contact.subscribed;
 
     const updateData: Prisma.ContactUpdateInput = {};
@@ -1362,11 +1383,18 @@ export class WorkflowExecutionService {
       updateData.snoozedUntil = null;
     }
 
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write
+    if (desiredSubscribed === false) {
+      await OptInService.cancel(contact.id);
+    }
     if (Object.keys(updateData).length > 0) {
       await prisma.contact.update({
         where: {id: contact.id},
         data: updateData,
       });
+    }
+    if (askToConfirm) {
+      optIn = await OptInService.request({...contact, data: newData as Prisma.JsonObject});
     }
 
     if (subscriptionChanging) {
@@ -1393,6 +1421,7 @@ export class WorkflowExecutionService {
       newData,
       subscriptionAction,
       subscribed: desiredSubscribed ?? contact.subscribed,
+      ...(optIn ? {optIn} : {}),
       ...segmentChanges,
     };
   }

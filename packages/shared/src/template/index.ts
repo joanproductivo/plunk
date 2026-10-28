@@ -16,6 +16,7 @@ export * from './emailVideo.js';
 export * from './emailVideoSize.js';
 export {escapeHtml} from './html.js';
 export {declarations, readPixels, withDeclaration} from './inlineStyle.js';
+export * from './optInEmail.js';
 export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
 export * from './unsubscribeFooter.js';
 

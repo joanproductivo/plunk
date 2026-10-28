@@ -41,6 +41,8 @@ import {Domains} from './controllers/Domains.js';
 import {Events} from './controllers/Events.js';
 import {Footers} from './controllers/Footers.js';
 import {Oauth} from './controllers/Oauth/index.js';
+import {OptIn} from './controllers/OptIn.js';
+import {OptInSettings} from './controllers/OptInSettings.js';
 import {Projects} from './controllers/Projects.js';
 import {Segments} from './controllers/Segments.js';
 import {Templates} from './controllers/Templates.js';
@@ -172,6 +174,8 @@ const server = new (class extends Server {
       new Contacts(),
       new Domains(),
       new Footers(),
+      new OptIn(),
+      new OptInSettings(),
       new Projects(),
       new Segments(),
       new Templates(),

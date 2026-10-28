@@ -4,7 +4,7 @@ import {pipeline} from 'node:stream/promises';
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
-import {ContactSchemas, resolveContactLanguage, UtilitySchemas} from '@plunk/shared';
+import {ContactSchemas, contactLanguage, UtilitySchemas} from '@plunk/shared';
 import type {
   BulkContactActionJobData,
   BulkContactActionSelector,
@@ -20,6 +20,7 @@ import {HttpException} from '../exceptions/index.js';
 import {ContactExportService} from '../services/ContactExportService.js';
 import {ContactSegmentsService} from '../services/ContactSegmentsService.js';
 import {ContactService} from '../services/ContactService.js';
+import {OptInService} from '../services/OptInService.js';
 import {QueueService} from '../services/QueueService.js';
 import {BULK_SEGMENT_ACTION, SegmentMembershipService} from '../services/SegmentMembershipService.js';
 import {SuppressionService} from '../services/SuppressionService.js';
@@ -73,7 +74,8 @@ export class Contacts {
     //
     // Two spellings of the facet: `?status=subscribed|snoozed|unsubscribed` is the current
     // one, and `?subscribed=true|false` is kept working for callers written before snoozing
-    // existed. `status` wins when both are present.
+    // existed. `status` wins when both are present. Plunk Lite: `?status=pending`, the contacts
+    // waiting to confirm a sign-up, has a query of its own; `unsubscribed` still includes them.
     const statusParam = req.query.status as ContactSubscriptionStatus | undefined;
     const status = statusParam && CONTACT_SUBSCRIPTION_STATUSES.includes(statusParam) ? statusParam : undefined;
     const subscribedParam = req.query.subscribed as string | undefined;
@@ -90,15 +92,20 @@ export class Contacts {
     }
     const segmentId = segmentIdParam as string | undefined;
 
-    const result = await ContactService.list(auth.projectId!, limit, cursor, search, {
-      status,
-      subscribed,
-      segmentId,
-      sort,
-      dir,
-    });
+    const result =
+      req.query.status === 'pending'
+        ? await OptInService.listPending(auth.projectId!, {limit, cursor, search, segmentId, sort, dir})
+        : await ContactService.list(auth.projectId!, limit, cursor, search, {status, subscribed, segmentId, sort, dir});
 
-    return res.status(200).json(result);
+    // Plunk Lite: each row says whether it waits to confirm a sign-up, which its status shows
+    const pending = await OptInService.pendingAmong(
+      auth.projectId!,
+      result.data.map(contact => contact.id),
+    );
+    return res.status(200).json({
+      ...result,
+      data: result.data.map(contact => ({...contact, pendingConfirmation: pending.has(contact.id)})),
+    });
   }
 
   /**
@@ -164,7 +171,7 @@ export class Contacts {
   /**
    * GET /contacts/:id
    * Get a specific contact by ID, with `suppression` when its address is on the project's
-   * suppression list (Plunk Lite)
+   * suppression list (Plunk Lite), and `optIn`, its sign-up confirmation request, if any (Plunk Lite)
    */
   @Get(':id')
   @Middleware([requireAuth, requireEmailVerified])
@@ -179,8 +186,14 @@ export class Contacts {
 
     const contact = await ContactService.get(auth.projectId!, contactId);
     const suppression = await SuppressionService.find(auth.projectId!, contact.email);
+    const optIn = await OptInService.requestFor(contact.id);
 
-    return res.status(200).json({...contact, suppression});
+    return res.status(200).json({
+      ...contact,
+      suppression,
+      optIn,
+      pendingConfirmation: (await OptInService.pendingAmong(auth.projectId!, [contact.id])).has(contact.id),
+    });
   }
 
   /**
@@ -210,7 +223,8 @@ export class Contacts {
    * Create or update a contact (upsert). A suppressed address is never subscribed: from a dashboard
    * session the request is refused (409), from an API key the contact stays unsubscribed and
    * `_meta.suppressed` says why. A new contact whose address takes no email is refused (422,
-   * Plunk Lite).
+   * Plunk Lite). With the double opt-in on (Plunk Lite), a sign-up from an API key waits for the
+   * contact to confirm, and `_meta.pendingConfirmation` says so; the dashboard's form subscribes.
    */
   @Post('')
   @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
@@ -230,9 +244,10 @@ export class Contacts {
     // From the dashboard's form, subscribing a suppressed address is refused with the reason;
     // from an API key (integrations, the MCP) the contact stays unsubscribed, and the response
     // says why
-    const contact = await ContactService.upsert(auth.projectId!, email, data, subscribed, true, {
+    const {contact, optIn} = await ContactService.upsertWithOptIn(auth.projectId!, email, data, subscribed, true, {
       explicit: auth.type === 'jwt' && subscribed !== false,
       verifySignup: true,
+      consent: auth.type === 'jwt' ? 'operator' : 'unconfirmed',
     });
     const suppressed =
       subscribed !== false && !contact.subscribed
@@ -245,6 +260,7 @@ export class Contacts {
         isNew: !isUpdate,
         isUpdate,
         ...(suppressed && {suppressed}),
+        ...(optIn ? {pendingConfirmation: optIn !== 'held', optIn} : {}),
       },
     });
   }
@@ -315,12 +331,6 @@ export class Contacts {
       throw new HttpException(404, 'Contact not found');
     }
 
-    // The contact's language, chosen as for the footer that links here (their locale, else the project's)
-    const locale =
-      contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data)
-        ? (contact.data as Record<string, unknown>).locale
-        : undefined;
-
     return res.status(200).json({
       id: contact.id,
       email: contact.email,
@@ -332,7 +342,8 @@ export class Contacts {
       // opting out of before they act. Already printed in the footer of every marketing email
       // this contact received, so it discloses nothing the link holder has not seen.
       projectName: project.name,
-      language: resolveContactLanguage(locale, project.language),
+      // The contact's language, chosen as for the footer that links here (their locale, else the project's)
+      language: contactLanguage(contact.data, project.language),
     });
   }
 
@@ -356,6 +367,8 @@ export class Contacts {
       email: contact.email,
       subscribed: contact.subscribed,
       snoozedUntil: contact.snoozedUntil,
+      // Plunk Lite: with the double opt-in on, the page asks the address to confirm first
+      ...(contact.pendingConfirmation ? {pendingConfirmation: true} : {}),
     });
   }
 

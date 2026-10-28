@@ -13,9 +13,14 @@ interface ExportContactsButtonProps {
   selector: BulkContactActionSelector;
   /** Number of selected contacts; 0 exports the filtered list. */
   selectionCount: number;
+  /**
+   * Plunk Lite: the list is filtered by a status the export cannot filter by (waiting for
+   * confirmation), so without a selection it exports the list without that filter, statuses included.
+   */
+  exportsAll?: boolean;
 }
 
-export function ExportContactsButton({selector, selectionCount}: ExportContactsButtonProps) {
+export function ExportContactsButton({selector, selectionCount, exportsAll = false}: ExportContactsButtonProps) {
   const [isExporting, setIsExporting] = useState(false);
 
   const handleExport = async () => {
@@ -35,10 +40,25 @@ export function ExportContactsButton({selector, selectionCount}: ExportContactsB
     }
   };
 
-  const label = selectionCount > 0 ? `Export selected (${selectionCount.toLocaleString()})` : 'Export CSV';
+  const label =
+    selectionCount > 0
+      ? `Export selected (${selectionCount.toLocaleString()})`
+      : exportsAll
+        ? 'Export CSV (all statuses)'
+        : 'Export CSV';
 
   return (
-    <Button variant="outline" onClick={handleExport} disabled={isExporting} className="flex-1 sm:flex-none">
+    <Button
+      variant="outline"
+      onClick={handleExport}
+      disabled={isExporting}
+      className="flex-1 sm:flex-none"
+      title={
+        selectionCount === 0 && exportsAll
+          ? 'Exports the list without the status filter: the contacts waiting for confirmation read "pending" in its status column'
+          : undefined
+      }
+    >
       {isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
       <span className="hidden sm:inline">{label}</span>
       <span className="sm:hidden">Export</span>
