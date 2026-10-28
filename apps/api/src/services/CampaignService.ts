@@ -33,9 +33,11 @@ import {QueueService} from './QueueService.js';
 import {SegmentService} from './SegmentService.js';
 import {Keys} from './keys.js';
 import {DASHBOARD_URI, STRIPE_ENABLED} from '../app/constants.js';
-import {sendRawEmail} from './SESService.js';
+import {getDailyQuotaQuick, sendRawEmail} from './SESService.js';
 
 const BATCH_SIZE = 500; // Number of emails to process per batch (increased for better performance)
+/** Plunk Lite: the share of SES's 24-hour quota a campaign may use up when it starts */
+const DAILY_QUOTA_SHARE = 0.95;
 
 /** Namespace of the campaign email ids; fixed, and used for nothing else */
 const CAMPAIGN_EMAIL_ID_NAMESPACE = 'b438d7ec-4f8c-4929-b750-e677bcec6d06';
@@ -619,6 +621,20 @@ export class CampaignService {
     // Get recipient count if not provided
     if (recipientCount === undefined) {
       recipientCount = await this.getRecipientCount(projectId, campaign);
+    }
+
+    // Plunk Lite: refuse a send that would not fit in what is left of SES's 24-hour quota, keeping
+    // 5 % of it for the day's transactional and workflow emails. Without an answer from SES, or with
+    // no limit, the send goes on.
+    const quota = await getDailyQuotaQuick();
+    if (quota && quota.max24HourSend >= 0) {
+      const allowed = Math.floor(DAILY_QUOTA_SHARE * quota.max24HourSend);
+      if (quota.sentLast24Hours + recipientCount > allowed) {
+        throw new HttpException(
+          400,
+          `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
+        );
+      }
     }
 
     // Move to SENDING only from DRAFT or SCHEDULED, in one statement: of two sends that race

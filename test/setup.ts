@@ -68,6 +68,13 @@ process.env.IGNORE_AUTOMATIC_OPENS = 'true';
 // depend on (example.com takes no email). The tests of that check switch it on with a fake resolver.
 process.env.PLUNK_LITE_VERIFY_SIGNUPS = 'false';
 
+// Plunk Lite: a campaign checks SES's 24-hour quota as it starts; the suite never reaches SES, so
+// the check has no answer and lets every send go on. Its own tests use the real one.
+vi.mock('../apps/api/src/services/SESService', async importOriginal => ({
+  ...(await importOriginal<typeof import('../apps/api/src/services/SESService')>()),
+  getDailyQuotaQuick: vi.fn(async () => null),
+}));
+
 // Static import is safe: database.ts only reads env in initialize(), which runs
 // in beforeAll — well after the env mutations above.
 import {testDatabase} from './helpers/database';

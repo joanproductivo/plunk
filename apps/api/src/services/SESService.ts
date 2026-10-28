@@ -577,6 +577,26 @@ export const verifyConfigurationSets = async (): Promise<string[] | undefined> =
  * Get AWS SES account sending quota and rate limit
  * @returns MaxSendRate (emails per second) or null if the call fails
  */
+/**
+ * Plunk Lite: the account's 24-hour quota and what it has sent, for a campaign about to start: at
+ * most 3 seconds, without the SDK's retries, and null when SES does not answer or leaves a figure out
+ * (rather than the sandbox's figure getSendingQuota assumes). A negative maximum means no limit.
+ */
+export async function getDailyQuotaQuick(): Promise<{max24HourSend: number; sentLast24Hours: number} | null> {
+  try {
+    const quota = await ses.getSendQuota({}, {abortSignal: AbortSignal.timeout(3000)});
+    if (quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) {
+      return null;
+    }
+    return {max24HourSend: quota.Max24HourSend, sentLast24Hours: quota.SentLast24Hours};
+  } catch (error) {
+    signale.warn(
+      `[SES] Could not read the sending quota before a campaign: ${error instanceof Error ? error.message : error}`,
+    );
+    return null;
+  }
+}
+
 export const getSendingQuota = async (): Promise<{
   maxSendRate: number;
   max24HourSend: number;
