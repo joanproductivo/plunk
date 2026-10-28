@@ -3,9 +3,8 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {redis} from '../../database/redis';
 import {FailureAlertService} from '../FailureAlertService';
 import {emailQueue} from '../QueueService';
-import {getAccountSendingEnabledQuick} from '../SESService';
+import {getAccountStatusQuick} from '../SESService';
 import {
-  accountSendingEnabled,
   holdSending,
   noteQuotaHeld,
   noteSent,
@@ -18,7 +17,7 @@ import {
 
 vi.mock('../SESService', async importOriginal => ({
   ...(await importOriginal<typeof import('../SESService')>()),
-  getAccountSendingEnabledQuick: vi.fn(async () => null),
+  getAccountStatusQuick: vi.fn(async () => null),
 }));
 
 /** Plunk Lite: how the email queue waits out what SES says about the whole account, on a real Redis */
@@ -101,45 +100,51 @@ describe('SesSendGate', () => {
     }
   });
 
-  it("takes SES's own answer, when it gives one, over what the refusals look like", async () => {
-    const minute = Date.UTC(2030, 0, 1, 16, 0);
-    vi.mocked(getAccountSendingEnabledQuick).mockResolvedValueOnce(false);
-    expect(await refusalMeansPause('una.example.com', 'Refused.', minute)).toBe(true);
+  it('takes a refusal for a pause at once when SES says the account is paused', async () => {
+    vi.mocked(getAccountStatusQuick).mockResolvedValueOnce('paused');
 
-    // Two domains refusing at once, while SES says the account may send: not a pause
-    const later = Date.UTC(2030, 0, 1, 17, 0);
-    vi.mocked(getAccountSendingEnabledQuick).mockResolvedValueOnce(true);
+    expect(await refusalMeansPause('una.example.com', 'Refused.', Date.UTC(2030, 0, 1, 16, 0))).toBe(true);
+  });
+
+  it('with SES saying the account is fine, still goes by what the refusals look like', async () => {
+    vi.mocked(getAccountStatusQuick).mockResolvedValue('ok');
+
+    // One refusal: an email of its own
+    expect(await refusalMeansPause('una.example.com', 'Refused.', Date.UTC(2030, 0, 1, 17, 0))).toBe(false);
+
+    // 20 in a minute from two domains: a pause SES does not show yet
+    const minute = Date.UTC(2030, 0, 1, 17, 30);
     const answers = [];
-    for (let i = 0; i < 25; i++) {
-      answers.push(await refusalMeansPause(i % 2 ? 'una.example.com' : 'dieta.example.com', 'Refused.', later + i));
+    for (let i = 0; i < 20; i++) {
+      answers.push(await refusalMeansPause(i % 2 ? 'una.example.com' : 'dieta.example.com', 'Refused.', minute + i));
     }
-    expect(answers).not.toContain(true);
-    // ...asked once, the answer kept for 10 seconds
-    expect(getAccountSendingEnabledQuick).toHaveBeenCalledTimes(2);
+    expect(answers.slice(0, 19)).not.toContain(true);
+    expect(answers[19]).toBe(true);
+    vi.mocked(getAccountStatusQuick).mockResolvedValue(null);
   });
 
   it('keeps a paused queue paused while SES says the account is still paused', async () => {
     await pauseSending('Sending paused for this account.');
     const due = Date.now() + SES_PAUSE_PROBE_MS + 1000;
-    vi.mocked(getAccountSendingEnabledQuick).mockResolvedValueOnce(false);
+    vi.mocked(getAccountStatusQuick).mockResolvedValueOnce('paused');
 
     expect(await resumeSendingIfDue(due)).toBe(false);
     expect(await emailQueue.isPaused()).toBe(true);
 
-    vi.mocked(getAccountSendingEnabledQuick).mockResolvedValueOnce(true);
+    vi.mocked(getAccountStatusQuick).mockResolvedValueOnce('ok');
     expect(await resumeSendingIfDue(due + 61_000)).toBe(true);
     expect(await emailQueue.isPaused()).toBe(false);
   });
 
-  it('asks SES again once its answer is old: 10 seconds after a yes, a minute after a no', async () => {
+  it('asks SES again once its answer is old: 10 seconds after an ok, a minute after a pause', async () => {
     const at = Date.UTC(2030, 0, 1, 18, 0);
-    vi.mocked(getAccountSendingEnabledQuick).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    vi.mocked(getAccountStatusQuick).mockResolvedValueOnce('ok').mockResolvedValueOnce('paused');
 
-    expect(await accountSendingEnabled(at)).toBe(true);
-    expect(await accountSendingEnabled(at + 9_000)).toBe(true);
-    expect(await accountSendingEnabled(at + 11_000)).toBe(false);
-    expect(await accountSendingEnabled(at + 60_000)).toBe(false);
-    expect(getAccountSendingEnabledQuick).toHaveBeenCalledTimes(2);
+    expect(await refusalMeansPause('una.example.com', 'Refused.', at)).toBe(false);
+    expect(await refusalMeansPause('una.example.com', 'Refused.', at + 9_000)).toBe(false);
+    expect(await refusalMeansPause('una.example.com', 'Refused.', at + 11_000)).toBe(true);
+    expect(await refusalMeansPause('una.example.com', 'Refused.', at + 60_000)).toBe(true);
+    expect(getAccountStatusQuick).toHaveBeenCalledTimes(2);
   });
 
   it('resolves the pause and the quota alerts with the first email out, once', async () => {

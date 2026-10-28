@@ -4,7 +4,7 @@ import {errorMessage, redis} from '../database/redis.js';
 
 import {FailureAlertService} from './FailureAlertService.js';
 import {emailQueue} from './QueueService.js';
-import {getAccountSendingEnabledQuick} from './SESService.js';
+import {getAccountStatusQuick} from './SESService.js';
 
 /**
  * Plunk Lite: how the email queue waits out what SES says about the whole account. A rate or a
@@ -12,8 +12,9 @@ import {getAccountSendingEnabledQuick} from './SESService.js';
  * the queue, and the recovery sweep tries again every 30 minutes. Emails held back this way go back
  * to the queue without spending an attempt.
  *
- * Whether the account is paused is asked of SES (GetAccountSendingEnabled) when the IAM policy
- * allows it; without an answer, it is told from what the refusals look like.
+ * Whether the account is paused is asked of SES (GetAccount, its EnforcementStatus) when the IAM
+ * policy allows it, and told from what the refusals look like too: SES's status may lag the first
+ * refusals of a pause.
  */
 
 const PAUSED_KEY = 'plunk-lite:ses:paused';
@@ -36,12 +37,12 @@ const AWAITING_SEND_TTL_MS = 48 * 60 * 60_000;
 /** Refusals within a minute, from at least two sender domains, that mean the account is paused */
 const REJECTIONS_FOR_PAUSE = 20;
 const REJECTION_DOMAINS_FOR_PAUSE = 2;
-/** How long an answer of GetAccountSendingEnabled is kept: a "may send" shortly, as a pause may follow */
-const SENDING_ENABLED_TTL_MS = 10_000;
-const SENDING_PAUSED_TTL_MS = 60_000;
+/** How long an answer of GetAccount is kept: an "ok" shortly, as a pause may follow */
+const ACCOUNT_OK_TTL_MS = 10_000;
+const ACCOUNT_PAUSED_TTL_MS = 60_000;
 
 /** The last question to SES: when it was asked, its answer, and the answer once it came */
-let sendingEnabled: {at: number; answer: Promise<boolean | null>; enabled?: boolean | null} | undefined;
+let lastQuestion: {at: number; answer: Promise<'paused' | 'ok' | null>; status?: 'paused' | 'ok' | null} | undefined;
 
 // Hold the limiter for `ms` -- only lengthening it, so a second's wait for the sending rate never
 // cuts short the quarter of an hour of a used-up daily quota. Same value as BullMQ's rateLimit.
@@ -96,7 +97,7 @@ export async function resumeSendingIfDue(now = Date.now()): Promise<boolean> {
       return false;
     }
     // SES says it is still paused: no probe, and so no refusals, until it says otherwise
-    if ((await accountSendingEnabled(now)) === false) {
+    if ((await accountStatus(now)) === 'paused') {
       return false;
     }
     // Before resuming, so a refusal that pauses again right after leaves a pause of its own
@@ -127,36 +128,35 @@ export async function noteSent(): Promise<void> {
 }
 
 /**
- * Whether SES lets the account send, asked at most every 10 seconds (every minute once it says no,
+ * The account's status from SES, asked at most every 10 seconds (every minute once it says paused,
  * or gives no answer). Null without an answer.
  */
-export function accountSendingEnabled(now = Date.now()): Promise<boolean | null> {
-  if (sendingEnabled) {
-    const ttl = sendingEnabled.enabled === true ? SENDING_ENABLED_TTL_MS : SENDING_PAUSED_TTL_MS;
+function accountStatus(now = Date.now()): Promise<'paused' | 'ok' | null> {
+  if (lastQuestion) {
+    const ttl = lastQuestion.status === 'ok' ? ACCOUNT_OK_TTL_MS : ACCOUNT_PAUSED_TTL_MS;
     // A question still on its way (at most 2 seconds) is shared rather than asked again; a clock
     // that went back makes the answer stale
-    const age = now - sendingEnabled.at;
-    if (sendingEnabled.enabled === undefined || (age >= 0 && age < ttl)) {
-      return sendingEnabled.answer;
+    const age = now - lastQuestion.at;
+    if (lastQuestion.status === undefined || (age >= 0 && age < ttl)) {
+      return lastQuestion.answer;
     }
   }
-  const question: NonNullable<typeof sendingEnabled> = {at: now, answer: getAccountSendingEnabledQuick()};
-  void question.answer.then(enabled => {
-    question.enabled = enabled;
+  const question: NonNullable<typeof lastQuestion> = {at: now, answer: getAccountStatusQuick()};
+  void question.answer.then(status => {
+    question.status = status;
   });
-  sendingEnabled = question;
+  lastQuestion = question;
   return question.answer;
 }
 
 /**
  * Whether a refusal SES gave an email for itself (`rejected`) is in fact the whole account paused,
- * in words this code does not know: SES's own answer when it gives one, otherwise the refusals' look
- * (manyRejections).
+ * in words this code does not know: SES says the account is paused, or the refusals look like it
+ * (manyRejections). An "ok" from SES does not rule out the second, since its status may lag.
  */
 export async function refusalMeansPause(fromDomain: string, message: string, now = Date.now()): Promise<boolean> {
-  const enabled = await accountSendingEnabled(now);
-  if (enabled !== null) {
-    return !enabled;
+  if ((await accountStatus(now)) === 'paused') {
+    return true;
   }
   return manyRejections(fromDomain, message, now);
 }

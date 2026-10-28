@@ -14,12 +14,14 @@ describe('sendRawEmail against an SES endpoint', () => {
   let server: http.Server;
   let requests = 0;
   let lastRequestBody = '';
+  let lastRequestPath = '';
   let respond: (res: http.ServerResponse) => void = () => {};
-  const previousEndpoint = process.env.AWS_ENDPOINT_URL_SES;
+  const previousEndpoints = {v1: process.env.AWS_ENDPOINT_URL_SES, v2: process.env.AWS_ENDPOINT_URL_SESV2};
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       requests++;
+      lastRequestPath = req.url ?? '';
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
@@ -32,10 +34,15 @@ describe('sendRawEmail against an SES endpoint', () => {
 
   afterAll(async () => {
     await new Promise(resolve => server.close(resolve));
-    if (previousEndpoint === undefined) {
-      delete process.env.AWS_ENDPOINT_URL_SES;
-    } else {
-      process.env.AWS_ENDPOINT_URL_SES = previousEndpoint;
+    for (const [name, previous] of [
+      ['AWS_ENDPOINT_URL_SES', previousEndpoints.v1],
+      ['AWS_ENDPOINT_URL_SESV2', previousEndpoints.v2],
+    ] as const) {
+      if (previous === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previous;
+      }
     }
   });
 
@@ -46,6 +53,7 @@ describe('sendRawEmail against an SES endpoint', () => {
   /** The module built against `endpoint`: the clients read it when they are created */
   async function sesServiceAt(endpoint: string): Promise<SESServiceModule> {
     process.env.AWS_ENDPOINT_URL_SES = endpoint;
+    process.env.AWS_ENDPOINT_URL_SESV2 = endpoint;
     vi.resetModules();
     return import('../SESService');
   }
@@ -211,31 +219,28 @@ describe('sendRawEmail against an SES endpoint', () => {
     expect(await (await sesServiceAt('http://127.0.0.1:1')).getDailyQuotaQuick()).toBeNull();
   });
 
-  it('asks whether the account may send, and gives null without an answer', async () => {
-    const enabled = (value: string) => (res: http.ServerResponse) => {
-      res.writeHead(200, {'Content-Type': 'text/xml'});
-      res.end(
-        '<GetAccountSendingEnabledResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><GetAccountSendingEnabledResult>' +
-          value +
-          '</GetAccountSendingEnabledResult><ResponseMetadata><RequestId>r-e</RequestId></ResponseMetadata></GetAccountSendingEnabledResponse>',
-      );
+  it("reads the account's status from GetAccount, and gives null without an answer", async () => {
+    const account = (body: Record<string, unknown>) => (res: http.ServerResponse) => {
+      res.writeHead(200, {'Content-Type': 'application/json'});
+      res.end(JSON.stringify(body));
     };
     const service = await sesServiceAt(local());
 
-    respond = enabled('<Enabled>false</Enabled>');
-    expect(await service.getAccountSendingEnabledQuick()).toBe(false);
-    respond = enabled('<Enabled>true</Enabled>');
-    expect(await service.getAccountSendingEnabledQuick()).toBe(true);
+    respond = account({EnforcementStatus: 'SHUTDOWN', SendingEnabled: true, ProductionAccessEnabled: true});
+    expect(await service.getAccountStatusQuick()).toBe('paused');
+    // Sending switched off by hand stops it as surely
+    respond = account({EnforcementStatus: 'HEALTHY', SendingEnabled: false});
+    expect(await service.getAccountStatusQuick()).toBe('paused');
+    respond = account({EnforcementStatus: 'PROBATION', SendingEnabled: true});
+    expect(await service.getAccountStatusQuick()).toBe('ok');
+    expect(lastRequestPath).toBe('/v2/email/account');
 
-    // The IAM policy without ses:GetAccountSendingEnabled
+    // The IAM policy without ses:GetAccount
     respond = res => {
-      res.writeHead(403, {'Content-Type': 'text/xml'});
-      res.end(
-        '<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code>' +
-          '<Message>not authorized to perform: ses:GetAccountSendingEnabled</Message></Error><RequestId>r-d</RequestId></ErrorResponse>',
-      );
+      res.writeHead(403, {'Content-Type': 'application/json', 'x-amzn-ErrorType': 'AccessDeniedException'});
+      res.end(JSON.stringify({message: 'not authorized to perform: ses:GetAccount'}));
     };
-    expect(await service.getAccountSendingEnabledQuick()).toBeNull();
+    expect(await service.getAccountStatusQuick()).toBeNull();
   });
 });
 

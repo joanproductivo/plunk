@@ -1,5 +1,6 @@
 import type {EventType} from '@aws-sdk/client-ses';
 import {SES} from '@aws-sdk/client-ses';
+import {SESv2} from '@aws-sdk/client-sesv2';
 import {STS} from '@aws-sdk/client-sts';
 import signale from 'signale';
 
@@ -594,17 +595,28 @@ export async function getDailyQuotaQuick(): Promise<{max24HourSend: number; sent
 }
 
 /**
- * Plunk Lite: whether SES lets the account send, from GetAccountSendingEnabled: at most 2 seconds,
- * without the SDK's retries. Null when it gives no answer -- the IAM policy lacks
- * ses:GetAccountSendingEnabled, or SES does not answer -- so the caller falls back on what the
- * refusals look like.
+ * Plunk Lite: SES API v2, only to read the account's status. One attempt, like the send client: the
+ * question is asked again soon enough.
  */
-export async function getAccountSendingEnabledQuick(): Promise<boolean | null> {
+const sesv2 = new SESv2({
+  region: AWS_SES_REGION,
+  credentials: SES_CLIENT_CONFIG.credentials,
+  maxAttempts: 1,
+  requestHandler: SES_HTTP_OPTIONS,
+});
+
+/**
+ * Plunk Lite: whether the account is paused, from GetAccount (SES API v2): 'paused' when SES has
+ * paused it (EnforcementStatus SHUTDOWN) or its sending is switched off, 'ok' otherwise. At most
+ * 2 seconds; null when it gives no answer -- the IAM policy lacks ses:GetAccount, or SES does not
+ * answer. GetAccountSendingEnabled would not do: it does not change when SES pauses the account.
+ */
+export async function getAccountStatusQuick(): Promise<'paused' | 'ok' | null> {
   try {
-    const answer = await ses.getAccountSendingEnabled({}, {abortSignal: AbortSignal.timeout(2000)});
-    return typeof answer.Enabled === 'boolean' ? answer.Enabled : null;
+    const account = await sesv2.getAccount({}, {abortSignal: AbortSignal.timeout(2000)});
+    return account.EnforcementStatus === 'SHUTDOWN' || account.SendingEnabled === false ? 'paused' : 'ok';
   } catch (error) {
-    signale.warn(`[SES] Could not ask whether the account may send: ${error instanceof Error ? error.message : error}`);
+    signale.warn(`[SES] Could not read the account's status: ${error instanceof Error ? error.message : error}`);
     return null;
   }
 }
