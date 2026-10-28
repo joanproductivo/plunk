@@ -1,4 +1,6 @@
-import type {NextFunction, Request, Response} from 'express';
+import {Server} from '@overnightjs/core';
+import express, {type NextFunction, type Request, type Response} from 'express';
+import request from 'supertest';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -81,6 +83,28 @@ describe('POST /v1/track with the secret key', () => {
     expect((await track(project.secret, body, 'off')).status).toBe(200);
     expect((await track(project.public, body, 'off')).status).toBe(403);
     expect((await track('sk_nobodyhasthiskey123', body, 'off')).status).toBe(401);
+  });
+
+  it('is the key check the route itself runs', async () => {
+    vi.resetModules();
+    const {Actions} = await import('../../controllers/Actions.js');
+    const server = new (class extends Server {
+      constructor() {
+        super();
+        this.app.use(express.json());
+        this.addControllers([new Actions()]);
+        this.app.use((error: {code?: number}, _req: Request, res: Response, _next: NextFunction) => {
+          res.status(typeof error.code === 'number' ? error.code : 500).json({});
+        });
+      }
+    })();
+
+    const response = await request(server.app)
+      .post('/v1/track')
+      .set('Authorization', `Bearer ${project.secret}`)
+      .send({event: 'newsletter.signup', email: 'max@example.com'});
+
+    expect(response.status).toBe(200);
   });
 
   it('keeps taking the public key by default', async () => {

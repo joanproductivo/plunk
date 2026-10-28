@@ -195,7 +195,8 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
  * key is switched off (PLUNK_LITE_PUBLIC_TRACK=off).
  */
 export const requireTrackKey = (req: Request, res: Response, next: NextFunction) =>
-  req.headers.authorization?.startsWith('Bearer sk_')
+  // Loosely, so a secret key in a malformed header gets the secret key's format error, not the switch's 403
+  /^bearer\s+sk_/i.test(req.headers.authorization ?? '')
     ? requireSecretKey(req, res, next)
     : requirePublicKey(req, res, next);
 

@@ -35,7 +35,7 @@ describe('useJsonBodyParsers', () => {
     expect(response.body.type).toBe('entity.too.large');
   });
 
-  it('takes at most 64 KB on /v1/track, whose key is public', async () => {
+  it('takes at most 64 KB on /v1/track, which takes the public key', async () => {
     const over = await request(appWithParsers())
       .post('/v1/track')
       .send({filler: 'x'.repeat(100 * 1024)});
