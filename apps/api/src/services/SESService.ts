@@ -594,6 +594,22 @@ export async function getDailyQuotaQuick(): Promise<{max24HourSend: number; sent
 }
 
 /**
+ * Plunk Lite: whether SES lets the account send, from GetAccountSendingEnabled: at most 2 seconds,
+ * without the SDK's retries. Null when it gives no answer -- the IAM policy lacks
+ * ses:GetAccountSendingEnabled, or SES does not answer -- so the caller falls back on what the
+ * refusals look like.
+ */
+export async function getAccountSendingEnabledQuick(): Promise<boolean | null> {
+  try {
+    const answer = await ses.getAccountSendingEnabled({}, {abortSignal: AbortSignal.timeout(2000)});
+    return typeof answer.Enabled === 'boolean' ? answer.Enabled : null;
+  } catch (error) {
+    signale.warn(`[SES] Could not ask whether the account may send: ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
+}
+
+/**
  * Get AWS SES account sending quota and rate limit
  * @returns MaxSendRate (emails per second) or null if the call fails
  */

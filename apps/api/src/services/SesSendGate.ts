@@ -4,12 +4,16 @@ import {errorMessage, redis} from '../database/redis.js';
 
 import {FailureAlertService} from './FailureAlertService.js';
 import {emailQueue} from './QueueService.js';
+import {getAccountSendingEnabledQuick} from './SESService.js';
 
 /**
  * Plunk Lite: how the email queue waits out what SES says about the whole account. A rate or a
  * daily quota reached holds the queue back for a while (BullMQ's limiter); a paused account pauses
  * the queue, and the recovery sweep tries again every 30 minutes. Emails held back this way go back
  * to the queue without spending an attempt.
+ *
+ * Whether the account is paused is asked of SES (GetAccountSendingEnabled) when the IAM policy
+ * allows it; without an answer, it is told from what the refusals look like.
  */
 
 const PAUSED_KEY = 'plunk-lite:ses:paused';
@@ -32,8 +36,12 @@ const AWAITING_SEND_TTL_MS = 48 * 60 * 60_000;
 /** Refusals within a minute, from at least two sender domains, that mean the account is paused */
 const REJECTIONS_FOR_PAUSE = 20;
 const REJECTION_DOMAINS_FOR_PAUSE = 2;
-/** Refusals within a minute, worded as the pause, that mean a probe found SES still paused */
-const REJECTIONS_FOR_PAUSE_WHILE_PROBING = 5;
+/** How long an answer of GetAccountSendingEnabled is kept: a "may send" shortly, as a pause may follow */
+const SENDING_ENABLED_TTL_MS = 10_000;
+const SENDING_PAUSED_TTL_MS = 60_000;
+
+/** The last question to SES: when it was asked, its answer, and the answer once it came */
+let sendingEnabled: {at: number; answer: Promise<boolean | null>; enabled?: boolean | null} | undefined;
 
 // Hold the limiter for `ms` -- only lengthening it, so a second's wait for the sending rate never
 // cuts short the quarter of an hour of a used-up daily quota. Same value as BullMQ's rateLimit.
@@ -87,6 +95,10 @@ export async function resumeSendingIfDue(now = Date.now()): Promise<boolean> {
     if (now - at < SES_PAUSE_PROBE_MS) {
       return false;
     }
+    // SES says it is still paused: no probe, and so no refusals, until it says otherwise
+    if ((await accountSendingEnabled(now)) === false) {
+      return false;
+    }
     // Before resuming, so a refusal that pauses again right after leaves a pause of its own
     await redis.eval(DELETE_IF_UNCHANGED, 1, PAUSED_KEY, raw);
     await redis.set(PROBING_KEY, reason, 'PX', AWAITING_SEND_TTL_MS);
@@ -114,6 +126,41 @@ export async function noteSent(): Promise<void> {
   }
 }
 
+/**
+ * Whether SES lets the account send, asked at most every 10 seconds (every minute once it says no,
+ * or gives no answer). Null without an answer.
+ */
+export function accountSendingEnabled(now = Date.now()): Promise<boolean | null> {
+  if (sendingEnabled) {
+    const ttl = sendingEnabled.enabled === true ? SENDING_ENABLED_TTL_MS : SENDING_PAUSED_TTL_MS;
+    // A question still on its way (at most 2 seconds) is shared rather than asked again; a clock
+    // that went back makes the answer stale
+    const age = now - sendingEnabled.at;
+    if (sendingEnabled.enabled === undefined || (age >= 0 && age < ttl)) {
+      return sendingEnabled.answer;
+    }
+  }
+  const question: NonNullable<typeof sendingEnabled> = {at: now, answer: getAccountSendingEnabledQuick()};
+  void question.answer.then(enabled => {
+    question.enabled = enabled;
+  });
+  sendingEnabled = question;
+  return question.answer;
+}
+
+/**
+ * Whether a refusal SES gave an email for itself (`rejected`) is in fact the whole account paused,
+ * in words this code does not know: SES's own answer when it gives one, otherwise the refusals' look
+ * (manyRejections).
+ */
+export async function refusalMeansPause(fromDomain: string, message: string, now = Date.now()): Promise<boolean> {
+  const enabled = await accountSendingEnabled(now);
+  if (enabled !== null) {
+    return !enabled;
+  }
+  return manyRejections(fromDomain, message, now);
+}
+
 /** A refusal's words without the addresses in them, to tell whether two refusals say the same */
 function wording(message: string): string {
   return message.replace(/\S+@\S+/g, '@').trim();
@@ -124,10 +171,9 @@ function wording(message: string): string {
  * in words this code does not know. True once a minute holds 20 refusals from at least two sender
  * domains -- a paused account refuses every sender, while a domain that is not verified, or a bad
  * address, refuses only its own -- or, while a probe has resumed sending and nothing has gone out
- * yet, 5 refusals once one is worded like the refusal that paused it. Best effort: with Redis out
- * it says false.
+ * yet, a refusal worded like the one that paused it. Best effort: with Redis out it says false.
  */
-export async function manyRejections(fromDomain: string, message: string, now = Date.now()): Promise<boolean> {
+async function manyRejections(fromDomain: string, message: string, now = Date.now()): Promise<boolean> {
   const minute = Math.floor(now / 60_000);
   const countKey = `plunk-lite:ses:rejected:${minute}`;
   const domainsKey = `plunk-lite:ses:rejected-domains:${minute}`;
@@ -144,11 +190,7 @@ export async function manyRejections(fromDomain: string, message: string, now = 
     const count = Number(results?.[0]?.[1] ?? 0);
     const domains = Number(results?.[4]?.[1] ?? 0);
     const probing = results?.[5]?.[1];
-    if (
-      typeof probing === 'string' &&
-      count >= REJECTIONS_FOR_PAUSE_WHILE_PROBING &&
-      wording(probing) === wording(message)
-    ) {
+    if (typeof probing === 'string' && wording(probing) === wording(message)) {
       return true;
     }
     return count >= REJECTIONS_FOR_PAUSE && domains >= REJECTION_DOMAINS_FOR_PAUSE;

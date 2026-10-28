@@ -54,10 +54,10 @@ import {
 } from '../services/SESService.js';
 import {
   holdSending,
-  manyRejections,
   noteQuotaHeld,
   noteSent,
   pauseSending,
+  refusalMeansPause,
   SES_DAILY_QUOTA_WAIT_MS,
   SES_RATE_WAIT_MS,
 } from '../services/SesSendGate.js';
@@ -122,9 +122,21 @@ type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
 /** What `processEmailJob` uses of a BullMQ job, so tests can drive it without a queue */
 export type EmailJob = Pick<Job<SendEmailJobData>, 'data' | 'attemptsMade' | 'opts' | 'updateData'>;
 
+/**
+ * Plunk Lite: tell every project of a condition of the SES account -- disabled ones too, since the
+ * account is the installation's and a pause may follow a disable
+ */
+function recordSesCondition(sourceKey: string, error: string): Promise<void> {
+  return FailureAlertService.recordForAll({sourceKey, label: 'Amazon SES', error}, {includeDisabled: true});
+}
+
 /** Plunk Lite: most times SES's sending rate puts an email back without spending an attempt */
 const MAX_RATE_LIMITED_STARTS = 50;
-/** Plunk Lite: longest a daily quota or an account pause holds an email back without spending attempts */
+/**
+ * Plunk Lite: longest a daily quota or an account pause holds an email back without spending attempts,
+ * counted from the first hold whatever the cause: an email held 40 hours for a pause has 8 left for a
+ * quota used up after it
+ */
 const MAX_HELD_MS = 48 * 60 * 60_000;
 
 /**
@@ -163,10 +175,10 @@ async function holdBack(
   } else if (refusal === 'daily-quota') {
     await holdSending(SES_DAILY_QUOTA_WAIT_MS);
     await noteQuotaHeld();
-    await FailureAlertService.recordForAll({sourceKey: 'ses:daily-quota', label: 'Amazon SES', error: message});
+    await recordSesCondition('ses:daily-quota', message);
   } else {
     await pauseSending(message);
-    await FailureAlertService.recordForAll({sourceKey: 'ses:paused', label: 'Amazon SES', error: message});
+    await recordSesCondition('ses:paused', message);
   }
   return Worker.RateLimitError();
 }
@@ -635,9 +647,9 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
             SES_CONFIGURATION_SET,
         })
       : 'other';
-    // A paused account refuses every sender, in words this code may not know: many refusals at
-    // once, from more than one sender domain, are taken for one
-    if (refusal === 'rejected' && (await manyRejections(email.from.split('@')[1] ?? email.from, message))) {
+    // A paused account refuses every sender, in words this code may not know: SES is asked, or many
+    // refusals at once, from more than one sender domain, are taken for one
+    if (refusal === 'rejected' && (await refusalMeansPause(email.from.split('@')[1] ?? email.from, message))) {
       refusal = 'account-paused';
     }
 
@@ -654,7 +666,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       // would only be refused again
       await prisma.email.update({where: {id: emailId}, data: {status: EmailStatus.FAILED, error: message}});
       if (refusal === 'config-set') {
-        await FailureAlertService.recordForAll({sourceKey: 'ses:config-set', label: 'Amazon SES', error: message});
+        await recordSesCondition('ses:config-set', message);
       } else {
         await FailureAlertService.recordEmail(email, message);
       }

@@ -26,13 +26,16 @@ description: Configure email delivery
         "ses:VerifyDomainDkim",
         "ses:ListIdentities",
         "ses:SetIdentityFeedbackForwardingEnabled",
-        "ses:DescribeConfigurationSet"
+        "ses:DescribeConfigurationSet",
+        "ses:GetAccountSendingEnabled"
       ],
       "Resource": "*"
     }
   ]
 }
 ```
+
+`ses:GetAccountSendingEnabled` is for Plunk Lite: with it, the email queue asks SES whether the account is paused, rather than guessing from the refusals. Without it, everything else still works.
 
 ## 2. Create SNS Topic
 
