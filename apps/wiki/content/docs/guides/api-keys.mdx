@@ -15,9 +15,11 @@ In the dashboard, open your project and go to **Settings → API Keys**. Both ke
 | Key        | Prefix | Endpoints it can call                                                              | Where it's safe to use            |
 | ---------- | ------ | ---------------------------------------------------------------------------------- | --------------------------------- |
 | Public     | `pk_`  | `POST /v1/track` only                                                              | Client-side code (browser, mobile apps) |
-| Secret     | `sk_`  | Every other endpoint — sending email, contacts, segments, campaigns, templates, workflows, domains, billing | Server-side only                  |
+| Secret     | `sk_`  | Every endpoint, `POST /v1/track` included — sending email, contacts, segments, campaigns, templates, workflows, domains, billing | Server-side only                  |
 
 The public key is intentionally limited so you can call `/v1/track` from a browser or mobile app to record events without exposing your project's full API surface. Anything beyond event tracking — sending emails, reading contacts, creating campaigns — requires the secret key.
+
+`/v1/track` also takes the secret key, so a server can create or update a contact and record its event in one call — for example, a signup form that posts to your own backend instead of calling Plunk from the browser. A self-hosted server can switch the public key off (`PLUNK_LITE_PUBLIC_TRACK=off`); the secret key keeps working there. If you send an `Idempotency-Key` with the secret key, here or on `/v1/send`, make it random: keys are shared by the whole project, and the public key, which anyone can read in your page, could take a predictable one first.
 
 The project a request belongs to is derived from the key automatically. There's no separate project ID parameter on API requests.
 
@@ -83,7 +85,7 @@ response = requests.post(
 
 </Tabs>
 
-If the key prefix doesn't match the endpoint (e.g. you use `pk_` on `/v1/send`), the API returns `401` with code `INVALID_API_KEY`.
+If the key prefix doesn't match the endpoint (e.g. you use `pk_` on `/v1/send`), the API returns `401` with code `INVALID_API_KEY`. `/v1/track` takes either key.
 
 ## Rotating keys
 

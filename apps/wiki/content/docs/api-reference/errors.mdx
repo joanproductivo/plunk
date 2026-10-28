@@ -161,7 +161,7 @@ All errors include a machine-readable `code` field for programmatic handling. He
 }
 ```
 
-**Solution**: Check your API key is correct. Secret endpoints require keys starting with `sk_`, while tracking endpoints use `pk_` keys.
+**Solution**: Check your API key is correct. Secret endpoints require keys starting with `sk_`; `/v1/track` takes a `pk_` key, or an `sk_` key from a server.
 
 #### Missing Authorization Header
 

@@ -26,7 +26,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "API Key",
-        "description": "API Key authentication. The project is automatically derived from the key.\n\n**`/v1/track` requires a public key (`pk_*`)** — it is the one endpoint intended for client-side use, and a secret key is rejected there with `401`.\n\n**Every other endpoint requires a secret key (`sk_*`)** and rejects public keys with `401`.\n\nSo the two key types are not interchangeable in either direction: pick the key that matches the endpoint you are calling."
+        "description": "API Key authentication. The project is automatically derived from the key.\n\n**`/v1/track` takes a public key (`pk_*`)** — it is the one endpoint intended for client-side use — **or a secret key (`sk_*`)**, from a server. A self-hosted server can switch the public key off (`PLUNK_LITE_PUBLIC_TRACK=off`): it is then refused with `403`, and the secret key keeps working.\n\n**Every other endpoint requires a secret key (`sk_*`)** and rejects public keys with `401`."
       }
     },
     "schemas": {
@@ -1015,7 +1015,7 @@
       "post": {
         "tags": ["Public API"],
         "summary": "Track event",
-        "description": "Track an event for a contact. Automatically creates or upserts the contact, then records the event. Tracked events can be used as workflow triggers, segment filters, and audience filters.\n\n**Reserved event names** (rejected with `VALIDATION_ERROR` and code `reserved_event`): anything matching `email.*`, `contact.subscribed`, `contact.unsubscribed`, `segment.<slug>.entry`, `segment.<slug>.exit`. These are emitted by Plunk itself.\n\n**New contacts:** an address that is not a contact yet is refused with `422 INVALID_EMAIL` when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`); `error.details` has `reasons` and any `suggestedEmail`, and the event is not recorded.\n\n**Idempotency**: re-tracking the same event creates a new event record. Send an `Idempotency-Key` header to have a repeated request refused with `409` instead.",
+        "description": "Track an event for a contact. Automatically creates or upserts the contact, then records the event. Tracked events can be used as workflow triggers, segment filters, and audience filters.\n\n**Reserved event names** (rejected with `VALIDATION_ERROR` and code `reserved_event`): anything matching `email.*`, `contact.subscribed`, `contact.unsubscribed`, `segment.<slug>.entry`, `segment.<slug>.exit`. These are emitted by Plunk itself.\n\n**New contacts:** an address that is not a contact yet is refused with `422 INVALID_EMAIL` when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`); `error.details` has `reasons` and any `suggestedEmail`, and the event is not recorded.\n\n**Idempotency**: re-tracking the same event creates a new event record. Send an `Idempotency-Key` header to have a repeated request refused with `409` instead. Keys are shared by the whole project, whichever key sent them: with the secret key, use a random one, since the public key could take a predictable one first.\n\n**Keys:** the public key (`pk_*`) from a browser, or the secret key (`sk_*`) from a server, which creates or updates the contact and records the event in one call.",
         "operationId": "trackEvent",
         "requestBody": {
           "required": true,
@@ -1091,6 +1091,16 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The public key is switched off on this server (`PLUNK_LITE_PUBLIC_TRACK=off`): call it from a server with the secret key. Or the project is disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "409": {
             "$ref": "#/components/responses/IdempotencyConflict"

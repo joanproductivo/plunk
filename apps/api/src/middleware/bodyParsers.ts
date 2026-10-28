@@ -43,12 +43,12 @@ function capLargeSends(req: Request, res: Response, next: NextFunction): void {
  * applies to anonymous requests too: only /v1/send, whose attachments travel in the body, gets
  * as much as nginx lets through in front of it (client_max_body_size 10M), and only a few such
  * bodies at a time. Every other body is small -- the largest, lists of up to 10,000 ids -- and
- * 2 MB keeps unauthenticated requests from filling the heap; /v1/track, whose key is public, gets
- * 64 KB. A body over its limit fails with `type: 'entity.too.large'`.
+ * 2 MB keeps unauthenticated requests from filling the heap; /v1/track, which takes the public
+ * key, gets 64 KB. A body over its limit fails with `type: 'entity.too.large'`.
  */
 export function useJsonBodyParsers(app: Application): void {
   app.use('/v1/send', capLargeSends, json({limit: '10mb'}));
-  // Plunk Lite: /v1/track takes a public key, so anyone can post to it; its data is at most 32 KB
+  // Plunk Lite: /v1/track takes the public key, so anyone can post to it; its data is at most 32 KB
   app.use('/v1/track', json({limit: '64kb'}));
   app.use(json({limit: '2mb'}));
 }

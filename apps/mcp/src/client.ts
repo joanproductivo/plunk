@@ -30,7 +30,7 @@ interface RequestOptions {
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
-  /** Use the public key instead of the secret key (only `/v1/track` needs this). */
+  /** Use the public key instead of the secret key (only `/v1/track` takes it). */
   usePublicKey?: boolean;
 }
 

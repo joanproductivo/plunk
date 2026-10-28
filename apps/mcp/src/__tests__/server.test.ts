@@ -434,7 +434,7 @@ describe('tool behaviour', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    // /v1/track needs a public key, so the secret-key path must go the long way.
+    // Without a public key the event is tracked against the contact it upserts first.
     expect(calls).toEqual(['https://api.example.com/contacts', 'https://api.example.com/events/track']);
 
     await close();

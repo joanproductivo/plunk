@@ -10,7 +10,7 @@ declare global {
 		interface Locals {
 			/**
 			 * Authentication context for the current request
-			 * Set by auth middleware (requireAuth, requireSecretKey, requirePublicKey)
+			 * Set by auth middleware (requireAuth, requireSecretKey, requirePublicKey, requireTrackKey)
 			 */
 			auth: AuthResponse;
 		}

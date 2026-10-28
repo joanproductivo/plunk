@@ -128,7 +128,8 @@ export function parseJwt(request: Request): string {
 }
 
 /**
- * Middleware to require public API key authentication (for /v1/track endpoint only)
+ * Middleware to require public API key authentication (for /v1/track endpoint only, through
+ * requireTrackKey)
  * Validates that the request has a valid public key and sets the project
  * @param req
  * @param res
@@ -140,7 +141,7 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
     if (!PLUNK_LITE_PUBLIC_TRACK) {
       throw new HttpException(
         403,
-        'Public keys are switched off on this server (PLUNK_LITE_PUBLIC_TRACK=off). Use a secret key: POST /contacts, and POST /events/track for events.',
+        'Public keys are switched off on this server (PLUNK_LITE_PUBLIC_TRACK=off). Call /v1/track from your server with a secret key (sk_*).',
         ErrorCode.FORBIDDEN,
       );
     }
@@ -186,6 +187,18 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
     next(error);
   }
 };
+
+/**
+ * Plunk Lite: the key /v1/track takes -- the public key, which a form can call it with from the
+ * browser, or the secret key, from a server. The secret key does nothing it could not already do
+ * with POST /contacts and POST /events/track, only in one call, and it is the way in when the public
+ * key is switched off (PLUNK_LITE_PUBLIC_TRACK=off).
+ */
+export const requireTrackKey = (req: Request, res: Response, next: NextFunction) =>
+  // Loosely, so a secret key in a malformed header gets the secret key's format error, not the switch's 403
+  /^bearer\s+sk_/i.test(req.headers.authorization ?? '')
+    ? requireSecretKey(req, res, next)
+    : requirePublicKey(req, res, next);
 
 /**
  * Middleware to require secret API key authentication

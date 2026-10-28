@@ -205,10 +205,9 @@ for anything you would not want an agent to change.
 
 ## Event tracking and the two key types
 
-Plunk's `/v1/track` endpoint requires the **public** key, and it is the only endpoint that does.
-Without `PLUNK_PUBLIC_KEY`, `plunk_track_event` gets the same result with the secret key by upserting
-the contact first and then recording the event against it. Both paths create the contact if it does
-not exist. Setting `PLUNK_PUBLIC_KEY` just makes it one request instead of two.
+With `PLUNK_PUBLIC_KEY`, `plunk_track_event` calls Plunk's `/v1/track` endpoint in one request.
+Without it, it gets the same result with the secret key by upserting the contact first and then
+recording the event against it. Both paths create the contact if it does not exist.
 
 ## Development
 

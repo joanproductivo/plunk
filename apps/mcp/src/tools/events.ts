@@ -50,10 +50,10 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
     },
     async ({event, email, subscribed, data}) =>
       runTool(async () => {
-        // `/v1/track` takes an email and upserts the contact, but it is the one
-        // endpoint that requires the public key. With only a secret key we have
-        // to reproduce it: upsert the contact to get an ID, then track against
-        // that ID via the secret-key event endpoint.
+        // `/v1/track` takes an email and upserts the contact. With the public key
+        // it is one call; with only the secret key the contact is upserted first
+        // (which also says whether it is suppressed) and the event tracked
+        // against its ID.
         if (client.hasPublicKey) {
           const result = await client.request({
             method: 'POST',
