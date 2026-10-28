@@ -95,25 +95,35 @@ export const jwt = {
   },
 };
 
-/**
- * Methods that change nothing. The cookie check below lists these rather than the methods that
- * write, so a method in neither list is still checked.
- */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Reject state-changing requests sent by a browser from an origin outside the CORS allow-list.
+ *
+ * CORS only hides the response from other origins; the request itself still runs. Because the session
+ * cookie is attached to cross-site form submissions, any route trusting the cookie alone is open to CSRF
+ * without this check. Browsers always send `Origin` on non-GET requests, so a missing header means a
+ * non-browser client, which cannot carry a victim's cookie. `Origin: null` is rejected.
+ * @param request The express request object
+ */
+export function assertTrustedOrigin(request: Request): void {
+  if (SAFE_METHODS.has(request.method)) {
+    return;
+  }
+
+  const origin = request.headers.origin;
+
+  if (origin !== undefined && !isAllowedOrigin(origin)) {
+    throw new NotAllowed('Cross-origin requests are not allowed for this route');
+  }
+}
 
 /**
  * Parse a user's ID from the request JWT token
  * @param request The express request object
  */
 export function parseJwt(request: Request): string {
-  // The session cookie rides along on requests from any site (SameSite=None, so the dashboard can
-  // reach the API on another site), and CORS only stops other sites from reading the answer. A
-  // browser always names the page's origin on these methods, so one from elsewhere is turned away
-  // before the cookie is trusted; a client outside the browser sends no Origin and is unaffected.
-  const origin = request.headers.origin;
-  if (!SAFE_METHODS.has(request.method) && origin !== undefined && !isAllowedOrigin(origin)) {
-    throw new NotAllowed('Requests from other sites cannot use the dashboard session');
-  }
+  assertTrustedOrigin(request);
 
   const token: string | undefined = request.cookies.next_token;
 

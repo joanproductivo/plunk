@@ -28,7 +28,7 @@ import {
   TRACKING_TOGGLE_ENABLED,
   verifySignupsEnabled,
 } from './app/constants.js';
-import {allowedOrigins, isAllowedOrigin} from './app/origins.js';
+import {ALLOWED_ORIGINS, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';
 import {Alerts} from './controllers/Alerts.js';
@@ -100,6 +100,8 @@ const server = new (class extends Server {
 
     // Log all requests to database for historical tracking and analytics
     this.app.use(databaseRequestLogger);
+
+    const allowedOrigins = ALLOWED_ORIGINS;
 
     // Public API endpoints that should allow all origins
     const publicApiPaths = ['/v1', '/v1/track', '/v1/send'];
