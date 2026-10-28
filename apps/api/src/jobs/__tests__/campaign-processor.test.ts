@@ -4,6 +4,7 @@ import {type Job, UnrecoverableError, Worker} from 'bullmq';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {redis} from '../../database/redis.js';
 import {FailureAlertService} from '../../services/FailureAlertService.js';
 import {campaignQueue} from '../../services/QueueService.js';
 import {onCampaignBatchFailed, retryFailedCampaignBatches} from '../campaign-processor.js';
@@ -47,6 +48,8 @@ describe('campaign batches that failed for good', () => {
   it('gives a failed batch of the current send another round', async () => {
     const campaign = await sendingCampaign();
     const id = await failedBatch({campaignId: campaign.id, generation: campaign.sentAt!.getTime()});
+    // It had stalled before: BullMQ counts stalls for the job's whole life, so the round starts it at 0
+    await redis.hset(`${campaignQueue.qualifiedName}:${id}`, 'stc', 4);
 
     expect(await retryFailedCampaignBatches()).toBe(1);
 
@@ -54,6 +57,7 @@ describe('campaign batches that failed for good', () => {
     expect(await job!.getState()).toBe('waiting');
     expect(job!.data.sweepRetries).toBe(1);
     expect(job!.attemptsMade).toBe(0);
+    expect(job!.stalledCounter).toBe(0);
   });
 
   it('leaves a batch of an earlier send, of a campaign no longer sending, or out of rounds', async () => {

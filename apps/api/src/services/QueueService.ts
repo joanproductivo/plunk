@@ -33,7 +33,7 @@ import type {
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
-import {errorMessage} from '../database/redis.js';
+import {errorMessage, redis} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
 
 /** How long a change that is already written waits for a queue before carrying on without it */
@@ -577,6 +577,8 @@ export class QueueService {
     cancelledAt: Date,
   ): Promise<void> {
     const jobId = `campaign-cancel-cleanup-${campaignId}`;
+    // False while the cleanup is still to run, which then does the work, or when a finished one
+    // would not go, which clearFinishedJob logs
     await this.clearFinishedJob(campaignCancelCleanupQueue, jobId);
 
     await campaignCancelCleanupQueue.add(
@@ -914,18 +916,21 @@ export class QueueService {
 
   /**
    * Plunk Lite: give a job that failed for good another round of its attempts, counting the rounds
-   * in its data. BullMQ keeps the attempts already made, so they are reset for the round.
+   * in its data. BullMQ keeps the attempts already made, and the times the job stalled, for the
+   * job's whole life, so both are reset for the round.
    */
   public static async retryForAnotherRound<T extends {sweepRetries?: number}>(job: Job<T>): Promise<void> {
     await job.updateData({...job.data, sweepRetries: (job.data.sweepRetries ?? 0) + 1});
+    await redis.hdel(`${job.queueQualifiedName}:${job.id}`, 'stc');
     await job.retry('failed', {resetAttemptsMade: true});
   }
 
   /**
-   * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time
-   * (every page is read before anything is removed, so removing cannot shift the pages). A job that
-   * has started meanwhile cannot be removed, and is left to find what it should do. Returns how many
-   * were removed.
+   * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time,
+   * every page before anything is removed. The worker still takes jobs meanwhile, which can shift a
+   * page so that one is read twice (its second removal fails and is skipped) or never: the job left
+   * behind is one the caller has already made pointless, and finds so when it runs. A job that has
+   * started meanwhile cannot be removed either. Returns how many were removed.
    */
   private static async removeQueuedJobs<T>(
     queue: Queue<T>,
