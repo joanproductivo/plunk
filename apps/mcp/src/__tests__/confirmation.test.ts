@@ -157,6 +157,57 @@ describe('plunk_send_campaign confirmation', () => {
   });
 });
 
+/** Plunk Lite: a TRANSACTIONAL campaign reaches unsubscribed contacts too, and the send says how many */
+describe('plunk_send_campaign and unsubscribed contacts', () => {
+  /** A TRANSACTIONAL campaign whose audience route answers with `audience` */
+  function mockTransactional(audience: () => Response) {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async url => {
+      const target = String(url instanceof Request ? url.url : url);
+      calls.push(target);
+      if (target.endsWith('/audience')) {
+        return audience();
+      }
+      if (target.includes('/send')) {
+        return json({status: 'SENDING'});
+      }
+      return json({success: true, data: {id: 'camp-1', name: 'Terms', type: 'TRANSACTIONAL', totalRecipients: 10}});
+    });
+    return calls;
+  }
+
+  it('refuses to send when the number cannot be checked, unless told to include them', async () => {
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const calls = mockTransactional(() => json({error: 'down'}, 500));
+    const {client, close} = await connect();
+
+    const refused = await client.callTool({name: 'plunk_send_campaign', arguments: {id: 'camp-1'}});
+    expect(refused.isError).toBe(true);
+    expect(calls.filter(url => url.includes('/send'))).toHaveLength(0);
+
+    const sent = await client.callTool({
+      name: 'plunk_send_campaign',
+      arguments: {id: 'camp-1', includeUnsubscribed: true},
+    });
+    expect(sent.isError).toBeFalsy();
+    expect(calls.filter(url => url.includes('/send'))).toHaveLength(1);
+
+    await close();
+  });
+
+  it('sends once the number is known', async () => {
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const calls = mockTransactional(() => json({success: true, data: {total: 10, unsubscribed: 3}}));
+    const {client, close} = await connect();
+
+    const result = await client.callTool({name: 'plunk_send_campaign', arguments: {id: 'camp-1'}});
+
+    expect(result.isError).toBeFalsy();
+    expect(calls.filter(url => url.endsWith('/audience'))).toHaveLength(1);
+    await close();
+  });
+});
+
 describe('plunk_send_email confirmation', () => {
   it('sends to a single recipient without prompting', async () => {
     const calls = mockApi();

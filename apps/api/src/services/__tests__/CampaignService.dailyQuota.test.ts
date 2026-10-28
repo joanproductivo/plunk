@@ -1,4 +1,4 @@
-import {CampaignAudienceType, CampaignStatus} from '@plunk/db';
+import {CampaignAudienceType, CampaignStatus, TemplateType} from '@plunk/db';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -51,5 +51,33 @@ describe('CampaignService.send and the SES daily quota', () => {
 
     vi.mocked(getDailyQuotaQuick).mockResolvedValueOnce({max24HourSend: -1, sentLast24Hours: 50_000});
     expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
+  });
+});
+
+/** Plunk Lite: the send dialogs say how many unsubscribed contacts a TRANSACTIONAL campaign reaches */
+describe('CampaignService.getAudience', () => {
+  let projectId: string;
+
+  beforeEach(async () => {
+    projectId = (await factories.createUserWithProject()).project.id;
+    await factories.createContact({projectId, subscribed: true});
+    await factories.createContact({projectId, subscribed: true});
+    await factories.createContact({projectId, subscribed: false});
+  });
+
+  it('counts the unsubscribed recipients of a transactional campaign', async () => {
+    const campaign = await factories.createCampaign({
+      projectId,
+      type: TemplateType.TRANSACTIONAL,
+      audienceType: CampaignAudienceType.ALL,
+    });
+
+    expect(await CampaignService.getAudience(projectId, campaign.id)).toEqual({total: 3, unsubscribed: 1});
+  });
+
+  it('counts none for a marketing campaign, which only reaches subscribed contacts', async () => {
+    const campaign = await factories.createCampaign({projectId, audienceType: CampaignAudienceType.ALL});
+
+    expect(await CampaignService.getAudience(projectId, campaign.id)).toEqual({total: 2, unsubscribed: 0});
   });
 });

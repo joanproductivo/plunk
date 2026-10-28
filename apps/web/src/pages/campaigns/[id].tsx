@@ -151,6 +151,25 @@ function figureTone(figure: SupportingFigure, s: CampaignStats): string {
   return 'text-neutral-900';
 }
 
+/** Plunk Lite: a TRANSACTIONAL campaign reaches unsubscribed contacts too; its send dialogs say how many */
+function UnsubscribedNotice({campaignId}: {campaignId: string}) {
+  const {data} = useSWR<{data: {total: number; unsubscribed: number}}>(`/campaigns/${campaignId}/audience`);
+  const unsubscribed = data?.data.unsubscribed ?? 0;
+  if (unsubscribed === 0) {
+    return null;
+  }
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
+      <Info className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+      <p className="text-xs text-amber-800 leading-relaxed">
+        Includes {unsubscribed.toLocaleString()} unsubscribed {unsubscribed === 1 ? 'contact' : 'contacts'}: a
+        transactional campaign reaches them too. Addresses suppressed for a bounce or a complaint are still left
+        out.
+      </p>
+    </div>
+  );
+}
+
 export default function CampaignDetailsPage() {
   const router = useRouter();
   const {id} = router.query;
@@ -979,6 +998,10 @@ export default function CampaignDetailsPage() {
               </DialogHeader>
 
               <div className="space-y-5 py-2">
+                {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL && id && (
+                  <UnsubscribedNotice campaignId={id as string} />
+                )}
+
                 {/* Quick presets */}
                 <div className="space-y-2">
                   <Label>Quick options</Label>
@@ -1120,6 +1143,10 @@ export default function CampaignDetailsPage() {
                   {(editedCampaign.audienceType ?? c.audienceType) === CampaignAudienceType.FILTERED && 'Filtered contacts'}
                 </div>
               </div>
+
+              {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL && id && (
+                <UnsubscribedNotice campaignId={id as string} />
+              )}
 
               {/* Compact summary */}
               <div className="rounded-lg border border-neutral-200 divide-y divide-neutral-200 text-sm">

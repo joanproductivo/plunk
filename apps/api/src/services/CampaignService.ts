@@ -1632,6 +1632,27 @@ export class CampaignService {
   }
 
   /**
+   * Plunk Lite: who a send of the campaign would reach now, and how many of them are unsubscribed:
+   * a TRANSACTIONAL campaign reaches them too, so the send dialogs say so. Suppressed addresses are
+   * not left out of the count (their table has no relation to contacts); the send still skips them.
+   */
+  public static async getAudience(
+    projectId: string,
+    campaignId: string,
+  ): Promise<{total: number; unsubscribed: number}> {
+    const campaign = await this.get(projectId, campaignId);
+    const where = await this.buildRecipientWhereAsync(projectId, campaign);
+    const [total, unsubscribed] = await Promise.all([
+      prisma.contact.count({where}),
+      // In an AND, so no key of the audience's own filter can override it
+      campaign.type === TemplateType.TRANSACTIONAL
+        ? prisma.contact.count({where: {AND: [where, {subscribed: false}]}})
+        : 0,
+    ]);
+    return {total, unsubscribed};
+  }
+
+  /**
    * Get recipient count for a campaign
    */
   private static async getRecipientCount(projectId: string, campaign: Campaign): Promise<number> {
