@@ -56,8 +56,11 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
   const [webhookHeaders, setWebhookHeaders] = useState<HeaderEntry[]>(initialHeaders);
   const [showWebhookInfo, setShowWebhookInfo] = useState(false);
   // Plunk Lite: a body set before -- here or through the API -- is kept, and opens as the custom payload.
-  // Not a bare value (null, a string), which the step sends as no body at all.
+  // A bare value only comes through the API: a truthy one (a string, a number) the step sends as its
+  // body, so it is kept as it is unless a custom payload replaces it; a falsy one (null, 0, '') sends
+  // the default payload, as no body does.
   const hasBody = config.body !== null && typeof config.body === 'object';
+  const bareBody = !hasBody && config.body ? config.body : undefined;
   const [customPayload, setCustomPayload] = useState(hasBody);
   const [payloadText, setPayloadText] = useState(() =>
     JSON.stringify(hasBody ? config.body : DEFAULT_CUSTOM_BODY, null, 2),
@@ -97,7 +100,7 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
 
     const ok = await update({
       name,
-      config: {url: webhookUrl, method: webhookMethod, headers, ...(body ? {body} : {})},
+      config: {url: webhookUrl, method: webhookMethod, headers, ...(body ? {body} : bareBody ? {body: bareBody} : {})},
     });
 
     if (ok) {
