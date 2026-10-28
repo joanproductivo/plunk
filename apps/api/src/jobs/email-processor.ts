@@ -491,20 +491,24 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       return;
     }
 
-    // Format template variables in subject and body
+    // Format template variables in subject and body. Plunk Lite: a campaign email was rendered for
+    // its contact when its batch created it; rendering it again would run Liquid over the contact's
+    // own data (a name written as `{{ ... }}`), so it is sent as it is
     const contactData = (email.contact.data as Record<string, unknown>) || {};
-    const formattedEmail = EmailService.format({
-      subject: email.subject,
-      body: email.body,
-      data: {
-        email: email.contact.email,
-        ...contactData,
-        data: contactData,
-        unsubscribeUrl: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${email.contact.id}`, emailId),
-        subscribeUrl: withSourceEmail(`${DASHBOARD_URI}/subscribe/${email.contact.id}`, emailId),
-        manageUrl: withSourceEmail(`${DASHBOARD_URI}/manage/${email.contact.id}`, emailId),
-      },
-    });
+    const formattedEmail = email.campaignId
+      ? {subject: email.subject, body: email.body}
+      : EmailService.format({
+          subject: email.subject,
+          body: email.body,
+          data: {
+            email: email.contact.email,
+            ...contactData,
+            data: contactData,
+            unsubscribeUrl: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${email.contact.id}`, emailId),
+            subscribeUrl: withSourceEmail(`${DASHBOARD_URI}/subscribe/${email.contact.id}`, emailId),
+            manageUrl: withSourceEmail(`${DASHBOARD_URI}/manage/${email.contact.id}`, emailId),
+          },
+        });
 
     // Compile HTML with unsubscribe footer and badge.
     // Only marketing emails get the unsubscribe footer: the project's own, or Plunk's.

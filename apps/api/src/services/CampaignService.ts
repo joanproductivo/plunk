@@ -25,7 +25,7 @@ import {uuidv5} from '../utils/uuid.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
-import {buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
+import {buildEmailHeaders, classifyEmail, withSourceEmail} from './EmailHeaderService.js';
 import {EmailService, POSSIBLY_SENT_NOTE} from './EmailService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
@@ -761,7 +761,9 @@ export class CampaignService {
     // Queue emails for each contact
     for (const contact of contacts) {
       try {
-        // Render template with contact data
+        // Render template with contact data. Plunk Lite: this is the only render of a campaign
+        // email (the worker sends it as it is), so its links carry the email's id here
+        const id = this.emailIdFor(campaign.id, generation, contact.id);
         const contactData =
           contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data) ? contact.data : {};
         const variables = {
@@ -769,9 +771,9 @@ export class CampaignService {
           email: contact.email,
           ...contactData,
           data: contactData,
-          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
-          subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
-          manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
+          unsubscribeUrl: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, id),
+          subscribeUrl: withSourceEmail(`${DASHBOARD_URI}/subscribe/${contact.id}`, id),
+          manageUrl: withSourceEmail(`${DASHBOARD_URI}/manage/${contact.id}`, id),
         };
 
         const renderedSubject = subjectTemplate.render(variables);
@@ -784,7 +786,7 @@ export class CampaignService {
         // cancel and its cleanup to find. This is the only path that creates campaign emails.
         const email = await EmailService.sendCampaignEmail(
           {
-            id: this.emailIdFor(campaign.id, generation, contact.id),
+            id,
             projectId: campaign.projectId,
             contactId: contact.id,
             campaignId: campaign.id,

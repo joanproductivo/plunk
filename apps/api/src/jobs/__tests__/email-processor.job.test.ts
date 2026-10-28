@@ -362,6 +362,35 @@ describe('processEmailJob', () => {
     });
   });
 
+  describe('rendering (Plunk Lite)', () => {
+    it('sends a campaign email as its batch rendered it, without rendering it again', async () => {
+      const campaign = await sendingCampaign();
+      const email = await pendingEmail({campaign});
+      // What a contact named "{{ email }}" leaves in a body its batch already rendered
+      await prisma.email.update({
+        where: {id: email.id},
+        data: {subject: 'Hi {{ email }}', body: '<p>Hi {{ email }}</p>'},
+      });
+
+      await processEmailJob(makeJob(email.id));
+
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.subject).toBe('Hi {{ email }}');
+      expect(params.content.html).toContain('Hi {{ email }}');
+    });
+
+    it('still renders a transactional email at send time', async () => {
+      const email = await pendingEmail({sourceType: EmailSourceType.TRANSACTIONAL});
+      await prisma.email.update({where: {id: email.id}, data: {subject: 'Hi {{ email }}'}});
+
+      await processEmailJob(makeJob(email.id));
+
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      const {email: address} = await prisma.contact.findUniqueOrThrow({where: {id: email.contactId}});
+      expect(params.content.subject).toBe(`Hi ${address}`);
+    });
+  });
+
   describe('a workflow run cancelled after its email was queued (Plunk Lite)', () => {
     /** A pending email of a run of a workflow, in `status` */
     async function workflowEmail(status: WorkflowExecutionStatus, exitReason?: string) {
