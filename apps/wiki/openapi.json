@@ -717,7 +717,7 @@
                   },
                   "subscribed": {
                     "type": "boolean",
-                    "description": "Subscription state to apply to the recipient. For **new** contacts, defaults to `false` on `/v1/send`. For **existing** contacts, omitting this preserves their current state — pass `true` or `false` to explicitly change it. A change emits `contact.subscribed` or `contact.unsubscribed`."
+                    "description": "Subscription state to apply to the recipient. For **new** contacts, defaults to `false` on `/v1/send`. For **existing** contacts, omitting this preserves their current state — pass `true` or `false` to explicitly change it. A change emits `contact.subscribed` or `contact.unsubscribed`. With the [double opt-in](/concepts/double-opt-in) on (Plunk Lite), `true` on a recipient not yet subscribed sends a confirmation email and subscribes them when they confirm; a marketing template is then refused with `422` `OPT_IN_NEEDS_TRANSACTIONAL`, before anything is written."
                   },
                   "data": {
                     "type": "object",
@@ -1058,7 +1058,7 @@
                   },
                   "subscribed": {
                     "type": "boolean",
-                    "description": "Subscription state to apply to the contact. **New** contacts default to subscribed (`true`). **Existing** contacts keep their current state unless you pass an explicit value here. Pass `false` to track an event without resubscribing an unsubscribed contact."
+                    "description": "Subscription state to apply to the contact. **New** contacts default to subscribed (`true`). **Existing** contacts keep their current state unless you pass an explicit value here. Pass `false` to track an event without resubscribing an unsubscribed contact. With the [double opt-in](/concepts/double-opt-in) on (Plunk Lite), a sign-up (a new contact, or `true` on an unsubscribed one) waits for the contact to confirm instead: see `pendingConfirmation` in the response."
                   },
                   "data": {
                     "type": "object",
@@ -1103,6 +1103,15 @@
                         "timestamp": {
                           "type": "string",
                           "format": "date-time"
+                        },
+                        "pendingConfirmation": {
+                          "type": "boolean",
+                          "description": "Plunk Lite, only when the double opt-in held the sign-up back: `true` when the contact waits to confirm, `false` when no confirmation email is sent for this key (the public key)."
+                        },
+                        "optIn": {
+                          "type": "string",
+                          "enum": ["sent", "throttled", "capped", "failed", "held"],
+                          "description": "Plunk Lite, with `pendingConfirmation`: what became of the confirmation email."
                         }
                       }
                     }
@@ -1482,6 +1491,10 @@
                             },
                             "isUpdate": {
                               "type": "boolean"
+                            },
+                            "pendingConfirmation": {
+                              "type": "boolean",
+                              "description": "Plunk Lite: the double opt-in held the sign-up back; `true` when the contact waits to confirm."
                             }
                           }
                         }
@@ -1512,6 +1525,10 @@
                             },
                             "isUpdate": {
                               "type": "boolean"
+                            },
+                            "pendingConfirmation": {
+                              "type": "boolean",
+                              "description": "Plunk Lite: the double opt-in held the sign-up back; `true` when the contact waits to confirm."
                             }
                           }
                         }
