@@ -568,6 +568,7 @@ Plunk's webhook step has a few characteristics worth knowing when you build the 
   ```
 
   The secret travels with every request from that step. Rotate it like any other shared secret. Prefer this over IP allowlisting — egress IPs can change.
+- **Signed requests (Plunk Lite)**: set a secret per step with `PUT /workflows/{id}/steps/{stepId}/signing-secret` and `{"secret": "<32 to 256 printable ASCII characters>"}`. Each request of that step then carries `X-Plunk-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>">` (`"<t>."` for a `GET`). Recompute it over the raw body as received, compare in constant time and reject a `t` more than 5 minutes off. The secret never travels and no endpoint returns it: `GET` on the same path says whether a step signs, `DELETE` stops it, and a duplicated workflow does not copy it.
 
 ## Adding conditions and delays
 

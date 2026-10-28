@@ -76,7 +76,7 @@ Each execution carries a `context` JSON object that's merged with the contact's 
 
 The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow, campaign or domain, one for transactional emails, and one for each condition below. Failures:
 
-- an execution that fails in a step, for example a webhook to an address Plunk refuses to call. A webhook that answers with an error status does not fail the execution: its step records the status and the workflow carries on;
+- an execution that fails in a step, for example a webhook to an address Plunk refuses to call, or one that answers with a status other than 2xx. The request is not retried;
 - an email of a workflow, a campaign or an API call that SES does not accept, or that SES rejects afterwards for its content. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
 - a campaign batch, or a workflow job, that runs out of attempts;
 - an execution nothing would move on any more, which a check every 5 minutes fails: one left in progress by a restart (after 30 minutes without progress), one waiting on a step that was deleted, or one whose wait never ended a week after it was due. The same check queues again the end of a delay, or a wait's timeout, that should have come over 30 minutes earlier, so the execution carries on.
