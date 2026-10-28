@@ -70,6 +70,12 @@ describe('OptInService', () => {
 
       const saved = await OptInService.saveSettings(projectId, {enabled: true, fromEmail: ' News@Plunk.test '});
       expect(saved).toMatchObject({enabled: true, fromEmail: 'news@plunk.test'});
+
+      // Switching it off works while the sender's domain is down
+      await prisma.domain.deleteMany({where: {projectId}});
+      expect(await OptInService.saveSettings(projectId, {enabled: false, fromEmail: 'news@plunk.test'})).toMatchObject({
+        enabled: false,
+      });
     });
   });
 
@@ -129,9 +135,10 @@ describe('OptInService', () => {
       const record = vi.spyOn(FailureAlertService, 'record').mockResolvedValue(true);
       await prisma.domain.deleteMany({where: {projectId}});
 
-      expect(await OptInService.request(contact)).toBe('failed');
-      // Checked before the claim: nothing was written
-      expect(await requestOf(contact.id)).toBeNull();
+      expect(await OptInService.request(contact, {segmentIds: ['segment-1']})).toBe('failed');
+      // Still waiting, with its segments, and no limit spent
+      expect(await requestOf(contact.id)).toMatchObject({lastSentAt: null, sends: 0, segmentIds: ['segment-1']});
+      expect(await OptInService.pendingAmong(projectId, [contact.id])).toEqual(new Set([contact.id]));
       expect(record).toHaveBeenCalledWith(projectId, expect.objectContaining({sourceKey: 'optin'}));
 
       // The next sign-up tries again at once
@@ -195,6 +202,53 @@ describe('OptInService', () => {
         sends: before!.sends,
       });
       expect(await OptInService.confirm(first)).toBe('confirmed');
+    });
+
+    it('emails no one who unsubscribed through the public page, or who only received an email', async () => {
+      const left = await factories.createContact({projectId, subscribed: false});
+      await OptInService.request(left);
+      await ContactService.unsubscribe(left.id);
+      await sentAgo(left.id, 31 * 24 * 60);
+      const customer = await factories.createContact({projectId, subscribed: false});
+      await factories.createEmail({projectId, contactId: customer.id, status: EmailStatus.DELIVERED});
+      const send = vi.spyOn(EmailService, 'sendTransactionalEmail');
+
+      for (const contact of [left, customer]) {
+        await expect(ContactService.subscribe(contact.id)).rejects.toMatchObject({
+          errorCode: 'CONFIRMATION_NEEDS_EMAIL',
+        });
+      }
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('keeps the segments of a sign-up that came too soon for another email', async () => {
+      const contact = await factories.createContact({projectId, subscribed: false});
+      await OptInService.request(contact, {segmentIds: ['promo-a']});
+
+      expect(await OptInService.request(contact, {segmentIds: ['promo-b']})).toBe('throttled');
+
+      expect((await requestOf(contact.id))!.segmentIds.sort()).toEqual(['promo-a', 'promo-b']);
+    });
+
+    it('counts the emails of the last day however old their window is', async () => {
+      vi.spyOn(FailureAlertService, 'record').mockResolvedValue(true);
+      await factories.createContacts(projectId, 1667, {subscribed: false});
+      // 3 emails each, the last an hour ago, in windows that started over a day ago
+      await prisma.$executeRaw`
+        INSERT INTO "plunk_lite_optin_requests" ("contactId", "projectId", "email", "tokenHash", "sends", "windowStart", "lastSentAt")
+        SELECT "id", "projectId", "email", md5("id"), 3, now() AT TIME ZONE 'UTC' - interval '30 hours',
+               now() AT TIME ZONE 'UTC' - interval '2 hours'
+        FROM "contacts" WHERE "projectId" = ${projectId}`;
+
+      expect(await OptInService.request(await factories.createContact({projectId, subscribed: false}))).toBe('capped');
+    });
+
+    it('stops counting as waiting once the address changes', async () => {
+      const contact = await factories.createContact({projectId, subscribed: false});
+      await OptInService.request(contact);
+      await prisma.contact.update({where: {id: contact.id}, data: {email: 'other@plunk.test'}});
+
+      expect(await OptInService.pendingAmong(projectId, [contact.id])).toEqual(new Set());
     });
 
     it('does not let a contact never on the list pause, which would subscribe it when the pause ends', async () => {
@@ -482,7 +536,7 @@ describe('OptInService', () => {
     });
   });
 
-  it("is checked by a workflow's subscribe step, which asks a contact it knows to confirm", async () => {
+  it("is checked by a workflow's subscribe step, which only asks a contact still waiting to confirm", async () => {
     const workflow = await factories.createWorkflow({projectId, enabled: true, triggerConfig: {eventName: 'signup'}});
     const trigger = await prisma.workflowStep.findFirstOrThrow({where: {workflowId: workflow.id, type: 'TRIGGER'}});
     await prisma.workflowStep.update({where: {id: trigger.id}, data: {config: {eventName: 'signup'}}});
@@ -496,18 +550,21 @@ describe('OptInService', () => {
       },
     });
     await prisma.workflowTransition.create({data: {fromStepId: trigger.id, toStepId: step.id}});
+    const waiting = await factories.createContact({projectId, subscribed: false});
+    await OptInService.request(waiting);
+    await sentAgo(waiting.id, 16);
+    // Received an email, but never asked to sign up: subscribes from its own link, not from here
     const customer = await factories.createContact({projectId, subscribed: false});
     await factories.createEmail({projectId, contactId: customer.id, status: EmailStatus.DELIVERED});
-    const stranger = await factories.createContact({projectId, subscribed: false});
     const send = vi.spyOn(EmailService, 'sendTransactionalEmail');
 
+    await EventService.trackEvent(projectId, 'signup', waiting.id);
     await EventService.trackEvent(projectId, 'signup', customer.id);
-    await EventService.trackEvent(projectId, 'signup', stranger.id);
 
+    expect(await subscribedNow(waiting.id)).toBe(false);
     expect(await subscribedNow(customer.id)).toBe(false);
-    expect(await subscribedNow(stranger.id)).toBe(false);
-    // Only the contact that received an email before is asked: the event may have come with the public key
+    // Only the contact still waiting is asked again: the event may have come with the public key
     expect(send).toHaveBeenCalledTimes(1);
-    expect(await OptInService.pendingAmong(projectId, [customer.id, stranger.id])).toEqual(new Set([customer.id]));
+    expect(send.mock.calls[0]![0].contactId).toBe(waiting.id);
   });
 });

@@ -51,9 +51,20 @@ describe('optInEmail', () => {
     expect(renderTemplate(body, {email: 'attacker@example.com'})).not.toContain('attacker@example.com');
   });
 
-  it('keeps Liquid from reading the project name in the subject too', () => {
-    const {subject} = optInEmail({language: 'en', projectName: '{{ email }}', url, texts: {en: valid}});
-    expect(renderTemplate(subject, {email: 'attacker@example.com'})).not.toContain('attacker@example.com');
+  it('keeps Liquid from reading the project name in the subject too, wherever it joins the text', () => {
+    for (const [projectName, own] of [
+      ['{{ email }}', 'Confirm {projectName}'],
+      // A name ending in `{` meets the text that follows it
+      ['Acme {', '{projectName}{ email }}'],
+    ]) {
+      const {subject} = optInEmail({
+        language: 'en',
+        projectName: projectName!,
+        url,
+        texts: {en: {...valid, subject: own!}},
+      });
+      expect(renderTemplate(subject, {email: 'attacker@example.com'})).not.toContain('attacker@example.com');
+    }
   });
 
   it("keeps the confirmation link out of SES's click tracking", () => {

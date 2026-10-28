@@ -113,8 +113,9 @@ export function optInEmail(params: {
   const ignore = `<p style="color: #6b7280; font-size: 12px;${font}">${escapeForBody(createTranslatorSync(params.language).t('email.optin.ignore'))}</p>`;
 
   return {
-    // Sending runs Liquid over the subject too: a tag in the project's name stays text
-    subject: subject.replaceAll('{projectName}', () => params.projectName.replace(/\{(?=[{%])/g, '{\u200b')),
+    // Sending runs Liquid over the subject too: no tag survives, however the project's name joins
+    // the text around it (the texts hold none of their own)
+    subject: subject.replaceAll('{projectName}', () => params.projectName).replace(/\{(?=[{%])/g, '{\u200b'),
     body: emailDocument(`${paragraphs}\n    ${button}\n    ${ignore}`, brand),
   };
 }

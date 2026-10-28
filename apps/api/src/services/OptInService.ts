@@ -1,6 +1,6 @@
 import {createHash, randomBytes} from 'node:crypto';
 
-import {type Contact, EmailStatus, Prisma} from '@plunk/db';
+import {type Contact, Prisma} from '@plunk/db';
 import {contactLanguage, optInEmail, toOptInTexts} from '@plunk/shared';
 import type {OptInLink, OptInOutcome, OptInRequestInfo, OptInSettingsData} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
@@ -31,9 +31,6 @@ const SILENCE_AFTER_UNANSWERED = '30 days';
 const PROJECT_CONTACTS_PER_HOUR = 500;
 const PROJECT_SENDS_PER_DAY = 5000;
 
-/** Statuses of an email that reached the recipient's mailbox */
-const RECEIVED_STATUSES = [EmailStatus.DELIVERED, EmailStatus.OPENED, EmailStatus.CLICKED];
-
 // Deleted contacts' requests are removed lazily, at most once an hour per project and process
 const CLEANUP_EVERY_MS = 60 * 60 * 1000;
 const cleanedAt = new Map<string, number>();
@@ -47,9 +44,10 @@ const deadHash = () => `dead-${randomBytes(16).toString('hex')}`;
 
 /**
  * The `pending` status, on a request `r` joined to its contact `c`: a request neither confirmed nor
- * withdrawn, of a contact not subscribed, not snoozed and whose address is not suppressed
+ * withdrawn, for the contact's address as it is now, of a contact not subscribed, not snoozed and
+ * whose address is not suppressed
  */
-const PENDING = Prisma.sql`r."confirmedAt" IS NULL AND r."withdrawnAt" IS NULL
+const PENDING = Prisma.sql`r."confirmedAt" IS NULL AND r."withdrawnAt" IS NULL AND r."email" = c."email"
   AND c."subscribed" = false AND c."snoozedUntil" IS NULL
   AND NOT EXISTS (SELECT 1 FROM "plunk_lite_suppressions" s WHERE s."projectId" = c."projectId" AND s."email" = c."email")`;
 
@@ -101,7 +99,8 @@ export class OptInService {
     if (enabled && !fromEmail) {
       throw new HttpException(400, 'Choose the address the confirmation emails come from', ErrorCode.VALIDATION_ERROR);
     }
-    if (fromEmail) {
+    // Checked only to turn it on: switching it off must work while the sender's domain is down
+    if (enabled && fromEmail) {
       await DomainService.verifyEmailDomain(fromEmail, projectId);
     }
 
@@ -112,16 +111,14 @@ export class OptInService {
 
   /**
    * Whether a confirmation email may go to this contact for a sign-up no key stands behind (the
-   * public subscribe page, a workflow step that an event with the public key may have started): it
-   * asked to sign up before, or received an email from the project. Otherwise anyone could have
-   * the project email any address, with the contact ids the public key hands out.
+   * public subscribe page, a workflow step that an event with the public key may have started):
+   * only if it is waiting to confirm one already, so this resends its link. Otherwise anyone could
+   * have the project email any address -- someone who unsubscribed included -- with the contact
+   * ids the public key hands out. A contact that received an email subscribes from its own link.
    */
   public static async mayAskWithoutKey(contactId: string): Promise<boolean> {
-    const [request, received] = await Promise.all([
-      prisma.plunkLiteOptInRequest.findUnique({where: {contactId}, select: {contactId: true}}),
-      prisma.email.findFirst({where: {contactId, status: {in: RECEIVED_STATUSES}}, select: {id: true}}),
-    ]);
-    return Boolean(request || received);
+    const contact = await prisma.contact.findUnique({where: {id: contactId}, select: {projectId: true}});
+    return contact ? (await this.pendingAmong(contact.projectId, [contactId])).has(contactId) : false;
   }
 
   /**
@@ -218,6 +215,11 @@ export class OptInService {
         : [];
     const entries = await SegmentMembershipService.enterSegments(contact.projectId, segments, [contact.id]);
     try {
+      // Unsubscribed in the moment since: the decision stands, and no sign-up is told after it
+      const now = await prisma.contact.findUnique({where: {id: contact.id}, select: {subscribed: true}});
+      if (!now?.subscribed) {
+        return 'confirmed';
+      }
       const emailId = result.emailId
         ? ((await prisma.email.findUnique({where: {id: result.emailId}, select: {id: true}}))?.id ?? undefined)
         : undefined;
@@ -355,7 +357,7 @@ export class OptInService {
 
     const [usage] = await prisma.$queryRaw<{contacts: bigint; sends: bigint | null}[]>`
       SELECT count(*) FILTER (WHERE "lastSentAt" > ${NOW} - interval '1 hour') AS "contacts",
-             sum("sends") FILTER (WHERE "windowStart" > ${NOW} - interval '1 day') AS "sends"
+             sum("sends") AS "sends"
       FROM "plunk_lite_optin_requests"
       WHERE "projectId" = ${projectId} AND "lastSentAt" > ${NOW} - interval '1 day'`;
     if (
@@ -368,23 +370,13 @@ export class OptInService {
         error: `Confirmation emails went to more than ${PROJECT_CONTACTS_PER_HOUR} contacts in an hour, or more than ${PROJECT_SENDS_PER_DAY} were sent in a day: new sign-ups wait unsubscribed, without one. Check the sign-up form for bots.`,
         contactEmail: contact.email,
       });
-      // Still shown as waiting for confirmation: its next sign-up, once under the limit, emails it.
-      // A live link stays as it was; a used or withdrawn one is replaced by one nobody has.
-      await prisma.$executeRaw`
-        INSERT INTO "plunk_lite_optin_requests" AS r ("contactId", "projectId", "email", "tokenHash", "segmentIds")
-        VALUES (${contact.id}, ${projectId}, ${contact.email}, ${deadHash()}, ${segmentIds}::text[])
-        ON CONFLICT ("contactId") DO UPDATE SET
-          "segmentIds" = ARRAY(SELECT DISTINCT unnest(r."segmentIds" || EXCLUDED."segmentIds")),
-          "tokenHash" = CASE WHEN r."confirmedAt" IS NULL AND r."withdrawnAt" IS NULL AND r."email" = EXCLUDED."email"
-                             THEN r."tokenHash" ELSE EXCLUDED."tokenHash" END,
-          "email" = EXCLUDED."email",
-          "confirmedAt" = NULL,
-          "withdrawnAt" = NULL`;
+      await this.keepWaiting(contact, segmentIds);
       return 'capped';
     }
 
     const settings = await this.settings(projectId);
     if (!settings.fromEmail) {
+      await this.keepWaiting(contact, segmentIds);
       return 'failed';
     }
 
@@ -407,6 +399,7 @@ export class OptInService {
         brand: await BrandService.get(projectId),
       });
     } catch (error) {
+      await this.keepWaiting(contact, segmentIds);
       return this.failed(contact, error);
     }
 
@@ -437,6 +430,12 @@ export class OptInService {
              OR r."lastSentAt" <= ${NOW} - ${SILENCE_AFTER_UNANSWERED}::interval)
       RETURNING "contactId"`;
     if (claimed.length === 0) {
+      // No email now, but the segments of this sign-up join the ones it is waiting with
+      await prisma.$executeRaw`
+        UPDATE "plunk_lite_optin_requests"
+        SET "segmentIds" = ARRAY(SELECT DISTINCT unnest("segmentIds" || ${segmentIds}::text[]))
+        WHERE "contactId" = ${contact.id} AND "email" = ${contact.email}
+          AND "confirmedAt" IS NULL AND "withdrawnAt" IS NULL`;
       return 'throttled';
     }
 
@@ -472,6 +471,27 @@ export class OptInService {
       signale.warn(`[OPT-IN] Could not record the confirmation email ${sent.id} of ${contact.email}:`, error);
     }
     return 'sent';
+  }
+
+  /**
+   * A sign-up that got no email (the project's limits, or a failure before the claim) still shows
+   * as waiting for confirmation, with its segments, and the next sign-up emails it. A live link
+   * stays as it was; a used or withdrawn one is replaced by one nobody has. Limits are untouched.
+   */
+  private static async keepWaiting(
+    contact: Pick<Contact, 'id' | 'projectId' | 'email'>,
+    segmentIds: string[],
+  ): Promise<void> {
+    await prisma.$executeRaw`
+      INSERT INTO "plunk_lite_optin_requests" AS r ("contactId", "projectId", "email", "tokenHash", "segmentIds")
+      VALUES (${contact.id}, ${contact.projectId}, ${contact.email}, ${deadHash()}, ${segmentIds}::text[])
+      ON CONFLICT ("contactId") DO UPDATE SET
+        "segmentIds" = ARRAY(SELECT DISTINCT unnest(r."segmentIds" || EXCLUDED."segmentIds")),
+        "tokenHash" = CASE WHEN r."confirmedAt" IS NULL AND r."withdrawnAt" IS NULL AND r."email" = EXCLUDED."email"
+                           THEN r."tokenHash" ELSE EXCLUDED."tokenHash" END,
+        "email" = EXCLUDED."email",
+        "confirmedAt" = NULL,
+        "withdrawnAt" = NULL`;
   }
 
   // A confirmation email that could not be queued: logged and alerted on, never thrown

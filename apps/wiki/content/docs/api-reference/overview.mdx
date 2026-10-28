@@ -212,9 +212,9 @@ The `/v1/*` endpoints are designed for use from your applications and accept sim
 
 | Method | Path                                  | Description                                                                                  |
 | ------ | ------------------------------------- | -------------------------------------------------------------------------------------------- |
-| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`. |
+| GET    | `/contacts`                           | List contacts. Supports `search` (by email substring), `segmentId` (the segment's stored members: every member of a static segment), `limit`, `cursor`, and `status` (`subscribed`, `snoozed`, `unsubscribed`, or `pending` for the contacts waiting for the [double opt-in](/concepts/double-opt-in)). Each row says `pendingConfirmation`. |
 | POST   | `/contacts`                           | Create or upsert a contact by email. Returns `_meta.isNew` and `_meta.isUpdate`, and `_meta.pendingConfirmation` when a sign-up waits for the [double opt-in](/concepts/double-opt-in). |
-| GET    | `/contacts/:id`                       | Get a single contact.                                                                        |
+| GET    | `/contacts/:id`                       | Get a single contact, with `optIn`, its sign-up confirmation request (`createdAt`, `lastSentAt`, `sends`, `confirmedAt`, `withdrawnAt`), and `pendingConfirmation`. |
 | GET    | `/contacts/:id/segments`              | The contact's segments: `{ static, dynamic }`, each a list of `{ id, name }` sorted by name. Dynamic ones are those whose filter it matches now. |
 | PATCH  | `/contacts/:id`                       | Update a contact's email, subscription state, or `data` fields.                              |
 | DELETE | `/contacts/:id`                       | Delete a contact.                                                                            |

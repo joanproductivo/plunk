@@ -14,7 +14,7 @@ It is a Plunk Lite feature, off by default, set per project in **Settings → Br
 2. Edit the email if you want: a subject, a text and a button, per language. Languages without a text of their own use Plunk's. `{projectName}` becomes the project's name; template tags (`{{ … }}`, `{% … %}`) are not allowed.
 3. Switch it on and save.
 
-The email goes to each contact in their language: their `locale` field, else the project's language. It carries no unsubscribe footer. It is sent as a transactional email, so it counts as one and follows the project's tracking settings.
+The email goes to each contact in their language: their `locale` field, else the project's language. It carries no unsubscribe footer. It is sent as a transactional email, so it counts as one and follows the project's open tracking; its link is never click-tracked, so the confirmation link is not kept in an event.
 
 ## What waits for confirmation
 
@@ -24,8 +24,8 @@ The email goes to each contact in their language: their `locale` field, else the
 | `POST /v1/track` with the public key | No email: the contact stays as it was (a new one unsubscribed) |
 | `POST /contacts` with an API key | Waits, and the confirmation email goes out |
 | `POST /v1/send` with `subscribed: true` | Waits, and the confirmation email goes out besides the email sent. A marketing template is refused with `422 OPT_IN_NEEDS_TRANSACTIONAL`, before anything is written |
-| The public subscribe page, without a link from an email the contact received | Waits, and the page asks them to check their inbox |
-| A workflow's **Update contact** step that subscribes | Waits, and the confirmation email goes out |
+| The public subscribe page, without a link from an email the contact received | Only for a contact already waiting to confirm: the confirmation email goes out again and the page asks them to check their inbox. Anyone else is refused with `409` `CONFIRMATION_NEEDS_EMAIL`: the page needs only the contact's id, which the public key hands out |
+| A workflow's **Update contact** step that subscribes | Only for a contact already waiting to confirm: the confirmation email goes out again. Anyone else is left unsubscribed, and the step's result says `optIn: "held"` |
 | A CSV import | New contacts are subscribed; unsubscribed ones stay unsubscribed, with a warning. No emails |
 | An inbound email | Never subscribes an existing contact (opt-in or not); a new one is created unsubscribed |
 | The dashboard's **Add contact**, a contact's switch, `PATCH /contacts/:id`, bulk subscribe, the end of a snooze | Subscribe at once: they are your own decision, or bring back a consent already given |
@@ -46,7 +46,7 @@ A link keeps working until the contact confirms or a newer confirmation email re
 ## Limits
 
 - One confirmation email per contact every 15 minutes, 3 a day, and none for 30 days after 3 in a row without a confirmation. A form sent twice sends one email.
-- 500 confirmation emails an hour and 5000 a day per project. Past that, new sign-ups still wait, without an email, and the project's failure alerts say so: check the sign-up form for bots.
+- Confirmation emails to 500 contacts an hour and 5000 emails a day per project. Past that, or when an email cannot be sent (the sender's domain, a billing limit), new sign-ups still wait, without an email, and the project's failure alerts say so: check the sign-up form for bots.
 
 ## Finding who has not confirmed
 
@@ -54,4 +54,4 @@ The contacts list has a **Pending confirmation** status, and the filter of the s
 
 With that filter, the bulk actions take only the rows you tick, and the export button exports the list without the status filter.
 
-Turning the double opt-in off leaves the pending contacts as they are: their links still confirm.
+Turning the double opt-in off leaves the pending contacts as they are: their links still confirm. It can be turned off while the sender's domain is not verified.

@@ -1382,6 +1382,15 @@
             "description": "Filter by subscription state. Omit to return both subscribed and unsubscribed contacts."
           },
           {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["subscribed", "snoozed", "unsubscribed", "pending"]
+            },
+            "description": "Filter by status; wins over `subscribed`. `pending` (Plunk Lite) lists the contacts waiting to confirm a sign-up of the double opt-in, who are also `unsubscribed`. Every row carries `pendingConfirmation`."
+          },
+          {
             "name": "sort",
             "in": "query",
             "schema": {

@@ -122,7 +122,7 @@ A contact can become unsubscribed in several ways:
 
 A recipient can pause emails for 2 weeks, 1 month, 6 months, or a year instead of leaving permanently. A snoozed contact has `subscribed: false` — so every rule on this page applies to them unchanged — plus a `snoozedUntil` timestamp saying when they come back.
 
-A background job resubscribes them when the window ends and fires `contact.subscribed` with `reason: "snooze_expired"`. The snooze itself fires `contact.unsubscribed` with `reason: "snooze"`.
+A background job resubscribes them when the window ends and fires `contact.subscribed` with `reason: "snooze_expired"`. The snooze itself fires `contact.unsubscribed` with `reason: "snooze"`. Only a subscribed (or already snoozed) contact can snooze (Plunk Lite): the end of the snooze would otherwise subscribe someone who never was.
 
 Any other change to `subscribed` cancels a running snooze, including a bounce or complaint — a suppressed address is never resurrected by a snooze that was in flight.
 
