@@ -4,6 +4,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
+import {prisma as appPrisma} from '../../database/prisma';
 import * as redisModule from '../../database/redis';
 import {DlqDrainService} from '../DlqDrainService';
 import {DLQ_ALARM_SOURCE} from '../dlqConstants';
@@ -137,7 +138,10 @@ describe('DlqDrainService', () => {
   it('drops an open older than a day without counting it', async () => {
     const email = await sentEmail('dlq-old-open');
     queueHolds([
-      queued({eventType: 'Open', mail: {messageId: 'dlq-old-open'}, open: {}}, {publishedAt: new Date(Date.now() - 25 * HOUR)}),
+      queued(
+        {eventType: 'Open', mail: {messageId: 'dlq-old-open'}, open: {}},
+        {publishedAt: new Date(Date.now() - 25 * HOUR)},
+      ),
     ]);
 
     const result = await DlqDrainService.drain();
@@ -194,7 +198,174 @@ describe('DlqDrainService', () => {
 
     expect(result).toMatchObject({invalid: 1, handled: 0});
     expect(sqs.deleteMessage).toHaveBeenCalledOnce();
-    expect((await failure('aws:dlq-invalid'))?.lastError).toContain('its signature or topic was refused');
+    // Of no email: told in every project, without anything of any one
+    expect((await failure('aws:dlq-invalid'))?.lastError).toContain('its topic is of another AWS account');
+  });
+
+  it("keeps under SQS's 12 hours the wait of a message read many times", async () => {
+    await sentEmail('dlq-many-reads');
+    vi.spyOn(SecurityService, 'snsTopicOrigin').mockResolvedValue('unknown');
+    queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-many-reads'}}, {receives: 8})]);
+
+    await DlqDrainService.drain();
+
+    expect(sqs.changeMessageVisibility).toHaveBeenCalledWith(expect.objectContaining({VisibilityTimeout: 42_000}));
+  });
+
+  describe('a refused signature', () => {
+    beforeEach(() => {
+      vi.mocked(SnsSignature.verify).mockResolvedValue('invalid');
+    });
+
+    it("is read again a few times, in case SNS's certificate was only missing a moment", async () => {
+      queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-sig-once'}}, {receives: 1})]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({retry: 1, invalid: 0});
+      expect(sqs.deleteMessage).not.toHaveBeenCalled();
+    });
+
+    it('is given up on after four reads', async () => {
+      queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-sig-four'}}, {receives: 4})]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({invalid: 1});
+      expect(sqs.deleteMessage).toHaveBeenCalledOnce();
+    });
+
+    it('stops the drain after three in a row, giving the rest back undeleted', async () => {
+      const batch = Array.from({length: 5}, () =>
+        queued({eventType: 'Bounce', mail: {messageId: randomUUID()}}, {receives: 4}),
+      );
+      queueHolds(batch);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result.invalid).toBe(3);
+      const givenBack = sqs.changeMessageVisibility.mock.calls.filter(([input]) => input.VisibilityTimeout === 0);
+      expect(givenBack).toHaveLength(2);
+    });
+  });
+
+  describe('a message that fails every time', () => {
+    const POISON_TOPIC = `${OWN_TOPIC}-poison`;
+    const poison = () =>
+      queued(
+        {eventType: 'Bounce', mail: {messageId: 'dlq-poison'}},
+        {receives: 8, publishedAt: new Date(Date.now() - 25 * HOUR), topic: POISON_TOPIC},
+      );
+
+    beforeEach(() => {
+      // Only its own topic fails, as a message of its own would
+      vi.spyOn(SecurityService, 'snsTopicOrigin').mockImplementation(async topic =>
+        topic === POISON_TOPIC ? 'unknown' : 'own',
+      );
+    });
+
+    it('is given up on, and said so, when another message goes through in the same drain', async () => {
+      await sentEmail('dlq-good');
+      const bad = poison();
+      queueHolds([bad, queued({eventType: 'Delivery', mail: {messageId: 'dlq-good'}, delivery: {}})]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({handled: 1, invalid: 1});
+      expect(sqs.deleteMessage).toHaveBeenCalledWith(expect.objectContaining({ReceiptHandle: bad.ReceiptHandle}));
+      expect((await failure('aws:dlq-invalid'))?.lastError).toContain(
+        'failed in each of its 8 reads over more than a day',
+      );
+    });
+
+    it('is kept when nothing else goes through: the failure may be the database or AWS', async () => {
+      const bad = poison();
+      queueHolds([bad]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({retry: 1, invalid: 0});
+      expect(sqs.deleteMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  it('says nothing in a drain where everything only comes back later', async () => {
+    await sentEmail('dlq-only-retry');
+    vi.spyOn(SecurityService, 'snsTopicOrigin').mockResolvedValue('unknown');
+    queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-only-retry'}})]);
+
+    await DlqDrainService.drain();
+
+    expect(await failure('aws:dlq')).toBeNull();
+  });
+
+  it('tells no project of a message whose project could not be looked up', async () => {
+    await sentEmail('dlq-lookup');
+    vi.spyOn(appPrisma.email, 'findUnique').mockRejectedValue(new Error('database down'));
+    queueHolds([
+      queued(
+        {eventType: 'Open', mail: {messageId: 'dlq-lookup'}, open: {}},
+        {publishedAt: new Date(Date.now() - 25 * HOUR)},
+      ),
+    ]);
+
+    const result = await DlqDrainService.drain();
+
+    expect(result.old).toBe(1);
+    expect(await prisma.plunkLiteFailure.count({where: {projectId, sourceKey: {startsWith: 'aws:dlq'}}})).toBe(0);
+  });
+
+  it('leaves the rest to the next drain after 50 batches', async () => {
+    await sentEmail('dlq-batches');
+    sqs.receiveMessage.mockImplementation(async () => ({
+      Messages: [
+        queued(
+          {eventType: 'Open', mail: {messageId: 'dlq-batches'}, open: {}},
+          {publishedAt: new Date(Date.now() - 25 * HOUR)},
+        ),
+      ],
+    }));
+
+    const result = await DlqDrainService.drain();
+
+    expect(sqs.receiveMessage).toHaveBeenCalledTimes(50);
+    expect(result).toMatchObject({old: 50, more: true});
+  });
+
+  it('leaves the rest to the next drain after 10 minutes', async () => {
+    const start = Date.now();
+    let calls = 0;
+    // The first reading of the clock starts the drain; every later one is 11 minutes on
+    vi.spyOn(Date, 'now').mockImplementation(() => (calls++ === 0 ? start : start + 11 * 60 * 1000));
+    queueHolds([queued({eventType: 'Delivery', mail: {messageId: 'dlq-late'}})]);
+
+    const result = await DlqDrainService.drain();
+
+    expect(result.more).toBe(true);
+    expect(sqs.receiveMessage).not.toHaveBeenCalled();
+  });
+
+  it('stops when the webhook does not answer in time, giving the rest back', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true});
+    try {
+      vi.mocked(SnsSignature.verify).mockReturnValue(new Promise(() => undefined));
+      const batch = [
+        queued({eventType: 'Bounce', mail: {messageId: 'dlq-hang-1'}}),
+        queued({eventType: 'Bounce', mail: {messageId: 'dlq-hang-2'}}),
+      ];
+      queueHolds(batch);
+
+      const drained = DlqDrainService.drain();
+      await vi.advanceTimersByTimeAsync(21_000);
+      const result = await drained;
+
+      expect(result.retry).toBe(1);
+      expect(sqs.changeMessageVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ReceiptHandle: batch[1]!.ReceiptHandle, VisibilityTimeout: 0}),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('unsubscribes after a bounce even a contact who subscribed again since', async () => {
@@ -335,6 +506,24 @@ describe('DlqDrainService', () => {
       await DlqDrainService.check();
 
       expect((await failure('aws:dlq-access:drain'))?.reviewedAt).toBeNull();
+    });
+
+    it('closes a refusal to drain once the queue can be read again, though it is empty', async () => {
+      sqs.receiveMessage.mockRejectedValueOnce(Object.assign(new Error('denied'), {name: 'AccessDenied'}));
+      await DlqDrainService.drain();
+      expect((await failure('aws:dlq-access:drain'))?.reviewedAt).toBeNull();
+
+      queueHolds();
+      await DlqDrainService.drain();
+      expect((await failure('aws:dlq-access:drain'))?.reviewedAt).not.toBeNull();
+    });
+
+    it('takes an invalid key for what it is, not for a missing permission', async () => {
+      sqs.getQueueAttributes.mockRejectedValueOnce(
+        Object.assign(new Error('bad key'), {name: 'InvalidClientTokenId', $metadata: {httpStatusCode: 403}}),
+      );
+      await DlqDrainService.check();
+      expect(await failure('aws:dlq-access:read')).toBeNull();
     });
   });
 });

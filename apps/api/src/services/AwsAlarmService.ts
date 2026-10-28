@@ -28,10 +28,13 @@ function watchesDlq(alarm: AwsAlarm): boolean {
   const trigger = alarm.Trigger as {MetricName?: unknown; Dimensions?: unknown} | undefined;
   const dimensions = trigger?.Dimensions;
   if (Array.isArray(dimensions)) {
-    return trigger?.MetricName === 'ApproximateNumberOfMessagesVisible' && dimensions.some(dimension => {
-      const fields = dimension && typeof dimension === 'object' ? (dimension as Record<string, unknown>) : {};
-      return (fields.name ?? fields.Name) === 'QueueName' && (fields.value ?? fields.Value) === DLQ_NAME;
-    });
+    return (
+      trigger?.MetricName === 'ApproximateNumberOfMessagesVisible' &&
+      dimensions.some(dimension => {
+        const fields = dimension && typeof dimension === 'object' ? (dimension as Record<string, unknown>) : {};
+        return (fields.name ?? fields.Name) === 'QueueName' && (fields.value ?? fields.Value) === DLQ_NAME;
+      })
+    );
   }
   return alarm.AlarmName === DLQ_ALARM_NAME;
 }
@@ -160,6 +163,13 @@ export class AwsAlarmService {
       signale.info(`[ALARMS] ${alarm.AlarmName} is back to OK; its notice closes once the queue is empty`);
       if (alarmSource(alarm.AlarmName) !== DLQ_ALARM_SOURCE) {
         await FailureAlertService.resolve(alarmSource(alarm.AlarmName));
+      }
+      // Without the permission to count the queue, the drain can never say it is empty: the OK
+      // closes the notice, as for any other alarm. Imported here, as the drain imports what imports
+      // this service.
+      const {DlqDrainService} = await import('./DlqDrainService.js');
+      if ((await DlqDrainService.canCount()) === false) {
+        await FailureAlertService.resolve(DLQ_ALARM_SOURCE);
       }
     } else {
       signale.info(`[ALARMS] ${alarm.AlarmName} is back to OK`);

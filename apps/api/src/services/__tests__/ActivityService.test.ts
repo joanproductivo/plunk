@@ -370,3 +370,78 @@ describe('ActivityService - stats', () => {
     expect(stats).toMatchObject({totalEmailsTracked: 0, totalEmailsOpened: 0, openRate: 0, clickRate: 0});
   });
 });
+
+/**
+ * Plunk Lite: a bounce or complaint taken back from the AWS dead-letter queue says so, with when it
+ * happened, and a complaint of a contact left subscribed says that too
+ */
+describe('ActivityService - events taken back from the dead-letter queue', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+  let contactId: string;
+
+  beforeEach(async () => {
+    const {project} = await factories.createUserWithProject();
+    projectId = project.id;
+    contactId = (await factories.createContact({projectId})).id;
+  });
+
+  const email = (data: Record<string, unknown>) =>
+    prisma.email.create({
+      data: {
+        projectId,
+        contactId,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hello@plunk.test',
+        sourceType: EmailSourceType.TRANSACTIONAL,
+        sentAt: new Date(),
+        ...data,
+      },
+    });
+
+  it('marks a bounce and a complaint taken back, and not one SNS delivered in time', async () => {
+    const occurredAt = new Date(Date.now() - 3_600_000).toISOString();
+    const recovered = await email({status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    const live = await email({status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    const complained = await email({status: EmailStatus.COMPLAINED, complainedAt: new Date()});
+    await prisma.event.createMany({
+      data: [
+        {
+          projectId,
+          contactId,
+          emailId: recovered.id,
+          name: 'email.bounce',
+          data: {bounceType: 'Permanent', recoveredFromDlq: true, occurredAt},
+        },
+        {projectId, contactId, emailId: live.id, name: 'email.bounce', data: {bounceType: 'Permanent'}},
+        {
+          projectId,
+          contactId,
+          emailId: complained.id,
+          name: 'email.complaint',
+          data: {recoveredFromDlq: true, occurredAt, keptSubscribed: true},
+        },
+      ],
+    });
+
+    const {data} = await ActivityService.getActivities(projectId, 50, undefined, [
+      ActivityType.EMAIL_BOUNCED,
+      ActivityType.EMAIL_COMPLAINT,
+    ]);
+    const byEmail = (id: string, type: ActivityType) =>
+      data.find(activity => activity.type === type && activity.id.startsWith(id))?.metadata;
+
+    expect(byEmail(recovered.id, ActivityType.EMAIL_BOUNCED)).toMatchObject({
+      bounceType: 'Permanent',
+      recoveredFromDlq: true,
+      occurredAt,
+    });
+    expect(byEmail(live.id, ActivityType.EMAIL_BOUNCED)).not.toHaveProperty('recoveredFromDlq');
+    expect(byEmail(complained.id, ActivityType.EMAIL_COMPLAINT)).toMatchObject({
+      recoveredFromDlq: true,
+      occurredAt,
+      keptSubscribed: true,
+    });
+  });
+});

@@ -4,6 +4,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {ALARMS_TOPIC_NAME} from '../../services/AwsAlarmService';
 import {DLQ_ALARM_SOURCE, DLQ_NAME} from '../../services/dlqConstants';
+import {DlqDrainService} from '../../services/DlqDrainService';
 import {FailureAlertService} from '../../services/FailureAlertService';
 import {QueueService} from '../../services/QueueService';
 import {getAwsAccountId, sendRawEmail} from '../../services/SESService';
@@ -204,6 +205,15 @@ describe('Webhooks - CloudWatch alarms', () => {
 
       expect(await queueNotice()).toHaveLength(1);
       expect(QueueService.queueDlqDrain).toHaveBeenCalledOnce();
+    });
+
+    it('closes its notice on OK, as before, when the queue may not be counted', async () => {
+      vi.spyOn(DlqDrainService, 'canCount').mockResolvedValue(false);
+      const changedAt = Date.now();
+      await alarm('ALARM', new Date(changedAt), queueTrigger);
+      await alarm('OK', new Date(changedAt + 60_000), queueTrigger);
+
+      expect(await queueNotice()).toHaveLength(0);
     });
 
     it('still shows the alarm when the drain cannot be queued', async () => {
