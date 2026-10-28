@@ -10,7 +10,7 @@ describe('requirePublicKey with PLUNK_LITE_PUBLIC_TRACK', () => {
     vi.resetModules();
   });
 
-  async function run(setting: string | undefined): Promise<unknown> {
+  async function run(setting: string | undefined, authorization: string | null = 'Bearer pk_short'): Promise<unknown> {
     if (setting === undefined) {
       delete process.env.PLUNK_LITE_PUBLIC_TRACK;
     } else {
@@ -18,7 +18,7 @@ describe('requirePublicKey with PLUNK_LITE_PUBLIC_TRACK', () => {
     }
     vi.resetModules();
     const {requirePublicKey} = await import('../auth.js');
-    const req = {method: 'POST', headers: {authorization: 'Bearer pk_short'}} as unknown as Request;
+    const req = {method: 'POST', headers: authorization ? {authorization} : {}} as unknown as Request;
     return new Promise(resolve => {
       void requirePublicKey(req, {locals: {}} as Response, resolve as NextFunction);
     });
@@ -26,6 +26,10 @@ describe('requirePublicKey with PLUNK_LITE_PUBLIC_TRACK', () => {
 
   it.each(['off', 'false', 'OFF'])('answers 403 with %s', async setting => {
     expect(await run(setting)).toEqual(expect.objectContaining({code: 403, errorCode: ErrorCode.FORBIDDEN}));
+  });
+
+  it("answers a request without a key 401, not the switch's 403", async () => {
+    expect(await run('off', null)).toEqual(expect.objectContaining({code: 401, errorCode: ErrorCode.MISSING_AUTH}));
   });
 
   it('takes the key by default', async () => {

@@ -13,6 +13,9 @@ import {UserService} from '../services/UserService.js';
 
 const INVALID_PUBLIC_KEY = 'Invalid public API key. Ensure you are using a public key (pk_*) for this endpoint.';
 const INVALID_SECRET_KEY = 'Invalid secret API key. This endpoint requires a secret key (sk_*), not a public key.';
+/** Plunk Lite: /v1/track takes either key, so its refusal names both */
+const INVALID_TRACK_KEY =
+  'Invalid API key. /v1/track takes a public key (pk_*) or a secret key (sk_*) of this project.';
 
 /** Plunk Lite: what an API key can look like; anything else is refused without looking it up */
 const API_KEY_PATTERN = /^(pk|sk)_[A-Za-z0-9_-]{8,128}$/;
@@ -135,8 +138,22 @@ export function parseJwt(request: Request): string {
  * @param res
  * @param next
  */
-export const requirePublicKey = async (req: Request, res: Response, next: NextFunction) => {
+// Plunk Lite: `invalidKey` (a default, so Express still sees a three-argument middleware) lets
+// requireTrackKey refuse an unknown key with a message that names both keys
+export const requirePublicKey = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  invalidKey = INVALID_PUBLIC_KEY,
+) => {
   try {
+    // Get API key from Authorization header
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+      throw new HttpException(401, 'Authorization header is required', ErrorCode.MISSING_AUTH);
+    }
+
     // Plunk Lite: a server can switch off the public key, which anyone who reads a page can copy
     if (!PLUNK_LITE_PUBLIC_TRACK) {
       throw new HttpException(
@@ -146,20 +163,13 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
       );
     }
 
-    // Get API key from Authorization header
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader) {
-      throw new HttpException(401, 'Authorization header is required', ErrorCode.MISSING_AUTH);
-    }
-
-    const apiKey = bearerKey(authHeader, INVALID_PUBLIC_KEY);
+    const apiKey = bearerKey(authHeader, invalidKey);
 
     // Look up project by public key only
     const project = await ProjectService.public(apiKey);
 
     if (!project) {
-      throw new HttpException(401, INVALID_PUBLIC_KEY, ErrorCode.INVALID_API_KEY);
+      throw new HttpException(401, invalidKey, ErrorCode.INVALID_API_KEY);
     }
 
     // Set auth response with project ID (before disabled check so it's available for logging)
@@ -198,8 +208,8 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
 export const requireTrackKey = (req: Request, res: Response, next: NextFunction) =>
   // Loosely, so a secret key in a malformed header gets the secret key's format error, not the switch's 403
   /^bearer\s+sk_/i.test(req.headers.authorization ?? '')
-    ? requireSecretKey(req, res, next)
-    : requirePublicKey(req, res, next);
+    ? requireSecretKey(req, res, next, INVALID_TRACK_KEY)
+    : requirePublicKey(req, res, next, INVALID_TRACK_KEY);
 
 /**
  * Middleware to require secret API key authentication
@@ -208,7 +218,13 @@ export const requireTrackKey = (req: Request, res: Response, next: NextFunction)
  * @param res
  * @param next
  */
-export const requireSecretKey = async (req: Request, res: Response, next: NextFunction) => {
+// Plunk Lite: `invalidKey` as for requirePublicKey
+export const requireSecretKey = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  invalidKey = INVALID_SECRET_KEY,
+) => {
   try {
     // Get API key from Authorization header
     const authHeader = req.headers.authorization;
@@ -217,13 +233,13 @@ export const requireSecretKey = async (req: Request, res: Response, next: NextFu
       throw new HttpException(401, 'Authorization header is required', ErrorCode.MISSING_AUTH);
     }
 
-    const apiKey = bearerKey(authHeader, INVALID_SECRET_KEY);
+    const apiKey = bearerKey(authHeader, invalidKey);
 
     // Look up project by secret key only
     const project = await ProjectService.secret(apiKey);
 
     if (!project) {
-      throw new HttpException(401, INVALID_SECRET_KEY, ErrorCode.INVALID_API_KEY);
+      throw new HttpException(401, invalidKey, ErrorCode.INVALID_API_KEY);
     }
 
     // Set auth response with project ID (before disabled check so it's available for logging)
