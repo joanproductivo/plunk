@@ -1098,10 +1098,15 @@ export class CampaignService {
       return;
     }
 
-    await prisma.campaign.update({
-      where: {id: campaignId},
+    // Plunk Lite: only a send still going on -- one cancelled (or closed by another run) between the
+    // read above and here keeps its status, and is not reconciled or announced twice
+    const closed = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: CampaignStatus.SENDING},
       data: {status: CampaignStatus.SENT, sentCount},
     });
+    if (closed.count === 0) {
+      return;
+    }
 
     // Fold every counter back to what the emails actually say, now that the send is
     // over, and settle `sentCount` against the live Redis delta. Events that arrive
@@ -1220,11 +1225,19 @@ export class CampaignService {
 
     // Stop the send first -- see the ordering note above. Already CANCELLED on the
     // repair path, but the write is idempotent and keeps the timestamp fresh.
-    const cancelledCampaign = await prisma.campaign.update({
-      where: {id: campaignId},
-      data: {
-        status: CampaignStatus.CANCELLED,
+    // Plunk Lite: only from the statuses read above -- a send that finished meanwhile stays SENT
+    const stopped = await prisma.campaign.updateMany({
+      where: {
+        id: campaignId,
+        status: {in: [CampaignStatus.SCHEDULED, CampaignStatus.SENDING, CampaignStatus.CANCELLED]},
       },
+      data: {status: CampaignStatus.CANCELLED},
+    });
+    if (stopped.count === 0) {
+      throw new HttpException(400, 'Can only cancel scheduled or sending campaigns');
+    }
+    const cancelledCampaign = await prisma.campaign.findUniqueOrThrow({
+      where: {id: campaignId},
       include: {
         project: {
           select: {name: true},

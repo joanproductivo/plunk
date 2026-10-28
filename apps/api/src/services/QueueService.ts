@@ -913,6 +913,41 @@ export class QueueService {
   }
 
   /**
+   * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time
+   * (every page is read before anything is removed, so removing cannot shift the pages). A job that
+   * has started meanwhile cannot be removed, and is left to find what it should do. Returns how many
+   * were removed.
+   */
+  private static async removeQueuedJobs<T>(
+    queue: Queue<T>,
+    pick: (jobs: Job<T>[]) => Promise<Job<T>[]>,
+  ): Promise<number> {
+    const PAGE = 1000;
+    const picked: Job<T>[] = [];
+    for (let start = 0; ; start += PAGE) {
+      // The range is per state, so a page holds up to one range of each
+      const jobs = (await queue.getJobs(['waiting', 'prioritized', 'delayed'], start, start + PAGE - 1)).filter(
+        job => job,
+      );
+      if (jobs.length === 0) {
+        break;
+      }
+      picked.push(...(await pick(jobs)));
+    }
+
+    let removed = 0;
+    for (const job of picked) {
+      try {
+        await job.remove();
+        removed++;
+      } catch {
+        // Started since it was read: it finds the project disabled, or the campaign cancelled
+      }
+    }
+    return removed;
+  }
+
+  /**
    * Pause all queues (for maintenance). Plunk Lite: the email queue's pause lasts at most until the
    * recovery sweep's probe resumes it, 5 minutes later (SesSendGate.resumeSendingIfDue)
    */
@@ -1008,32 +1043,31 @@ export class QueueService {
       signale.info(`[QUEUE] Cancelled ${scheduledCampaigns.length} scheduled campaigns for project ${projectId}`);
     }
 
-    // Cancel all pending emails for this project
-    const pendingEmails = await emailQueue.getJobs(['waiting', 'delayed']);
-    for (const job of pendingEmails) {
-      const email = await prisma.email.findUnique({
-        where: {id: job.data.emailId},
-        select: {projectId: true},
+    // Cancel all pending emails and campaign batches for this project. Plunk Lite: also the
+    // `prioritized` ones -- every email job has a priority, so they were all missed -- a page at a
+    // time, and on their own: Redis failing here must not keep the cancel below from running
+    try {
+      const emails = await this.removeQueuedJobs(emailQueue, async jobs => {
+        const ofProject = await prisma.email.findMany({
+          where: {projectId, id: {in: jobs.map(job => job.data.emailId)}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(email => email.id));
+        return jobs.filter(job => ids.has(job.data.emailId));
       });
-
-      if (email?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed email job ${job.id}`);
-      }
-    }
-
-    // Cancel all pending campaign batches for this project
-    const campaignBatches = await campaignQueue.getJobs(['waiting', 'delayed']);
-    for (const job of campaignBatches) {
-      const campaign = await prisma.campaign.findUnique({
-        where: {id: job.data.campaignId},
-        select: {projectId: true},
+      const batches = await this.removeQueuedJobs(campaignQueue, async jobs => {
+        const ofProject = await prisma.campaign.findMany({
+          where: {projectId, id: {in: [...new Set(jobs.map(job => job.data.campaignId))]}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(campaign => campaign.id));
+        return jobs.filter(job => ids.has(job.data.campaignId));
       });
-
-      if (campaign?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed campaign batch job ${job.id}`);
-      }
+      signale.info(
+        `[QUEUE] Removed ${emails} email job(s) and ${batches} campaign batch job(s) of project ${projectId}`,
+      );
+    } catch (error) {
+      signale.error(`[QUEUE] Could not remove the queued jobs of project ${projectId}: ${errorMessage(error)}`);
     }
 
     // Cancel every workflow execution still in progress. Removing their queued jobs alone left them
