@@ -1,6 +1,7 @@
 import type {Prisma} from '@plunk/db';
 import {EmailStatus} from '@plunk/db';
 import {isMailboxSimulatorAddress} from '@plunk/shared';
+import type {SubscriptionChangeReason} from '@plunk/types';
 import signale from 'signale';
 import {z} from 'zod';
 
@@ -13,6 +14,7 @@ import {AwsAlarmService} from './AwsAlarmService.js';
 import {CampaignService} from './CampaignService.js';
 import {recipientAddress} from './EmailHeaderService.js';
 import {FailureAlertService} from './FailureAlertService.js';
+import {QueueService} from './QueueService.js';
 import type {SesMessageTags} from './SESService.js';
 import {SES_TAG, verifyConfigurationSets} from './SESService.js';
 import {SuppressionService} from './SuppressionService.js';
@@ -324,10 +326,18 @@ async function unmatchedProject(tags: Partial<SesMessageTags>, mail: SesMail): P
 }
 
 /**
+ * Plunk Lite: the contacts a bounce or complaint takes off the list, and so the ones whose
+ * unsubscribe it announces. A snoozed contact is `subscribed: false` but coming back, so it is
+ * still on the list; one already unsubscribed is not, and hears nothing again.
+ */
+export const ON_THE_LIST: Prisma.ContactWhereInput = {OR: [{subscribed: true}, {snoozedUntil: {not: null}}]};
+
+/**
  * A permanent bounce or a complaint whose email cannot be found (its contact was deleted, it was a
  * test send or an alert, or its messageId was never stored) still takes the address off the
- * project's list: it is suppressed and any contact with it unsubscribed. The project hears about
- * it, except for its own test sends and alerts. Other events of no email are only logged.
+ * project's list: it is suppressed and any contact with it unsubscribed, which tracks their
+ * `contact.unsubscribed`. The project hears about it, except for its own test sends and alerts.
+ * Other events of no email are only logged.
  *
  * Throws if recording fails, so SNS delivers the event again.
  */
@@ -368,16 +378,40 @@ export async function suppressUnmatched(
   }
 
   const reason = eventType === 'Complaint' ? 'COMPLAINT' : 'BOUNCE';
-  await prisma.$transaction(async tx => {
+  const unsubscribed = await prisma.$transaction(async tx => {
     await SuppressionService.record(tx, projectId, addresses, reason, null);
-    await tx.contact.updateMany({
-      where: {projectId, email: {in: addresses}},
+    // Only the contacts this takes off the list, so a copy of the event tells nobody twice. See
+    // SNOOZE_CLEARED_ON_WRITE in ContactService.
+    return tx.contact.updateManyAndReturn({
+      where: {projectId, email: {in: addresses}, AND: [ON_THE_LIST]},
       data: {subscribed: false, snoozedUntil: null},
+      select: {id: true},
     });
   }, SES_EVENT_TRANSACTION);
   signale.warn(
     `[WEBHOOK] ${eventType} for ${addresses.join(', ')} matched no email, suppressed in project ${projectId}`,
   );
+
+  // Their unsubscribe, as an email's bounce or complaint tracks it. Lost if queueing fails: the
+  // suppression is recorded, and a redelivery would find no one left to unsubscribe.
+  try {
+    for (const {id} of unsubscribed) {
+      await QueueService.queueEventTracking(
+        {
+          projectId,
+          eventName: 'contact.unsubscribed',
+          contactId: id,
+          data: {reason: (reason === 'COMPLAINT' ? 'complaint' : 'bounce') satisfies SubscriptionChangeReason},
+        },
+        undefined,
+      );
+    }
+  } catch (error) {
+    signale.error(
+      `[WEBHOOK] ${eventType} for ${addresses.join(', ')} recorded, but queueing contact.unsubscribed failed:`,
+      error,
+    );
+  }
 
   if (tags.kind !== 'test' && tags.kind !== 'alert') {
     await FailureAlertService.record(projectId, {

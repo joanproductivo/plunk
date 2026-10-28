@@ -484,7 +484,9 @@ export class AnalyticsService {
   /** Contacts are not tied to a stream, so the stream filter does not apply here */
   public static async getAudience(query: AnalyticsQuery): Promise<AnalyticsAudience> {
     const scoped = {...query, stream: 'ALL' as const};
-    return this.cached('audience', scoped, async () => {
+    // Plunk Lite: its own cache name since it carries `lost`, so a response cached before it is
+    // never read back without it
+    return this.cached('audience-lost', scoped, async () => {
       const granularity = this.granularityFor(scoped.from, scoped.to);
       const [[contacts], current, previous] = await Promise.all([
         prisma.$queryRaw<{total: bigint; subscribed: bigint}[]>`
@@ -511,8 +513,15 @@ export class AnalyticsService {
     query: AnalyticsQuery,
     granularity: AnalyticsGranularity,
   ): Promise<AnalyticsAudiencePoint[]> {
+    // Transient bounces were tracked as email.bounce before email.softbounce existed. Plunk Lite: a
+    // bounce or complaint of no stored email tracks no email event, only the unsubscribe it caused.
+    const suppressedEvent = Prisma.sql`(
+      ev."name" = 'email.complaint'
+      OR (ev."name" = 'email.bounce' AND ev."data"->>'transientBounce' IS NULL)
+      OR (ev."name" = 'contact.unsubscribed' AND ev."data"->>'reason' IN ('bounce', 'complaint'))
+    )`;
     const rows = await prisma.$queryRaw<
-      {bucket: string; new_contacts: bigint; unsubscribed: bigint; suppressed: bigint}[]
+      {bucket: string; new_contacts: bigint; unsubscribed: bigint; suppressed: bigint; lost: bigint}[]
     >`
       WITH buckets AS (${bucketSeries(query, granularity)}),
       created AS (
@@ -525,11 +534,11 @@ export class AnalyticsService {
       lost AS (
         SELECT ${localBucket(Prisma.sql`ev."createdAt"`, query.tz, granularity)} AS bucket,
           COUNT(DISTINCT ev."contactId") FILTER (WHERE ev."name" = 'contact.unsubscribed') AS unsubscribed,
+          COUNT(DISTINCT ev."contactId") FILTER (WHERE ${suppressedEvent}) AS suppressed,
+          -- Plunk Lite: a bounce or complaint also unsubscribes the contact, so each contact once
           COUNT(DISTINCT ev."contactId") FILTER (
-            WHERE ev."name" = 'email.complaint'
-              -- Transient bounces were tracked as email.bounce before email.softbounce existed
-              OR (ev."name" = 'email.bounce' AND ev."data"->>'transientBounce' IS NULL)
-          ) AS suppressed
+            WHERE ev."name" = 'contact.unsubscribed' OR ${suppressedEvent}
+          ) AS lost
         FROM "events" ev
         WHERE ev."projectId" = ${query.projectId}
           AND ev."name" IN ('contact.unsubscribed', 'email.bounce', 'email.complaint')
@@ -539,7 +548,8 @@ export class AnalyticsService {
       SELECT to_char(b.bucket, 'YYYY-MM-DD"T"HH24:MI') AS bucket,
         COALESCE(cr.n, 0) AS new_contacts,
         COALESCE(l.unsubscribed, 0) AS unsubscribed,
-        COALESCE(l.suppressed, 0) AS suppressed
+        COALESCE(l.suppressed, 0) AS suppressed,
+        COALESCE(l.lost, 0) AS lost
       FROM buckets b
       LEFT JOIN created cr ON cr.bucket = b.bucket
       LEFT JOIN lost l ON l.bucket = b.bucket
@@ -551,6 +561,7 @@ export class AnalyticsService {
       newContacts: Number(row.new_contacts),
       unsubscribed: Number(row.unsubscribed),
       suppressed: Number(row.suppressed),
+      lost: Number(row.lost),
     }));
   }
 
@@ -783,7 +794,8 @@ function sumAudience(points: AnalyticsAudiencePoint[]): AnalyticsAudience['total
       newContacts: acc.newContacts + p.newContacts,
       unsubscribed: acc.unsubscribed + p.unsubscribed,
       suppressed: acc.suppressed + p.suppressed,
+      lost: acc.lost + p.lost,
     }),
-    {newContacts: 0, unsubscribed: 0, suppressed: 0},
+    {newContacts: 0, unsubscribed: 0, suppressed: 0, lost: 0},
   );
 }

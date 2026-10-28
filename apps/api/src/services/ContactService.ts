@@ -14,7 +14,7 @@ import signale from 'signale';
 import {verifySignupsEnabled} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
-import {LONG_TRANSACTION} from '../utils/database.js';
+import {LONG_TRANSACTION, utcTimestamp} from '../utils/database.js';
 import {normalizeEmail} from '../utils/emailAddress.js';
 import {DeletedEmailCounts} from './DeletedEmailCounts.js';
 import {EmailVerificationService} from './EmailVerificationService.js';
@@ -653,7 +653,7 @@ export class ContactService {
    * Record an opt-out against the campaign email it came from: stamp the email's
    * `unsubscribedAt` and add one to the campaign's unsubscribe count.
    *
-   * The two move together, in one transaction, and the count only moves when the stamp
+   * The two move together, in one statement, and the count only moves when the stamp
    * lands. That keeps the stamped rows -- the list the campaign page drills into --
    * identical to the figure it is opened from, and makes a repeat opt-out from the same
    * email (a second click on the hosted page, a re-snooze) count once.
@@ -662,22 +662,25 @@ export class ContactService {
    * 5xx on a public unsubscribe endpoint, which would leave a mailbox provider retrying
    * a request that already took effect. A failure is logged and the opt-out stands
    * uncounted.
+   *
+   * Plunk Lite: the SES webhook records here, too, the unsubscribe a bounce or complaint causes,
+   * so the campaign's unsubscribes include it as Analytics does. A campaign's bounces arrive
+   * together, so this is one statement rather than an interactive transaction: it holds the
+   * campaign row only for the increment, and no pooled connection waits on Prisma's two-second
+   * transaction limit, which a burst would hit and leave the opt-out uncounted.
    */
-  private static async recordCampaignUnsubscribe(emailId: string, campaignId: string): Promise<void> {
+  public static async recordCampaignUnsubscribe(emailId: string, campaignId: string): Promise<void> {
     try {
-      await prisma.$transaction(async tx => {
-        const {count} = await tx.email.updateMany({
-          where: {id: emailId, unsubscribedAt: null},
-          data: {unsubscribedAt: new Date()},
-        });
-
-        if (count === 1) {
-          await tx.campaign.update({
-            where: {id: campaignId},
-            data: {unsubscribedCount: {increment: 1}},
-          });
-        }
-      });
+      const now = utcTimestamp(new Date());
+      await prisma.$executeRaw`
+        WITH stamped AS (
+          UPDATE "emails" SET "unsubscribedAt" = ${now}, "updatedAt" = ${now}
+          WHERE "id" = ${emailId} AND "unsubscribedAt" IS NULL
+          RETURNING 1
+        )
+        UPDATE "campaigns" SET "unsubscribedCount" = "unsubscribedCount" + 1, "updatedAt" = ${now}
+        WHERE "id" = ${campaignId} AND EXISTS (SELECT 1 FROM stamped)
+      `;
     } catch (error) {
       signale.warn(`[CONTACT] Failed to record unsubscribe for campaign ${campaignId}:`, error);
     }
@@ -741,8 +744,8 @@ export class ContactService {
     await EventService.trackEvent(contact.projectId, 'contact.unsubscribed', contactId, sourceEmail?.id);
 
     // Count it against the campaign the recipient opted out from. Suppressed
-    // emails are skipped: a bounce or complaint unsubscribes the contact too,
-    // and `bouncedCount` already reports those.
+    // emails are skipped: the bounce or complaint that suppressed them unsubscribed
+    // the contact, and the SES webhook counted it then, if it took them off the list.
     if (sourceEmail?.campaignId && !sourceEmail.suppressed) {
       await this.recordCampaignUnsubscribe(sourceEmail.id, sourceEmail.campaignId);
     }
@@ -801,7 +804,8 @@ export class ContactService {
    *
    * The call sites that uphold this, all marked with a reference to this comment:
    * `update`, `upsert`, `subscribe`, `unsubscribe`, `bulkSubscribe`, `bulkUnsubscribe`,
-   * the three SES suppression branches in `Webhooks`, and the workflow `UPDATE_CONTACT` step.
+   * the SES bounce and complaint handling in `Webhooks` and `suppressUnmatched`, and the workflow
+   * `UPDATE_CONTACT` step.
    * `create` needs nothing -- a new contact's `snoozedUntil` is already null.
    *
    * Plunk Lite adds a second line of defence: an address on the project's suppression list

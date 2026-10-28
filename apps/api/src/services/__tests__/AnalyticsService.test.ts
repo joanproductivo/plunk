@@ -150,3 +150,99 @@ describe('AnalyticsService - open and click rates against tracked emails', () =>
     expect(rows.find(row => row.id === marketing.id)).toMatchObject({sent: 10, tracked: 10, openRate: 40});
   });
 });
+
+/**
+ * Plunk Lite: a bounce or complaint also unsubscribes the contact, and tracks `contact.unsubscribed`
+ * with its `reason`. It counts as an unsubscribe wherever unsubscribes are reported on their own,
+ * and once where they are added to bounces and complaints.
+ */
+describe('AnalyticsService - unsubscribes a bounce or complaint caused', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+
+  beforeEach(async () => {
+    projectId = (await factories.createProject()).id;
+  });
+
+  const query = (): AnalyticsQuery => ({
+    projectId,
+    from: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    to: new Date(Date.now() + 60 * 1000),
+    tz: 'UTC',
+    stream: 'ALL',
+    trackedStreams: ENABLED,
+  });
+
+  /** A sent email to a fresh contact (or the one given), and the events it led to */
+  async function sentWith(events: {name: string; data?: Record<string, unknown>}[], contactId?: string) {
+    const contact = contactId ? {id: contactId} : await factories.createContact({projectId});
+    const email = await factories.createEmail({
+      projectId,
+      contactId: contact.id,
+      sourceType: EmailSourceType.CAMPAIGN,
+      status: EmailStatus.SENT,
+      sentAt: new Date(),
+    });
+    for (const {name, data} of events) {
+      await prisma.event.create({data: {projectId, contactId: contact.id, emailId: email.id, name, data}});
+    }
+  }
+
+  beforeEach(async () => {
+    // One opted out from the page, one bounced, which unsubscribed them too
+    await sentWith([{name: 'contact.unsubscribed'}]);
+    await sentWith([
+      {name: 'email.bounce', data: {bounceType: 'Permanent'}},
+      {name: 'contact.unsubscribed', data: {reason: 'bounce'}},
+    ]);
+  });
+
+  it('counts both as unsubscribes in the email metrics', async () => {
+    const {current} = await AnalyticsService.getOverview(query());
+    expect(current.unsubscribed).toBe(2);
+
+    const {current: points} = await AnalyticsService.getTimeseries(query());
+    expect(points.reduce((sum, point) => sum + point.unsubscribed, 0)).toBe(2);
+  });
+
+  it('shows the audience figures apart, and counts each contact lost once', async () => {
+    const {totals} = await AnalyticsService.getAudience(query());
+
+    expect(totals).toMatchObject({unsubscribed: 2, suppressed: 1, lost: 2});
+  });
+
+  it('counts among the contacts lost one who bounced after unsubscribing, and so was not unsubscribed again', async () => {
+    await sentWith([{name: 'email.bounce', data: {bounceType: 'Permanent'}}]);
+
+    const {totals} = await AnalyticsService.getAudience(query());
+
+    expect(totals).toMatchObject({unsubscribed: 2, suppressed: 2, lost: 3});
+  });
+
+  it('counts a complaint of no stored email, which tracks only the unsubscribe, under both', async () => {
+    const contact = await factories.createContact({projectId});
+    await prisma.event.create({
+      data: {projectId, contactId: contact.id, name: 'contact.unsubscribed', data: {reason: 'complaint'}},
+    });
+
+    const {totals} = await AnalyticsService.getAudience(query());
+
+    expect(totals).toMatchObject({unsubscribed: 3, suppressed: 2, lost: 3});
+  });
+
+  it('counts a snoozed contact who then bounced once among the unsubscribed', async () => {
+    const contact = await factories.createContact({projectId});
+    await sentWith(
+      [
+        {name: 'contact.unsubscribed', data: {reason: 'snooze'}},
+        {name: 'email.bounce', data: {bounceType: 'Permanent'}},
+        {name: 'contact.unsubscribed', data: {reason: 'bounce'}},
+      ],
+      contact.id,
+    );
+
+    const {totals} = await AnalyticsService.getAudience(query());
+
+    expect(totals).toMatchObject({unsubscribed: 3, suppressed: 2, lost: 3});
+  });
+});

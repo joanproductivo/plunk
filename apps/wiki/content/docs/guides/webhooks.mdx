@@ -440,9 +440,9 @@ This event fires when an email is received at your verified domain. See [Receivi
 
 #### Contact events
 
-`contact.subscribed` and `contact.unsubscribed` carry no event data by default. The `event` field will be an empty object `{}`.
+`contact.subscribed` and `contact.unsubscribed` carry no event data when the change was made by hand, through the API or from the unsubscribe page (except a snooze, below). The `event` field will be an empty object `{}`.
 
-The exception is when an unsubscription is triggered automatically by an email bounce or complaint — in that case `event` includes a `reason` field:
+When an unsubscription is triggered automatically by an email bounce or complaint, `event` includes a `reason` field:
 
 ```json
 {
@@ -450,9 +450,15 @@ The exception is when an unsubscription is triggered automatically by an email b
 }
 ```
 
+It is tracked right after the `email.bounce` or `email.complaint` event, and only when the contact was subscribed or snoozed: a contact who was already unsubscribed is not told twice. It counts as an unsubscribe in the analytics, as well as a bounce or complaint, and once in totals such as the contacts a campaign lost. A workflow that sends email on `contact.unsubscribed` should check `reason`: after a bounce or complaint, the address may not take mail.
+
+A snooze also carries a `reason`, with the snooze's details:
+
 <TypeTable
   type={{
-    reason: { type: 'string', description: 'Why the contact was unsubscribed. One of `bounce` or `complaint`. Only present when triggered automatically by a bounce or complaint.' },
+    reason: { type: 'string', description: 'Why the subscription changed. `bounce` or `complaint` when a bounce or complaint unsubscribed the contact; `snooze` on the `contact.unsubscribed` of a snooze, and `snooze_expired` on the `contact.subscribed` that ends one. Absent otherwise.' },
+    duration: { type: 'string', description: 'The snooze length the recipient picked: `2_weeks`, `1_month`, `6_months` or `1_year`. Only with `reason: "snooze"`.' },
+    snoozedUntil: { type: 'string', description: 'ISO 8601 timestamp when the snooze ends. Only with `reason: "snooze"`.' },
   }}
 />
 

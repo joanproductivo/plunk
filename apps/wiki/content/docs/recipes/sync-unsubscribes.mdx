@@ -4,7 +4,7 @@ description: Mirror Plunk's subscription state into your own user table using a 
 icon: RefreshCw
 ---
 
-Every flip of a contact's `subscribed` state — manual edits, the hosted unsubscribe page, bounces, complaints — fires a `contact.unsubscribed` event. Wire a workflow with a `WEBHOOK` step to forward that to your backend.
+Every flip of a contact's `subscribed` state — manual edits, the hosted unsubscribe page, bounces, complaints (also of a snoozed contact) — fires a `contact.unsubscribed` event. Wire a workflow with a `WEBHOOK` step to forward that to your backend.
 
 ## Setup
 
@@ -37,7 +37,7 @@ app.post('/plunk/unsubscribes', async (req, res) => {
 });
 ```
 
-`event.reason` is `"bounce"` or `"complaint"` for automatic unsubscribes, and absent for manual / self-service ones.
+`event.reason` is `"bounce"` or `"complaint"` for automatic unsubscribes, `"snooze"` for a recipient who paused emails (they come back on their own), and absent for manual / self-service ones.
 
 </Step>
 

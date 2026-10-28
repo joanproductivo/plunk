@@ -346,9 +346,10 @@ export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('
 });
 
 /**
- * SES events tracked outside the webhook request that received them. One attempt: tracking an
- * event starts and resumes workflows, and a run repeated after it got part of the way could
- * send their emails twice. A failed job stays in the queue, where it can be seen.
+ * SES events tracked outside the webhook request that received them, with the unsubscribe a bounce
+ * or complaint causes. One attempt: tracking an event starts and resumes workflows, and a run
+ * repeated after it got part of the way could send their emails twice. A failed job stays in the
+ * queue, where it can be seen.
  */
 export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-tracking', {
   connection: redisConnection,
@@ -817,7 +818,9 @@ export class QueueService {
 
   /**
    * Queue an SES event to be tracked by the worker. The job ID is the SNS message's, so copies of
-   * one notification, which SNS delivers at least once, track the event once.
+   * one notification, which SNS delivers at least once, track the event once. Plunk Lite: the
+   * unsubscribe a bounce of no stored email causes is queued with no job ID, once per contact it took
+   * off the list.
    */
   public static async queueEventTracking(
     data: EventTrackingJobData,

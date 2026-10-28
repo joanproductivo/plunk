@@ -998,8 +998,9 @@ export class CampaignService {
    *
    * One grouped pass over the campaign's emails, so the cost is O(campaign size)
    * and paid once. `unsubscribedCount` is deliberately absent: it is written together
-   * with `Email.unsubscribedAt`, in one transaction, by
-   * ContactService.recordCampaignUnsubscribe, so it is already exact, and recounting it
+   * with `Email.unsubscribedAt`, in one statement, by
+   * ContactService.recordCampaignUnsubscribe (the unsubscribe page, and in Plunk Lite the
+   * SES webhook), so it is already exact, and recounting it
    * here would also count rows the backfill stamped for opt-outs older than that write.
    *
    * `foldSentProgress` folds `sentCount` in as well and drops the Redis delta that
@@ -1396,22 +1397,25 @@ export class CampaignService {
    *
    * Reads the counters off the campaign row rather than recomputing them.
    * `sentCount` is maintained by the send paths and `unsubscribedCount` by
-   * ContactService.unsubscribe; delivered/opened/clicked/bounced/complained are
-   * written by `reconcileStats`, which runs when the send finalizes and then
-   * whenever the sweep finds the campaign in the dirty set -- so they trail an
-   * event by up to the sweep interval. Recomputing here instead would re-derive
-   * numbers that are already correct, at a cost that grows with the campaign --
-   * and, in the case of unsubscribes, with the size of the whole events table,
-   * since no index serves a predicate on Event.name alone. This endpoint is polled
-   * every 15s while a campaign is sending, so it has to stay a single indexed row
-   * lookup.
+   * ContactService.recordCampaignUnsubscribe (the unsubscribe page, and in Plunk Lite
+   * the SES webhook for the unsubscribe a bounce or complaint causes);
+   * delivered/opened/clicked/bounced/complained are written by `reconcileStats`, which
+   * runs when the send finalizes and then whenever the sweep finds the campaign in the
+   * dirty set -- so they trail an event by up to the sweep interval. Recomputing
+   * here instead would re-derive numbers that are already correct, at a cost that
+   * grows with the campaign -- and, in the case of unsubscribes, with the size of the
+   * whole events table, since no index serves a predicate on Event.name alone. This
+   * endpoint is polled every 15s while a campaign is sending, so it has to stay a
+   * single indexed row lookup (Plunk Lite: plus the small `lostCount` count below,
+   * over the opt-outs alone).
    *
    * Note what this means for a campaign that finalized before the counters were
    * written by anything: the row is authoritative, so a zero here is reported as a
    * zero no matter what the emails say. That is what the
    * 20260824120000_backfill_campaign_engagement_counters migration repairs.
    *
-   * `this.get` has already fetched the row, so the stats cost no further queries.
+   * `this.get` has already fetched the row, so the stats cost no further queries -- save one
+   * for `lostCount` (Plunk Lite), and only when it can differ from the plain sum.
    */
   public static async getStats(projectId: string, campaignId: string) {
     const campaign = await this.get(projectId, campaignId);
@@ -1434,6 +1438,24 @@ export class CampaignService {
         ? campaign.sentCount + (await this.readSentProgress(campaignId))
         : campaign.sentCount;
 
+    // Plunk Lite: the recipients lost to a bounce, a complaint or an opt-out, each once. A bounce
+    // or complaint that unsubscribes the contact counts as an opt-out too, so the plain sum counts
+    // them twice. The emails that carry both are few -- the partial index on `unsubscribedAt`
+    // holds only the opt-outs -- and what is taken off is bounded by either side, which keeps the
+    // figure sane while the bounce counters trail the sweep.
+    const suppressedCount = bouncedCount + complainedCount;
+    const both =
+      unsubscribedCount > 0 && suppressedCount > 0
+        ? await prisma.email.count({
+            where: {
+              campaignId,
+              unsubscribedAt: {not: null},
+              OR: [{bouncedAt: {not: null}}, {complainedAt: {not: null}}],
+            },
+          })
+        : 0;
+    const lostCount = suppressedCount + unsubscribedCount - Math.min(both, suppressedCount, unsubscribedCount);
+
     return {
       totalRecipients,
       sentCount,
@@ -1443,6 +1465,7 @@ export class CampaignService {
       bouncedCount,
       complainedCount,
       unsubscribedCount,
+      lostCount,
       openRate: sentCount > 0 ? (openedCount / sentCount) * 100 : 0,
       clickRate: sentCount > 0 ? (clickedCount / sentCount) * 100 : 0,
       bounceRate: sentCount > 0 ? (bouncedCount / sentCount) * 100 : 0,

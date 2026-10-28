@@ -77,6 +77,8 @@ interface CampaignStats {
   bouncedCount: number;
   complainedCount: number;
   unsubscribedCount: number;
+  /** Recipients lost to a bounce, a complaint or an opt-out, each counted once */
+  lostCount: number;
   openRate: number;
   clickRate: number;
   bounceRate: number;
@@ -500,8 +502,8 @@ export default function CampaignDetailsPage() {
 
   const c = campaign.data;
   const s = stats?.data;
-  // Safe to add: the three counts are mutually exclusive per recipient.
-  const lostContacts = s ? s.bouncedCount + s.complainedCount + s.unsubscribedCount : 0;
+  // Not a sum of the three: a bounce or complaint that unsubscribes the contact counts in both
+  const lostContacts = s?.lostCount ?? 0;
 
   // A campaign can reach SENDING before its recipient count is known, so guard the divide,
   // and clamp: sentCount is read partly from Redis and can briefly overshoot the total.

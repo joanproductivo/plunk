@@ -1,4 +1,9 @@
-import type {AnalyticsGranularity, AnalyticsTimeseriesPoint, EmailMetricCounts} from '@plunk/types';
+import type {
+  AnalyticsAudiencePoint,
+  AnalyticsGranularity,
+  AnalyticsTimeseriesPoint,
+  EmailMetricCounts,
+} from '@plunk/types';
 import dayjs from 'dayjs';
 
 export type MetricKey =
@@ -199,3 +204,20 @@ export function formatBucketLong(bucket: string, granularity: AnalyticsGranulari
   return granularity === 'hour' ? d.format('ddd, MMM D · HH:mm') : d.format('ddd, MMM D, YYYY');
 }
 
+/**
+ * Plunk Lite: how the contacts gained and lost add up. A bounce or complaint also unsubscribes the
+ * contact, so it is in both `unsubscribed` and `suppressed`; sums use `lost`, which holds each
+ * contact that left once, while each figure shown on its own keeps its full count.
+ */
+export function audienceBalance(p: Omit<AnalyticsAudiencePoint, 'bucket'>) {
+  return {
+    net: p.newContacts - p.lost,
+    /** Unsubscribed without a bounce or complaint: the bar stacked on top of the suppressed one */
+    unsubscribedOnly: p.lost - p.suppressed,
+    /**
+     * Counted under both figures: unsubscribed by a bounce or complaint, but also an opt-out and a
+     * spam report, or a snooze and a bounce, in the same bucket
+     */
+    inBoth: p.unsubscribed + p.suppressed - p.lost,
+  };
+}

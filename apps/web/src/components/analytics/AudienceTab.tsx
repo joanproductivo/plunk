@@ -3,7 +3,7 @@ import {type ChartConfig, ChartContainer, ChartTooltip} from '@plunk/ui';
 import {Bar, BarChart, CartesianGrid, ReferenceLine, XAxis, YAxis} from 'recharts';
 
 import {type AnalyticsFilters, useAnalyticsData} from '../../lib/hooks/useAnalytics';
-import {computeDelta, formatBucket, formatBucketLong, formatCompact, formatCount} from './metrics';
+import {audienceBalance, computeDelta, formatBucket, formatBucketLong, formatCompact, formatCount} from './metrics';
 import {ChartSkeleton, DeltaLabel, FigureBand, Panel, PanelEmpty, PanelError, RowsSkeleton} from './primitives';
 
 const config = {
@@ -20,9 +20,10 @@ export function AudienceTab({filters}: {filters: AnalyticsFilters}) {
 
   const totals = data?.totals;
   const before = data?.previousTotals;
-  const net = totals ? totals.newContacts - totals.unsubscribed - totals.suppressed : 0;
-  const previousNet = before ? before.newContacts - before.unsubscribed - before.suppressed : 0;
-  const hadBefore = before ? before.newContacts + before.unsubscribed + before.suppressed : 0;
+  // A bounce or complaint also unsubscribes the contact: see audienceBalance
+  const net = totals ? audienceBalance(totals).net : 0;
+  const previousNet = before ? audienceBalance(before).net : 0;
+  const hadBefore = before ? before.newContacts + before.lost : 0;
 
   return (
     <div className="space-y-6">
@@ -95,13 +96,21 @@ function GrowthLegend() {
 }
 
 function GrowthChart({data}: {data: AnalyticsAudience}) {
-  const rows = data.current.map(p => ({
-    label: formatBucket(p.bucket, data.granularity),
-    longLabel: formatBucketLong(p.bucket, data.granularity),
-    newContacts: p.newContacts,
-    unsubscribed: -p.unsubscribed,
-    suppressed: -p.suppressed,
-  }));
+  const rows = data.current.map(p => {
+    const balance = audienceBalance(p);
+    return {
+      label: formatBucket(p.bucket, data.granularity),
+      longLabel: formatBucketLong(p.bucket, data.granularity),
+      // The bars stack, so the unsubscribe bar leaves out the contacts the suppressed bar already
+      // holds: together they measure the contacts lost. The tooltip shows each figure in full.
+      newContacts: p.newContacts,
+      unsubscribed: -balance.unsubscribedOnly,
+      suppressed: -p.suppressed,
+      figures: {newContacts: p.newContacts, unsubscribed: p.unsubscribed, suppressed: p.suppressed},
+      inBoth: balance.inBoth,
+      net: balance.net,
+    };
+  });
 
   if (rows.every(r => r.newContacts === 0 && r.unsubscribed === 0 && r.suppressed === 0)) {
     return <PanelEmpty height={260}>No contacts joined or left in this period.</PanelEmpty>;
@@ -127,7 +136,6 @@ function GrowthChart({data}: {data: AnalyticsAudience}) {
             content={({active, payload}) => {
               const row = payload?.[0]?.payload as (typeof rows)[number] | undefined;
               if (!active || !row) return null;
-              const net = row.newContacts + row.unsubscribed + row.suppressed;
               return (
                 <div className="min-w-48 rounded-md border border-neutral-200 bg-white px-3 py-2 text-xs shadow-sm">
                   <div className="text-neutral-500">{row.longLabel}</div>
@@ -138,14 +146,20 @@ function GrowthChart({data}: {data: AnalyticsAudience}) {
                           <span className="h-2 w-2 rounded-[2px]" style={{backgroundColor: config[key].color}} />
                           {config[key].label}
                         </dt>
-                        <dd className="tabular-nums text-neutral-900">{formatCount(Math.abs(row[key]))}</dd>
+                        <dd className="tabular-nums text-neutral-900">{formatCount(row.figures[key])}</dd>
                       </div>
                     ))}
+                    {row.inBoth > 0 && (
+                      <div className="flex items-center justify-between gap-4 text-neutral-500">
+                        <dt>Unsubscribed and bounced or reported spam</dt>
+                        <dd className="tabular-nums">{formatCount(row.inBoth)}</dd>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between gap-4 border-t border-neutral-100 pt-1">
                       <dt className="font-medium text-neutral-900">Net</dt>
                       <dd className="font-medium tabular-nums text-neutral-900">
-                        {net > 0 ? '+' : net < 0 ? '−' : ''}
-                        {formatCount(Math.abs(net))}
+                        {row.net > 0 ? '+' : row.net < 0 ? '−' : ''}
+                        {formatCount(Math.abs(row.net))}
                       </dd>
                     </div>
                   </dl>
