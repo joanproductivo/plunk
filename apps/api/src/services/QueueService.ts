@@ -482,7 +482,7 @@ export class QueueService {
     stepExecutionId: string,
   ): Promise<boolean> {
     const jobId = workflowJobId(type, stepExecutionId);
-    if (await this.clearFinishedJob(workflowQueue, jobId)) {
+    if (!(await this.clearFinishedJob(workflowQueue, jobId))) {
       return false;
     }
     await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
@@ -757,20 +757,30 @@ export class QueueService {
 
   /**
    * Remove the job with this ID if it has finished (or sits in no list), so adding one with the same
-   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns true if a job that is
-   * still to run, or running, holds the ID. A concurrent caller can have replaced it with a job that
-   * is now running, and removing that one fails as locked: the running job does the work.
+   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns whether the ID is free
+   * -- false while a job that is still to run, or running, holds it, or one that would not go. A
+   * concurrent caller can have replaced it with a job that is now running, and removing that one
+   * fails as locked: the running job does the work.
    */
   private static async clearFinishedJob(queue: Queue, jobId: string): Promise<boolean> {
     const previous = await queue.getJob(jobId);
     if (!previous) {
-      return false;
-    }
-    if (await isStillToRun(previous)) {
       return true;
     }
-    await previous.remove().catch(() => undefined);
-    return false;
+    if (await isStillToRun(previous)) {
+      return false;
+    }
+    try {
+      await previous.remove();
+      return true;
+    } catch (error) {
+      // Free only if it went anyway; otherwise an add with its ID would do nothing
+      const free = !(await queue.getJob(jobId));
+      if (!free) {
+        signale.warn(`[QUEUE] Could not clear job ${jobId} to queue it again: ${errorMessage(error)}`);
+      }
+      return free;
+    }
   }
 
   /**

@@ -1,4 +1,4 @@
-import {StepExecutionStatus, WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
+import {Prisma, StepExecutionStatus, WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -195,6 +195,32 @@ describe('WorkflowRecoveryService.recoverWaits', () => {
     expect((await runOf(late.executionId)).status).toBe(WorkflowExecutionStatus.WAITING);
   });
 
+  it('goes on with the other runs when one cannot be recovered now', async () => {
+    const first = await waitingOn(WorkflowStepType.DELAY, {
+      status: StepExecutionStatus.COMPLETED,
+      resumeAt: minutesAgo(40),
+    });
+    const second = await waitingOn(WorkflowStepType.DELAY, {
+      status: StepExecutionStatus.COMPLETED,
+      resumeAt: minutesAgo(40),
+    });
+    vi.mocked(QueueService.ensureWorkflowWaitEnd).mockImplementation(async (_type, executionId) => {
+      if (executionId === first.executionId) {
+        throw new Error('redis down');
+      }
+      return true;
+    });
+
+    expect(await WorkflowRecoveryService.recoverWaits()).toBe(1);
+
+    expect(QueueService.ensureWorkflowWaitEnd).toHaveBeenCalledWith(
+      'delay-end',
+      second.executionId,
+      second.stepId,
+      second.stepExecutionId,
+    );
+  });
+
   it('leaves a run that waits half set up for less than 30 minutes', async () => {
     const recent = await waitingOn(WorkflowStepType.WAIT_FOR_EVENT, {status: StepExecutionStatus.RUNNING}, 10);
 
@@ -231,6 +257,18 @@ describe('WorkflowRecoveryService.sweep', () => {
     expect(waits).toHaveBeenCalledTimes(5);
   });
 
+  it('still checks interrupted runs when looking at the waits fails', async () => {
+    vi.spyOn(WorkflowRecoveryService, 'recoverWaits').mockRejectedValue(new Error('query failed'));
+    const interrupted = vi.spyOn(WorkflowRecoveryService, 'failInterrupted').mockResolvedValue(0);
+    const start = Date.now() + 3 * 365 * 24 * 60 * 60_000;
+
+    for (const minutes of [0, 5, 10]) {
+      await WorkflowRecoveryService.sweep(start + minutes * 60_000);
+    }
+
+    expect(interrupted).toHaveBeenCalledTimes(1);
+  });
+
   it('does not count a sweep that failed (the database out) as one without a gap', async () => {
     const waits = vi.spyOn(WorkflowRecoveryService, 'recoverWaits');
     const interrupted = vi.spyOn(WorkflowRecoveryService, 'failInterrupted').mockResolvedValue(0);
@@ -240,9 +278,11 @@ describe('WorkflowRecoveryService.sweep', () => {
     waits.mockResolvedValue(0);
     await WorkflowRecoveryService.sweep(at(0));
     await WorkflowRecoveryService.sweep(at(5));
-    waits.mockRejectedValue(new Error('database down'));
-    await expect(WorkflowRecoveryService.sweep(at(10))).rejects.toThrow('database down');
-    await expect(WorkflowRecoveryService.sweep(at(15))).rejects.toThrow('database down');
+    waits.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Can't reach database server", {code: 'P1001', clientVersion: 'test'}),
+    );
+    await expect(WorkflowRecoveryService.sweep(at(10))).rejects.toThrow("Can't reach database server");
+    await expect(WorkflowRecoveryService.sweep(at(15))).rejects.toThrow("Can't reach database server");
 
     waits.mockResolvedValue(0);
     await WorkflowRecoveryService.sweep(at(20));

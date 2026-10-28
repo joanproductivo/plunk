@@ -1,5 +1,5 @@
-import {type Job, Worker} from 'bullmq';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {Job, Worker} from 'bullmq';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {QueueService, workflowQueue} from '../QueueService';
 
@@ -14,6 +14,10 @@ describe('QueueService.ensureWorkflowWaitEnd', () => {
 
   beforeEach(async () => {
     await workflowQueue.obliterate({force: true});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   /** Take the job as a worker would, and finish it with `finish` */
@@ -60,6 +64,14 @@ describe('QueueService.ensureWorkflowWaitEnd', () => {
     const job = await workflowQueue.getJob(jobId);
     expect(await job!.getState()).toBe('waiting');
     expect(job!.attemptsMade).toBe(0);
+  });
+
+  it('says it queued nothing when the finished job it should replace will not go', async () => {
+    await ensure();
+    await runJob(job => job.moveToCompleted(undefined, 'test-token', false));
+    vi.spyOn(Job.prototype, 'remove').mockRejectedValueOnce(new Error('locked'));
+
+    expect(await ensure()).toBe(false);
   });
 
   it('replaces a job that completed, for a run the sweep still finds waiting', async () => {
