@@ -2103,6 +2103,64 @@
         }
       }
     },
+    "/campaigns/{id}/audience": {
+      "get": {
+        "tags": [
+          "Campaigns"
+        ],
+        "summary": "Unsubscribed recipients of a send (Plunk Lite)",
+        "description": "How many unsubscribed contacts a send of the campaign would reach now. Only a `TRANSACTIONAL` campaign reaches them; for any other type this is `0`. Addresses suppressed after a bounce or a complaint are counted, though the send skips them.",
+        "operationId": "getCampaignAudience",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "unsubscribed": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "data": {
+                    "unsubscribed": 12
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/campaigns/{id}/send": {
       "post": {
         "tags": ["Campaigns"],
@@ -2183,7 +2241,7 @@
             }
           },
           "400": {
-            "description": "Unparseable `scheduledFor`, or the campaign is not in a sendable state.",
+            "description": "Unparseable `scheduledFor`, the campaign is not in a sendable state, or (Plunk Lite) the send would not fit in what is left of the SES 24-hour quota, keeping 5 % of it for transactional and workflow emails. The message gives the figures.",
             "content": {
               "application/json": {
                 "schema": {

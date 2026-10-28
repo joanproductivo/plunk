@@ -212,7 +212,7 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
           .optional()
           .describe(
             'Only for a TRANSACTIONAL campaign, which reaches unsubscribed contacts too: set true to send it ' +
-              'when the number of them cannot be checked.',
+              'when the number of them cannot be checked, and only once the user has said to.',
           ),
       }),
       annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true},
@@ -239,7 +239,8 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
         if (unsubscribed === undefined && !includeUnsubscribed) {
           return errorResult(
             'This is a TRANSACTIONAL campaign, which reaches unsubscribed contacts too, and how many of them it ' +
-              'includes could not be checked. Call again with includeUnsubscribed: true to send it anyway.',
+              'includes could not be checked. Ask the user first; only if they say to send it anyway, call again ' +
+              'with includeUnsubscribed: true.',
           );
         }
         const unsubscribedNote = unsubscribed

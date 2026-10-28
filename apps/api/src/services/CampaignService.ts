@@ -624,15 +624,22 @@ export class CampaignService {
     }
 
     // Plunk Lite: refuse a send that would not fit in what is left of SES's 24-hour quota, keeping
-    // 5 % of it for the day's transactional and workflow emails. Without an answer from SES, or with
-    // no limit, the send goes on.
+    // 5 % of it for the day's transactional and workflow emails. The campaigns still sending, in any
+    // project (they share the SES account), count with what they have left. Without an answer from
+    // SES, or with no limit, the send goes on.
     const quota = await getDailyQuotaQuick();
     if (quota && quota.max24HourSend >= 0) {
       const allowed = Math.floor(DAILY_QUOTA_SHARE * quota.max24HourSend);
-      if (quota.sentLast24Hours + recipientCount > allowed) {
+      const sending = await prisma.campaign.aggregate({
+        where: {status: CampaignStatus.SENDING},
+        _sum: {totalRecipients: true, sentCount: true},
+      });
+      const pending = Math.max(0, (sending._sum.totalRecipients ?? 0) - (sending._sum.sentCount ?? 0));
+      if (quota.sentLast24Hours + pending + recipientCount > allowed) {
+        const others = pending > 0 ? `, ${pending} more are on their way in campaigns still sending` : '';
         throw new HttpException(
           400,
-          `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
+          `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours${others}, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
         );
       }
     }
@@ -1632,24 +1639,19 @@ export class CampaignService {
   }
 
   /**
-   * Plunk Lite: who a send of the campaign would reach now, and how many of them are unsubscribed:
-   * a TRANSACTIONAL campaign reaches them too, so the send dialogs say so. Suppressed addresses are
-   * not left out of the count (their table has no relation to contacts); the send still skips them.
+   * Plunk Lite: how many unsubscribed contacts a send of the campaign would reach now. Only a
+   * TRANSACTIONAL campaign reaches them (0 otherwise), so its send dialogs say so. Suppressed
+   * addresses are not left out of the count (their table has no relation to contacts); the send
+   * still skips them.
    */
-  public static async getAudience(
-    projectId: string,
-    campaignId: string,
-  ): Promise<{total: number; unsubscribed: number}> {
+  public static async getSendAudience(projectId: string, campaignId: string): Promise<{unsubscribed: number}> {
     const campaign = await this.get(projectId, campaignId);
+    if (campaign.type !== TemplateType.TRANSACTIONAL) {
+      return {unsubscribed: 0};
+    }
     const where = await this.buildRecipientWhereAsync(projectId, campaign);
-    const [total, unsubscribed] = await Promise.all([
-      prisma.contact.count({where}),
-      // In an AND, so no key of the audience's own filter can override it
-      campaign.type === TemplateType.TRANSACTIONAL
-        ? prisma.contact.count({where: {AND: [where, {subscribed: false}]}})
-        : 0,
-    ]);
-    return {total, unsubscribed};
+    // In an AND, so no key of the audience's own filter can override it
+    return {unsubscribed: await prisma.contact.count({where: {AND: [where, {subscribed: false}]}})};
   }
 
   /**

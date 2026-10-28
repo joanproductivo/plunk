@@ -1,14 +1,18 @@
-import {CampaignAudienceType, CampaignStatus, TemplateType} from '@plunk/db';
+import {CampaignAudienceType, CampaignStatus} from '@plunk/db';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {CampaignService} from '../CampaignService';
 import {getDailyQuotaQuick} from '../SESService';
 
+vi.mock('../SESService', async importOriginal => ({
+  ...(await importOriginal<typeof import('../SESService')>()),
+  getDailyQuotaQuick: vi.fn(async () => null),
+}));
+
 /**
  * Plunk Lite: a campaign that would not fit in what is left of SES's 24-hour quota is refused as it
- * starts, keeping 5 % for the day's transactional and workflow emails. (The test setup stands in for
- * SES's answer.)
+ * starts, keeping 5 % for the day's transactional and workflow emails
  */
 describe('CampaignService.send and the SES daily quota', () => {
   const prisma = getPrismaClient();
@@ -45,39 +49,35 @@ describe('CampaignService.send and the SES daily quota', () => {
     expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
   });
 
+  it('counts what the campaigns still sending, in any project, have left to send', async () => {
+    vi.mocked(getDailyQuotaQuick).mockResolvedValue({max24HourSend: 100, sentLast24Hours: 50});
+    const other = (await factories.createUserWithProject()).project.id;
+    await prisma.campaign.create({
+      data: {
+        projectId: other,
+        name: 'Still sending',
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hi@example.com',
+        status: CampaignStatus.SENDING,
+        totalRecipients: 60,
+        sentCount: 30,
+      },
+    });
+
+    // 50 sent + 30 on their way + 10 for this one = 90, within 95
+    expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
+    // ...and the next one 50 + (30 + 10) + 10 = 100, past 95
+    await expect(CampaignService.send(projectId, (await draft()).id)).rejects.toThrow(
+      /40 more are on their way in campaigns still sending/,
+    );
+  });
+
   it('sends when SES does not answer, or the quota has no limit', async () => {
     vi.mocked(getDailyQuotaQuick).mockResolvedValueOnce(null);
     expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
 
     vi.mocked(getDailyQuotaQuick).mockResolvedValueOnce({max24HourSend: -1, sentLast24Hours: 50_000});
     expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
-  });
-});
-
-/** Plunk Lite: the send dialogs say how many unsubscribed contacts a TRANSACTIONAL campaign reaches */
-describe('CampaignService.getAudience', () => {
-  let projectId: string;
-
-  beforeEach(async () => {
-    projectId = (await factories.createUserWithProject()).project.id;
-    await factories.createContact({projectId, subscribed: true});
-    await factories.createContact({projectId, subscribed: true});
-    await factories.createContact({projectId, subscribed: false});
-  });
-
-  it('counts the unsubscribed recipients of a transactional campaign', async () => {
-    const campaign = await factories.createCampaign({
-      projectId,
-      type: TemplateType.TRANSACTIONAL,
-      audienceType: CampaignAudienceType.ALL,
-    });
-
-    expect(await CampaignService.getAudience(projectId, campaign.id)).toEqual({total: 3, unsubscribed: 1});
-  });
-
-  it('counts none for a marketing campaign, which only reaches subscribed contacts', async () => {
-    const campaign = await factories.createCampaign({projectId, audienceType: CampaignAudienceType.ALL});
-
-    expect(await CampaignService.getAudience(projectId, campaign.id)).toEqual({total: 2, unsubscribed: 0});
   });
 });

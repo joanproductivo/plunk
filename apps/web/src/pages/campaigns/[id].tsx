@@ -153,7 +153,7 @@ function figureTone(figure: SupportingFigure, s: CampaignStats): string {
 
 /** Plunk Lite: a TRANSACTIONAL campaign reaches unsubscribed contacts too; its send dialogs say how many */
 function UnsubscribedNotice({campaignId}: {campaignId: string}) {
-  const {data} = useSWR<{data: {total: number; unsubscribed: number}}>(`/campaigns/${campaignId}/audience`);
+  const {data} = useSWR<{data: {unsubscribed: number}}>(`/campaigns/${campaignId}/audience`);
   const unsubscribed = data?.data.unsubscribed ?? 0;
   if (unsubscribed === 0) {
     return null;
@@ -163,8 +163,7 @@ function UnsubscribedNotice({campaignId}: {campaignId: string}) {
       <Info className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
       <p className="text-xs text-amber-800 leading-relaxed">
         Includes {unsubscribed.toLocaleString()} unsubscribed {unsubscribed === 1 ? 'contact' : 'contacts'}: a
-        transactional campaign reaches them too. Addresses suppressed for a bounce or a complaint are still left
-        out.
+        transactional campaign reaches them too. Addresses suppressed for a bounce or a complaint are still left out.
       </p>
     </div>
   );
