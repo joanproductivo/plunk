@@ -2,6 +2,7 @@ import {createHmac} from 'node:crypto';
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {StepExecutionStatus, WorkflowExecutionStatus, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
+import {WebhookSigningSecrets} from '../WebhookSigningSecrets';
 import {WorkflowExecutionService} from '../WorkflowExecutionService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -323,6 +324,15 @@ describe('WorkflowExecutionService.executeWebhook templating', () => {
         'X-Plunk-Signature',
       ]);
       expect(signatureOf(headers)).not.toBeNull();
+    });
+
+    it('sends nothing when the secret cannot be read, rather than an unsigned request', async () => {
+      const read = vi.spyOn(WebhookSigningSecrets, 'forStep').mockRejectedValue(new Error('database down'));
+      const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'POST'});
+
+      await expect(invokeWebhook(step, execution, stepExecution, step.config)).rejects.toThrow('database down');
+      expect(safeFetchSpy).not.toHaveBeenCalled();
+      read.mockRestore();
     });
 
     it('fails the step on an answer that is not a 2xx, without its body', async () => {
