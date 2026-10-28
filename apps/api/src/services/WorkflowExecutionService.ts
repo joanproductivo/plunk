@@ -21,12 +21,14 @@ import {HttpException} from '../exceptions/index.js';
 import {DASHBOARD_URI} from '../app/constants.js';
 import {POOL_WAIT_TRANSACTION} from '../utils/database.js';
 import {readCapped} from '../utils/readCapped.js';
+import {signWebhook, WEBHOOK_SIGNATURE_HEADER} from '../utils/webhookSignature.js';
 
 import {RECIPIENT_OVERRIDE_HEADER} from './EmailHeaderService.js';
 import {EmailService} from './EmailService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SuppressionService} from './SuppressionService.js';
+import {WebhookSigningSecrets} from './WebhookSigningSecrets.js';
 import {WorkflowRecoveryService} from './WorkflowRecoveryService.js';
 
 // A step's error is rethrown through the catch of every step before it in the same run, which
@@ -1174,9 +1176,13 @@ export class WorkflowExecutionService {
    * webhook-only `event` namespace exposing the trigger event payload.
    * `method` is intentionally NOT rendered — it must remain a literal
    * HTTP verb.
+   *
+   * Plunk Lite: a step with a signing secret (WebhookSigningSecrets) adds
+   * an X-Plunk-Signature header, and a response that is not a 2xx fails
+   * the step.
    */
   private static async executeWebhook(
-    _step: WorkflowStep,
+    step: WorkflowStep,
     execution: WorkflowExecutionWithRelations,
     _stepExecution: WorkflowStepExecution,
     config: StepConfig,
@@ -1234,14 +1240,26 @@ export class WorkflowExecutionService {
       event: context, // Include event data that triggered the workflow
     };
 
+    // Plunk Lite: the body is serialized once, so that what is signed is byte for byte what is sent
+    const bodyText = method !== 'GET' ? JSON.stringify(payload) : undefined;
+
+    // Plunk Lite: a step whose receiver set a secret signs its request, last, so that no header of
+    // the step can stand in for it. The signature header is reserved: fetch would join a copy of
+    // it in another case with the real one rather than replace it.
+    const secret = await WebhookSigningSecrets.forStep(step.id);
+    const stepHeaders = Object.entries(renderedHeaders ?? {}).filter(
+      ([key]) => key.toLowerCase() !== WEBHOOK_SIGNATURE_HEADER.toLowerCase(),
+    );
+
     // Make HTTP request
     const response = await WorkflowExecutionService.safeFetch(renderedUrl, {
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...renderedHeaders,
+        ...Object.fromEntries(stepHeaders),
+        ...(secret ? {[WEBHOOK_SIGNATURE_HEADER]: signWebhook(secret, bodyText ?? '')} : {}),
       },
-      body: method !== 'GET' ? JSON.stringify(payload) : undefined,
+      body: bodyText,
     });
 
     // Plunk Lite: at most 64 KB of the answer, which is stored with the step: a huge response
@@ -1252,6 +1270,13 @@ export class WorkflowExecutionService {
       parsedResponse = truncated ? responseData : JSON.parse(responseData);
     } catch {
       parsedResponse = responseData;
+    }
+
+    // Plunk Lite: an answer that is not a 2xx fails the step -- and with it the run, which alerts --
+    // as a network error already did; it used to complete as if the receiver had taken it. Not its
+    // body, which is the receiver's to word and may say more than an alert should.
+    if (!response.ok) {
+      throw new Error(`Webhook responded with HTTP ${response.status}`);
     }
 
     return {

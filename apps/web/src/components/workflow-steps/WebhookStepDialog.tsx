@@ -1,8 +1,24 @@
-import {Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@plunk/ui';
-import {ChevronDown, Plus, Trash2} from 'lucide-react';
+import {
+  Badge,
+  Button,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+  Input,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Switch,
+  Textarea,
+} from '@plunk/ui';
+import {ChevronDown, Plus, ShieldCheck, Trash2} from 'lucide-react';
 import Link from 'next/link';
 import {useState} from 'react';
 import {toast} from 'sonner';
+import useSWR from 'swr';
 
 import {WIKI_URI} from '../../lib/constants';
 
@@ -11,6 +27,19 @@ import {type EditStepDialogProps, getStepConfig, StepDialogShell, useStepUpdate}
 interface HeaderEntry {
   key: string;
   value: string;
+}
+
+/** Plunk Lite: what a custom payload starts from */
+const DEFAULT_CUSTOM_BODY = {email: '{{email}}', id: '{{id}}'};
+
+/** Plunk Lite: a custom payload as typed, or undefined when it is not JSON the step accepts */
+function parsePayload(text: string): Record<string, unknown> | unknown[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown> | unknown[]) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSuccess}: EditStepDialogProps) {
@@ -26,6 +55,19 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
   const [webhookMethod, setWebhookMethod] = useState(String(config.method ?? 'POST'));
   const [webhookHeaders, setWebhookHeaders] = useState<HeaderEntry[]>(initialHeaders);
   const [showWebhookInfo, setShowWebhookInfo] = useState(false);
+  // Plunk Lite: a body set before -- here or through the API -- is kept, and opens as the custom payload.
+  // Not a bare value (null, a string), which the step sends as no body at all.
+  const hasBody = config.body !== null && typeof config.body === 'object';
+  const [customPayload, setCustomPayload] = useState(hasBody);
+  const [payloadText, setPayloadText] = useState(() =>
+    JSON.stringify(hasBody ? config.body : DEFAULT_CUSTOM_BODY, null, 2),
+  );
+
+  // Plunk Lite: whether the receiver set a signing secret. The secret itself is never sent back.
+  const {data: signing} = useSWR<{active: boolean}>(
+    open ? `/workflows/${workflowId}/steps/${step.id}/signing-secret` : null,
+    {revalidateOnFocus: false},
+  );
 
   const {update, isSubmitting} = useStepUpdate(workflowId, step.id);
 
@@ -44,9 +86,18 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
       }
     });
 
+    let body: Record<string, unknown> | unknown[] | undefined;
+    if (customPayload) {
+      body = parsePayload(payloadText);
+      if (!body) {
+        toast.error('Payload must be valid JSON (an object or an array)');
+        return;
+      }
+    }
+
     const ok = await update({
       name,
-      config: {url: webhookUrl, method: webhookMethod, headers},
+      config: {url: webhookUrl, method: webhookMethod, headers, ...(body ? {body} : {})},
     });
 
     if (ok) {
@@ -74,7 +125,7 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
           <div className="flex items-center justify-between">
             <CollapsibleTrigger className="flex items-center gap-1 text-xs text-neutral-500 hover:text-neutral-700">
               <ChevronDown className={`h-3 w-3 transition-transform ${showWebhookInfo ? 'rotate-180' : ''}`} />
-              {showWebhookInfo ? 'Hide' : 'View'} request payload
+              {showWebhookInfo ? 'Hide' : 'View'} default payload
             </CollapsibleTrigger>
             <Link
               href={`${WIKI_URI}/guides/webhooks#webhook-payload`}
@@ -96,6 +147,18 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
             </pre>
           </CollapsibleContent>
         </Collapsible>
+
+        {signing?.active && (
+          <div className="flex items-start gap-2 p-3 rounded-lg border border-green-200 bg-green-50">
+            <ShieldCheck className="h-4 w-4 text-green-700 mt-0.5 shrink-0" />
+            <div className="text-xs text-green-900">
+              <Badge variant="success" className="mb-1">
+                Signed requests
+              </Badge>
+              <p>Requests carry an X-Plunk-Signature header. The secret is set through the API and never shown.</p>
+            </div>
+          </div>
+        )}
 
         <div>
           <Label htmlFor="editWebhookUrl">URL</Label>
@@ -168,6 +231,43 @@ export function WebhookStepDialog({step, workflowId, open, onOpenChange, onSucce
               </div>
             ))}
           </div>
+        </div>
+
+        <div className="space-y-3 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
+          <div className="flex items-start gap-3">
+            <Switch id="editWebhookCustomPayload" checked={customPayload} onCheckedChange={setCustomPayload} />
+            <div className="flex-1">
+              <Label htmlFor="editWebhookCustomPayload" className="font-medium cursor-pointer">
+                Custom payload
+              </Label>
+              <p className="text-xs text-neutral-500 mt-1">
+                Send this JSON instead of the default request payload. It replaces the default one entirely.
+              </p>
+            </div>
+          </div>
+
+          {customPayload && (
+            <>
+              <Textarea
+                id="editWebhookPayload"
+                aria-label="Custom payload"
+                className="font-mono text-xs min-h-40"
+                value={payloadText}
+                onChange={e => setPayloadText(e.target.value)}
+                spellCheck={false}
+              />
+              <p className="text-xs text-neutral-500">
+                Variables are filled in string values only, with Liquid: <code>{'{{email}}'}</code>,{' '}
+                <code>{'{{id}}'}</code>, a contact field such as <code>{'{{data.plan}}'}</code>, a field of the event
+                that started the workflow such as <code>{'{{event.plan}}'}</code>, <code>{'{{unsubscribeUrl}}'}</code>,{' '}
+                <code>{'{{subscribeUrl}}'}</code> and <code>{'{{manageUrl}}'}</code>. A fallback:{' '}
+                <code>{'{{data.name ?? there}}'}</code>.
+              </p>
+              {webhookMethod === 'GET' && (
+                <p className="text-xs text-amber-700">GET requests send no body: choose another method to send it.</p>
+              )}
+            </>
+          )}
         </div>
       </div>
     </StepDialogShell>

@@ -1,3 +1,5 @@
+import {createHmac} from 'node:crypto';
+
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {StepExecutionStatus, WorkflowExecutionStatus, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
 import {WorkflowExecutionService} from '../WorkflowExecutionService';
@@ -244,5 +246,101 @@ describe('WorkflowExecutionService.executeWebhook templating', () => {
     const body = JSON.parse(captured!.options.body as string);
     expect(body.referrer).toBe('newsletter-may');
     expect(body.subject).toBe('Welcome');
+  });
+
+  describe('signature and failures (Plunk Lite)', () => {
+    /** The X-Plunk-Signature of the captured request, recomputed from its own `t` and body */
+    function signatureOf(headers: Record<string, string>) {
+      const header = headers['X-Plunk-Signature'];
+      const match = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header ?? '');
+      return match ? {t: Number(match[1]), v1: match[2]} : null;
+    }
+
+    it('signs the body as sent with the step secret', async () => {
+      const {step, execution, stepExecution} = await setup({
+        url: 'https://example.com/hook',
+        method: 'POST',
+        body: {email: '{{email}}', note: 'ñandú 🌴'},
+      });
+      await prisma.plunkLiteWebhookSecret.create({
+        data: {stepId: step.id, workflowId: step.workflowId, projectId, secret: 's'.repeat(40)},
+      });
+
+      await invokeWebhook(step, execution, stepExecution, step.config);
+
+      const headers = captured!.options.headers as Record<string, string>;
+      const signature = signatureOf(headers);
+      expect(signature).not.toBeNull();
+      expect(Math.abs(signature!.t - Date.now() / 1000)).toBeLessThan(5);
+      expect(signature!.v1).toBe(
+        createHmac('sha256', 's'.repeat(40))
+          .update(`${signature!.t}.${captured!.options.body as string}`, 'utf8')
+          .digest('hex'),
+      );
+    });
+
+    it('signs "<t>." for a GET, which sends no body', async () => {
+      const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'GET'});
+      await prisma.plunkLiteWebhookSecret.create({
+        data: {stepId: step.id, workflowId: step.workflowId, projectId, secret: 'g'.repeat(32)},
+      });
+
+      await invokeWebhook(step, execution, stepExecution, step.config);
+
+      const signature = signatureOf(captured!.options.headers as Record<string, string>);
+      expect(captured!.options.body).toBeUndefined();
+      expect(signature!.v1).toBe(createHmac('sha256', 'g'.repeat(32)).update(`${signature!.t}.`).digest('hex'));
+    });
+
+    it('sends no signature without a secret, and never a step header standing in for it', async () => {
+      const {step, execution, stepExecution} = await setup({
+        url: 'https://example.com/hook',
+        method: 'POST',
+        headers: {'x-plunk-signature': 't=1,v1=forged', 'X-Other': 'kept'},
+      });
+
+      await invokeWebhook(step, execution, stepExecution, step.config);
+
+      const headers = captured!.options.headers as Record<string, string>;
+      expect(Object.keys(headers).map(key => key.toLowerCase())).not.toContain('x-plunk-signature');
+      expect(headers['X-Other']).toBe('kept');
+    });
+
+    it('replaces a step header named like the signature when the step signs', async () => {
+      const {step, execution, stepExecution} = await setup({
+        url: 'https://example.com/hook',
+        method: 'POST',
+        headers: {'x-plunk-signature': 't=1,v1=forged'},
+      });
+      await prisma.plunkLiteWebhookSecret.create({
+        data: {stepId: step.id, workflowId: step.workflowId, projectId, secret: 'k'.repeat(32)},
+      });
+
+      await invokeWebhook(step, execution, stepExecution, step.config);
+
+      const headers = captured!.options.headers as Record<string, string>;
+      expect(Object.keys(headers).filter(key => key.toLowerCase() === 'x-plunk-signature')).toEqual([
+        'X-Plunk-Signature',
+      ]);
+      expect(signatureOf(headers)).not.toBeNull();
+    });
+
+    it('fails the step on an answer that is not a 2xx, without its body', async () => {
+      safeFetchSpy.mockImplementation(async () => new Response('{"error":"bad signature"}', {status: 401}));
+      const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'POST'});
+
+      await expect(invokeWebhook(step, execution, stepExecution, step.config)).rejects.toThrow(
+        /^Webhook responded with HTTP 401$/,
+      );
+    });
+
+    it('still completes on a 2xx', async () => {
+      safeFetchSpy.mockImplementation(async () => new Response(null, {status: 204}));
+      const {step, execution, stepExecution} = await setup({url: 'https://example.com/hook', method: 'POST'});
+
+      const result = await invokeWebhook(step, execution, stepExecution, step.config);
+
+      expect(result).toMatchObject({statusCode: 204, success: true});
+    });
   });
 });

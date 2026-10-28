@@ -1,9 +1,10 @@
-import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
+import {Controller, Delete, Get, Middleware, Patch, Post, Put} from '@overnightjs/core';
 import {WorkflowExecutionStatus} from '@plunk/db';
 import {WorkflowSchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
 import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
+import {WebhookSigningSecrets} from '../services/WebhookSigningSecrets.js';
 import {WorkflowService} from '../services/WorkflowService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {parseListSort} from '../utils/listSort.js';
@@ -297,6 +298,52 @@ export class Workflows {
     } else {
       await WorkflowService.deleteStep(auth.projectId!, workflowId, stepId);
     }
+
+    return res.status(204).send();
+  }
+
+  /**
+   * GET /workflows/:id/steps/:stepId/signing-secret
+   * Plunk Lite: whether a webhook step signs its requests. Never the secret itself.
+   */
+  @Get(':id/steps/:stepId/signing-secret')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async getSigningSecret(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const status = await WebhookSigningSecrets.status(auth.projectId!, req.params.id!, req.params.stepId!);
+
+    return res.status(200).json(status);
+  }
+
+  /**
+   * PUT /workflows/:id/steps/:stepId/signing-secret
+   * Plunk Lite: set or replace the secret a webhook step signs its requests with (X-Plunk-Signature).
+   * Write-only: no endpoint returns it.
+   */
+  @Put(':id/steps/:stepId/signing-secret')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async setSigningSecret(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {secret} = WorkflowSchemas.signingSecret.parse(req.body);
+
+    await WebhookSigningSecrets.set(auth.projectId!, req.params.id!, req.params.stepId!, secret);
+
+    return res.status(204).send();
+  }
+
+  /**
+   * DELETE /workflows/:id/steps/:stepId/signing-secret
+   * Plunk Lite: stop signing a webhook step's requests
+   */
+  @Delete(':id/steps/:stepId/signing-secret')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async removeSigningSecret(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    await WebhookSigningSecrets.remove(auth.projectId!, req.params.id!, req.params.stepId!);
 
     return res.status(204).send();
   }

@@ -12,6 +12,7 @@ import type {ListSort} from '../utils/listSort.js';
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {WebhookSigningSecrets} from './WebhookSigningSecrets.js';
 import {WorkflowEmailLinks} from './WorkflowEmailLinks.js';
 import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
 import {WorkflowEntryService} from './WorkflowEntryService.js';
@@ -337,6 +338,7 @@ export class WorkflowService {
 
     await prisma.$transaction(async tx => {
       await WorkflowEmailLinks.detachWorkflows(tx, projectId, [workflowId]);
+      await WebhookSigningSecrets.forgetWorkflows(tx, projectId, [workflowId]);
       await tx.workflow.delete({where: {id: workflowId}});
     }, LONG_TRANSACTION);
 
@@ -419,6 +421,7 @@ export class WorkflowService {
         }
 
         await WorkflowEmailLinks.detachWorkflows(tx, projectId, uniqueIds);
+        await WebhookSigningSecrets.forgetWorkflows(tx, projectId, uniqueIds);
         const result = await tx.workflow.deleteMany({
           where: {id: {in: uniqueIds}, projectId},
         });
@@ -769,6 +772,7 @@ export class WorkflowService {
     // Delete all affected steps (Prisma will cascade delete the transitions)
     await prisma.$transaction(async tx => {
       await WorkflowEmailLinks.detachSteps(tx, Array.from(stepsToDelete));
+      await WebhookSigningSecrets.forgetSteps(tx, Array.from(stepsToDelete));
       await tx.workflowStep.deleteMany({
         where: {
           id: {in: Array.from(stepsToDelete)},
@@ -837,6 +841,7 @@ export class WorkflowService {
     // Delete the step — cascades and removes its own transitions
     await prisma.$transaction(async tx => {
       await WorkflowEmailLinks.detachSteps(tx, [stepId]);
+      await WebhookSigningSecrets.forgetSteps(tx, [stepId]);
       await tx.workflowStep.delete({where: {id: stepId}});
     }, LONG_TRANSACTION);
   }

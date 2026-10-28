@@ -978,3 +978,19 @@ model PlunkLiteDeletedEmailCount {
   @@id([projectId, hour])
   @@map("plunk_lite_deleted_email_counts")
 }
+
+/// Plunk Lite: the secret a webhook step signs its requests with (the X-Plunk-Signature header).
+/// One per step, set through the API by whoever receives the webhook and never read back. No
+/// relation to WorkflowStep, like the other tables of Plunk Lite: its rows go with their step,
+/// workflow or project explicitly (see WebhookSigningSecrets).
+model PlunkLiteWebhookSecret {
+  stepId     String   @id
+  workflowId String
+  projectId  String
+  secret     String
+  updatedAt  DateTime @updatedAt
+
+  @@index([workflowId])
+  @@index([projectId])
+  @@map("plunk_lite_webhook_secrets")
+}
