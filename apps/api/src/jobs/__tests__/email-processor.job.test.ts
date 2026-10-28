@@ -8,7 +8,7 @@ import {CampaignService} from '../../services/CampaignService';
 import {EventService} from '../../services/EventService';
 import {SecurityService} from '../../services/SecurityService';
 import {SuppressionService} from '../../services/SuppressionService';
-import {holdSending, manyRejections, pauseSending} from '../../services/SesSendGate.js';
+import {holdSending, manyRejections, noteQuotaHeld, pauseSending} from '../../services/SesSendGate.js';
 import {sendRawEmail} from '../../services/SESService';
 import {type EmailJob, failAbandonedEmail, processEmailJob} from '../email-processor';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -23,6 +23,7 @@ vi.mock('../../services/SesSendGate.js', () => ({
   holdSending: vi.fn(async () => undefined),
   pauseSending: vi.fn(async () => undefined),
   manyRejections: vi.fn(async () => false),
+  noteQuotaHeld: vi.fn(async () => undefined),
   noteSent: vi.fn(async () => undefined),
   SES_RATE_WAIT_MS: 1000,
   SES_DAILY_QUOTA_WAIT_MS: 15 * 60_000,
@@ -164,7 +165,21 @@ describe('processEmailJob', () => {
       await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
 
       expect(holdSending).toHaveBeenCalledWith(15 * 60_000);
+      expect(noteQuotaHeld).toHaveBeenCalled();
       expect(await failures('ses:daily-quota')).toBe(1);
+    });
+
+    it('puts the email back to PENDING before anything else, so a failure there still lets it be sent', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal('Throttling', 'Maximum sending rate exceeded.'));
+      const job = makeJob(email.id);
+      job.updateData = vi.fn(async () => {
+        throw new Error('Redis is down');
+      });
+
+      await expect(processEmailJob(job)).rejects.toThrow('Redis is down');
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.PENDING);
     });
 
     it.each([
@@ -188,6 +203,7 @@ describe('processEmailJob', () => {
 
       await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
 
+      expect(manyRejections).toHaveBeenCalledWith(expect.any(String), 'Some wording this code does not know');
       expect(pauseSending).toHaveBeenCalled();
     });
 

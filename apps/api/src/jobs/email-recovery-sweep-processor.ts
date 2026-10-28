@@ -16,6 +16,9 @@
  * from a backup has PENDING rows for emails long sent -- and a transactional email the API
  * answered 500 for was usually sent again by its caller. A campaign batch that dies requeues its
  * own unsent emails when BullMQ runs it again.
+ *
+ * Plunk Lite: before that, it resumes an email queue paused for SES once the pause is due a probe
+ * (SesSendGate), and gives a campaign batch that failed for good another round.
  */
 
 import {EmailStatus} from '@plunk/db';

@@ -9,7 +9,9 @@
  * Retries: an attempt that fails before SES accepts the email puts it back to PENDING and lets
  * BullMQ retry it; only the last attempt marks it FAILED. Once SES has accepted it, the email is
  * never sent again and never marked FAILED: what SES returned is kept on the job, and a retry
- * only records the send.
+ * only records the send. Plunk Lite: what SES says about the whole account (its rate, its daily
+ * quota, a pause) holds the email back without spending an attempt, and a refusal of the email
+ * itself fails it at once.
  */
 
 import {CampaignStatus, EmailStatus, Prisma, WorkflowExecutionStatus} from '@plunk/db';
@@ -53,6 +55,7 @@ import {
 import {
   holdSending,
   manyRejections,
+  noteQuotaHeld,
   noteSent,
   pauseSending,
   SES_DAILY_QUOTA_WAIT_MS,
@@ -138,30 +141,28 @@ async function holdBack(
   message: string,
 ): Promise<Error | undefined> {
   const now = Date.now();
-  if (refusal === 'rate') {
-    const starts = (job.data.rateLimitedStarts ?? 0) + 1;
-    if (starts > MAX_RATE_LIMITED_STARTS) {
-      return undefined;
-    }
-    await job.updateData({...job.data, rateLimitedStarts: starts});
-  } else {
-    const heldSince = job.data.heldSince ?? now;
-    if (now - heldSince > MAX_HELD_MS) {
-      return undefined;
-    }
-    if (job.data.heldSince === undefined) {
-      await job.updateData({...job.data, heldSince});
-    }
+  const starts = (job.data.rateLimitedStarts ?? 0) + 1;
+  const heldSince = job.data.heldSince ?? now;
+  if (refusal === 'rate' ? starts > MAX_RATE_LIMITED_STARTS : now - heldSince > MAX_HELD_MS) {
+    return undefined;
   }
 
+  // Back to PENDING first: should anything below fail, the retry still finds the email to send
   await prisma.email.updateMany({
     where: {id: emailId, status: EmailStatus.SENDING},
     data: {status: EmailStatus.PENDING},
   });
   if (refusal === 'rate') {
+    await job.updateData({...job.data, rateLimitedStarts: starts});
+  } else if (job.data.heldSince === undefined) {
+    await job.updateData({...job.data, heldSince});
+  }
+
+  if (refusal === 'rate') {
     await holdSending(SES_RATE_WAIT_MS);
   } else if (refusal === 'daily-quota') {
     await holdSending(SES_DAILY_QUOTA_WAIT_MS);
+    await noteQuotaHeld();
     await FailureAlertService.recordForAll({sourceKey: 'ses:daily-quota', label: 'Amazon SES', error: message});
   } else {
     await pauseSending(message);
@@ -405,8 +406,8 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
   // step that was running when the run was cancelled can create one after the cancel cleared the rest
   if (email.workflowExecution?.status === WorkflowExecutionStatus.CANCELLED) {
     signale.info(`[EMAIL-PROCESSOR] Workflow run of email ${emailId} was cancelled, skipping it`);
-    await prisma.email.update({
-      where: {id: emailId},
+    await prisma.email.updateMany({
+      where: {id: emailId, status: EmailStatus.PENDING},
       data: {
         status: EmailStatus.FAILED,
         error: email.workflowExecution.exitReason ?? 'Workflow run cancelled',
@@ -636,7 +637,7 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
       : 'other';
     // A paused account refuses every sender, in words this code may not know: many refusals at
     // once, from more than one sender domain, are taken for one
-    if (refusal === 'rejected' && (await manyRejections(email.from.split('@')[1] ?? email.from))) {
+    if (refusal === 'rejected' && (await manyRejections(email.from.split('@')[1] ?? email.from, message))) {
       refusal = 'account-paused';
     }
 
