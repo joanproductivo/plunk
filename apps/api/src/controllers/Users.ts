@@ -28,6 +28,7 @@ import {ProjectService} from '../services/ProjectService.js';
 import {ReputationPolicy} from '../services/ReputationPolicy.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {UserService} from '../services/UserService.js';
+import {WebhookSigningSecrets} from '../services/WebhookSigningSecrets.js';
 import {Keys} from '../services/keys.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import signale from 'signale';
@@ -822,10 +823,11 @@ export class Users {
         where: {projectId: id},
       });
 
-      // Delete all workflows
+      // Delete all workflows, and their webhook secrets (Plunk Lite), which have no relation to them
       await tx.workflow.deleteMany({
         where: {projectId: id},
       });
+      await WebhookSigningSecrets.forgetProject(tx, id);
 
       // Delete all segments
       await tx.segment.deleteMany({
@@ -906,10 +908,11 @@ export class Users {
       }
     }
 
-    // Delete the project (cascading deletes will handle related data). The counts of its deleted
-    // emails (Plunk Lite) have no relation to it, so they go explicitly.
+    // Delete the project (cascading deletes will handle related data). Its deleted-email counts and
+    // its webhook secrets (Plunk Lite) have no relation to it, so they go explicitly.
     await prisma.$transaction([
       prisma.plunkLiteDeletedEmailCount.deleteMany({where: {projectId: id}}),
+      WebhookSigningSecrets.forgetProject(prisma, id),
       prisma.project.delete({where: {id}}),
     ]);
     // Plunk Lite: its keys stop authenticating at once

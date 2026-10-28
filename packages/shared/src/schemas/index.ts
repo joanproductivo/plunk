@@ -338,6 +338,14 @@ export const WorkflowSchemas = {
     templateId: uuid.optional(),
     autoConnect: z.boolean().optional(),
   }),
+  /** Plunk Lite: a webhook step's signing secret -- 32 to 256 printable ASCII characters, no spaces */
+  signingSecret: z.object({
+    secret: z
+      .string()
+      .min(32)
+      .max(256)
+      .regex(/^[\x21-\x7E]+$/, 'Only printable ASCII characters, without spaces'),
+  }),
   updateStep: z.object({
     name: z.string().min(1).max(100).optional(),
     position: jsonSchema.optional(),

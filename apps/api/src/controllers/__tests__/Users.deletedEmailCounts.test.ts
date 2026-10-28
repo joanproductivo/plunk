@@ -1,7 +1,7 @@
 import type {Request, Response} from 'express';
 import {beforeEach, describe, expect, it} from 'vitest';
 
-import {EmailStatus} from '@plunk/db';
+import {EmailStatus, WorkflowStepType} from '@plunk/db';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 import {ContactService} from '../../services/ContactService';
@@ -97,5 +97,28 @@ describe('Projects and the counts of their deleted emails', () => {
     expect(await prisma.project.count({where: {id: projectId}})).toBe(0);
     expect(await prisma.plunkLiteDeletedEmailCount.count({where: {projectId}})).toBe(0);
     expect(await prisma.plunkLiteDeletedEmailCount.count({where: {projectId: other.project.id}})).toBe(1);
+  });
+
+  /** A signed webhook step of the project (Plunk Lite), whose secret has no relation to it */
+  async function signedWebhook(project: string) {
+    const workflow = await factories.createWorkflow({projectId: project});
+    const step = await factories.createWorkflowStep({workflowId: workflow.id, type: WorkflowStepType.WEBHOOK});
+    await prisma.plunkLiteWebhookSecret.create({
+      data: {stepId: step.id, workflowId: workflow.id, projectId: project, secret: 's'.repeat(32)},
+    });
+  }
+
+  it('a reset and deleting the project delete its webhook secrets, and no other project’s', async () => {
+    const other = await factories.createUserWithProject();
+    await signedWebhook(projectId);
+    await signedWebhook(other.project.id);
+
+    expect((await call('resetProject', userId, projectId)).error).toBeUndefined();
+    expect(await prisma.plunkLiteWebhookSecret.count({where: {projectId}})).toBe(0);
+
+    await signedWebhook(projectId);
+    expect((await call('deleteProject', userId, projectId)).error).toBeUndefined();
+    expect(await prisma.plunkLiteWebhookSecret.count({where: {projectId}})).toBe(0);
+    expect(await prisma.plunkLiteWebhookSecret.count({where: {projectId: other.project.id}})).toBe(1);
   });
 });

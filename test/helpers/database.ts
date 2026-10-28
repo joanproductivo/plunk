@@ -23,6 +23,7 @@ const TRUNCATE_TABLES = [
   'users',
   'plunk_lite_suppressions',
   'plunk_lite_deleted_email_counts',
+  'plunk_lite_webhook_secrets',
 ];
 
 /**
