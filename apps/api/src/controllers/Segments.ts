@@ -240,7 +240,9 @@ export class Segments {
       return res.status(400).json({error: 'Segment ID is required'});
     }
 
-    const result = await SegmentService.computeMembership(auth.projectId!, segmentId);
+    // Plunk Lite: the request writes the membership and queues its events, without running their
+    // workflows while the dashboard waits
+    const result = await SegmentService.computeMembership(auth.projectId!, segmentId, {events: 'background'});
 
     return res.status(200).json(result);
   }

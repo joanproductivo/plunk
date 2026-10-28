@@ -16,5 +16,12 @@ export const LONG_TRANSACTION = {timeout: 60_000, maxWait: 10_000};
  */
 export const SES_EVENT_TRANSACTION = {maxWait: 10_000, timeout: 10_000};
 
+/**
+ * A short transaction that must not fail on a pool spike: maxWait as long as a lone query may wait
+ * for a pooled connection (the pool_timeout a deployment sets on DATABASE_URL), where Prisma's 2 s
+ * default would fail it on every short spike
+ */
+export const POOL_WAIT_TRANSACTION = {maxWait: 20_000};
+
 /** A date as the UTC timestamps without time zone the tables hold, for a raw query */
 export const utcTimestamp = (date: Date) => Prisma.sql`(${date.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;

@@ -694,6 +694,16 @@ export const ActionSchemas = {
   }),
 } as const;
 
+/** Plunk Lite: POST /events/track, with the same limits on the event as /v1/track */
+export const EventSchemas = {
+  track: z.object({
+    name: ActionSchemas.track.shape.event,
+    contactId: uuid,
+    emailId: uuid.optional(),
+    data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+  }),
+};
+
 export const BillingLimitSchemas = {
   update: z.object({
     workflows: z.coerce.number().int().positive().nullable(),

@@ -20,6 +20,7 @@ import {DeletedEmailCounts} from './DeletedEmailCounts.js';
 import {EmailVerificationService} from './EmailVerificationService.js';
 import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
+import {QueueService} from './QueueService.js';
 import {SuppressionService} from './SuppressionService.js';
 
 /** Statuses of an email that reached the recipient's mailbox */
@@ -1265,11 +1266,16 @@ export class ContactService {
       data: {subscribed: true, snoozedUntil: null},
     });
 
-    EventService.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
-      if (process.env.NODE_ENV !== 'test') {
-        console.error('[ContactService] Failed to track bulk subscribe events:', error);
-      }
-    });
+    // Plunk Lite: by queue, with progress and retries, rather than a loop nobody waits for that a
+    // restart cut short and that ran beside the next batch of the same bulk action
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.subscribed',
+        contactIds: unsubscribedIds,
+      }),
+      'bulk contact.subscribed events',
+    );
 
     return {updated: result.count, unchanged, suppressed: suppressed.length};
   }
@@ -1315,11 +1321,15 @@ export class ContactService {
       return {updated: 0, unchanged};
     }
 
-    EventService.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
-      if (process.env.NODE_ENV !== 'test') {
-        console.error('[ContactService] Failed to track bulk unsubscribe events:', error);
-      }
-    });
+    // Plunk Lite: by queue, as for bulkSubscribe
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.unsubscribed',
+        contactIds: subscribedIds,
+      }),
+      'bulk contact.unsubscribed events',
+    );
 
     return {updated: subscribedIds.length, unchanged};
   }

@@ -1,7 +1,6 @@
 import type {Segment} from '@plunk/db';
 import {segmentEventName} from '@plunk/shared';
 import type {BulkSegmentOperation, SegmentEventKind} from '@plunk/types';
-import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
@@ -9,11 +8,8 @@ import {HttpException} from '../exceptions/index.js';
 import {EventService} from './EventService.js';
 import {QueueService} from './QueueService.js';
 
-/** How long a background change waits for the events queue before carrying on without it */
-const QUEUE_WAIT_MS = 3000;
-
 /**
- * How a static segment membership change behaves:
+ * How a segment membership change behaves (static, or Plunk Lite: a dynamic segment's recomputation):
  * - `await`: entry/exit events, and the workflows they start, run before returning
  * - `background`: events go to the segment-membership-events queue, so callers (HTTP requests,
  *   bulk jobs) are not held up by workflows and the events survive a restart
@@ -33,8 +29,9 @@ export const BULK_SEGMENT_ACTION: Record<BulkSegmentOperation, MembershipAction>
 };
 
 /**
- * Writes static segment memberships by contact ID and fires the segment's entry/exit events when
- * it tracks membership. Contacts outside the project are ignored.
+ * Writes static segment memberships by contact ID, and (Plunk Lite) the changes a dynamic segment's
+ * recomputation found, and fires the segment's entry/exit events when it tracks membership.
+ * Contacts outside the project are ignored.
  *
  * Counts and events follow the rows each write actually changed, so concurrent calls do not
  * double-count. Not transactional: rows that were written stay correct if a later step fails, and
@@ -158,6 +155,61 @@ export class SegmentMembershipService {
   }
 
   /**
+   * Plunk Lite: write the membership changes computeMembership found for a dynamic segment, and
+   * fire their events. Each write claims its rows (an insert that skips existing ones, updates
+   * guarded on `exitedAt`), so two computations at once -- the job and a request -- enter or leave
+   * each contact once, without a lock or a transaction holding a connection.
+   */
+  public static async applyComputedMembership(
+    projectId: string,
+    segment: Segment,
+    toAdd: string[],
+    toRemove: string[],
+    {mode}: {mode: Exclude<MembershipMode, 'silent'>},
+  ): Promise<{added: number; removed: number}> {
+    const BATCH_SIZE = 500;
+    let added = 0;
+    let removed = 0;
+
+    for (let i = 0; i < toAdd.length; i += BATCH_SIZE) {
+      const batch = toAdd.slice(i, i + BATCH_SIZE);
+      const now = new Date();
+      const created = await prisma.segmentMembership.createManyAndReturn({
+        data: batch.map(contactId => ({segmentId: segment.id, contactId, enteredAt: now})),
+        skipDuplicates: true,
+        select: {contactId: true},
+      });
+      const returning = await prisma.segmentMembership.updateManyAndReturn({
+        where: {segmentId: segment.id, contactId: {in: batch}, exitedAt: {not: null}},
+        data: {exitedAt: null, enteredAt: now},
+        select: {contactId: true},
+      });
+      const entered = [...created, ...returning].map(m => m.contactId);
+      added += entered.length;
+      await this.trackMembershipEvents(projectId, segment, entered, 'entry', mode);
+    }
+
+    for (let i = 0; i < toRemove.length; i += BATCH_SIZE) {
+      const batch = toRemove.slice(i, i + BATCH_SIZE);
+      const left = await prisma.segmentMembership.updateManyAndReturn({
+        where: {segmentId: segment.id, contactId: {in: batch}, exitedAt: null},
+        data: {exitedAt: new Date()},
+        select: {contactId: true},
+      });
+      removed += left.length;
+      await this.trackMembershipEvents(
+        projectId,
+        segment,
+        left.map(m => m.contactId),
+        'exit',
+        mode,
+      );
+    }
+
+    return {added, removed};
+  }
+
+  /**
    * The given contact IDs that belong to the project, deduplicated, in their original order
    */
   private static async projectContactIds(projectId: string, contactIds: string[]): Promise<string[]> {
@@ -195,33 +247,16 @@ export class SegmentMembershipService {
     }
 
     // The membership is already written, so a queue that cannot take the job must not fail the
-    // caller: a retried request would write the change again and, re-entering, queue it again.
-    // With Redis down `add` waits instead of failing; it still completes once Redis is back.
-    const settled = QueueService.queueSegmentMembershipEvents({
-      projectId,
-      segmentId: segment.id,
-      segmentName: segment.name,
-      kind,
-      contactIds,
-    }).then(
-      () => true,
-      error => {
-        signale.error(`[SEGMENT] Failed to queue ${kind} events for segment ${segment.id}:`, error);
-        return true;
-      },
-    );
-
-    let timer: NodeJS.Timeout | undefined;
-    const done = await Promise.race([
-      settled,
-      new Promise<false>(resolve => {
-        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+    // caller: a retried request would write the change again and, re-entering, queue it again
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueSegmentMembershipEvents({
+        projectId,
+        segmentId: segment.id,
+        segmentName: segment.name,
+        kind,
+        contactIds,
       }),
-    ]);
-    clearTimeout(timer);
-
-    if (!done) {
-      signale.warn(`[SEGMENT] Queueing ${kind} events for segment ${segment.id} is taking long; not waiting for it`);
-    }
+      `${kind} events for segment ${segment.id}`,
+    );
   }
 }

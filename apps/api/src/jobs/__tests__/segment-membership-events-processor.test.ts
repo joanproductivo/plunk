@@ -1,10 +1,33 @@
-import type {SegmentEventKind, SegmentMembershipEventsJobData} from '@plunk/types';
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {Prisma} from '@plunk/db';
+import type {ContactSubscriptionEventsJobData, SegmentEventKind, SegmentMembershipEventsJobData} from '@plunk/types';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createMockJob, factories, getPrismaClient} from '../../../../../test/helpers';
+import {EventService} from '../../services/EventService.js';
 import {processSegmentMembershipEvents} from '../segment-membership-events-processor.js';
+
+/** What Prisma throws while the database cannot be reached */
+const databaseDown = () =>
+  new Prisma.PrismaClientKnownRequestError("Can't reach database server", {code: 'P1001', clientVersion: 'test'});
+
+/** The second event tracked fails with the database out */
+function failSecondEvent() {
+  const trackEvent = EventService.trackEvent.bind(EventService);
+  let calls = 0;
+  vi.spyOn(EventService, 'trackEvent').mockImplementation(async (...args) => {
+    calls++;
+    if (calls === 2) {
+      throw databaseDown();
+    }
+    return trackEvent(...args);
+  });
+}
 
 describe('processSegmentMembershipEvents', () => {
   const prisma = getPrismaClient();
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
   let projectId: string;
   let segmentId: string;
 
@@ -88,5 +111,57 @@ describe('processSegmentMembershipEvents', () => {
 
     expect(await events('segment.workshop.entry')).toEqual([contact.id]);
     expect(job.updateProgress).toHaveBeenLastCalledWith(2);
+  });
+
+  it('fails at the contact it reached when the database is out, so a retry carries on from it (Plunk Lite)', async () => {
+    const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+    const job = jobFor(ids);
+    failSecondEvent();
+
+    await expect(processSegmentMembershipEvents(job)).rejects.toThrow("Can't reach database server");
+
+    expect(await events('segment.workshop.entry')).toEqual([ids[0]]);
+    expect(job.updateProgress).toHaveBeenCalledTimes(1);
+    expect(job.updateProgress).toHaveBeenLastCalledWith(1);
+  });
+
+  describe('the events of a bulk subscription change (Plunk Lite)', () => {
+    function subscriptionJob(contactIds: string[], progress = 0) {
+      const job = createMockJob<ContactSubscriptionEventsJobData>({
+        type: 'contact-subscription',
+        projectId,
+        eventName: 'contact.subscribed',
+        contactIds,
+      });
+      return Object.assign(job, {progress});
+    }
+
+    it('tracks the event for each contact, with progress', async () => {
+      const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+      const job = subscriptionJob(ids);
+
+      await processSegmentMembershipEvents(job);
+
+      expect(await events('contact.subscribed')).toEqual([...ids].sort());
+      expect(job.updateProgress).toHaveBeenLastCalledWith(3);
+    });
+
+    it('fails at the contact it reached when the database is out', async () => {
+      const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+      const job = subscriptionJob(ids);
+      failSecondEvent();
+
+      await expect(processSegmentMembershipEvents(job)).rejects.toThrow("Can't reach database server");
+
+      expect(job.updateProgress).toHaveBeenLastCalledWith(1);
+    });
+
+    it('resumes after the contacts a previous run already handled', async () => {
+      const ids = (await factories.createContacts(projectId, 3)).map(c => c.id);
+
+      await processSegmentMembershipEvents(subscriptionJob(ids, 2));
+
+      expect(await events('contact.subscribed')).toEqual([ids[2]]);
+    });
   });
 });

@@ -308,7 +308,7 @@ Each workflow consists of a **workflow** record, a graph of **steps**, **transit
 
 | Method | Path                          | Description                                                                                  |
 | ------ | ----------------------------- | -------------------------------------------------------------------------------------------- |
-| POST   | `/events/track`               | Internal alias for `/v1/track`, for dashboard use. Use `/v1/track` from your apps.           |
+| POST   | `/events/track`               | Track an event for an existing contact (`name`, `contactId`); limits of `/v1/track`.         |
 | GET    | `/events`                     | List recent tracked events for a project.                                                    |
 | GET    | `/events/stats`               | Aggregated event statistics.                                                                 |
 | GET    | `/events/contact/:contactId`  | All events for a single contact.                                                             |

@@ -63,19 +63,7 @@ export class Actions {
     const {event, email, subscribed, data} = ActionSchemas.track.parse(req.body);
 
     // Prevent manual tracking of reserved system events
-    if (EventService.isReservedEvent(event)) {
-      throw new ValidationError(
-        [
-          {
-            field: 'event',
-            message: `Event name "${event}" is reserved for system use and cannot be manually tracked`,
-            code: 'reserved_event',
-            received: event,
-          },
-        ],
-        'Cannot track reserved system event',
-      );
-    }
+    EventService.assertTrackable(event, 'event');
 
     // Create or update contact with persistent data only
     // ContactService.upsert will filter out non-persistent fields

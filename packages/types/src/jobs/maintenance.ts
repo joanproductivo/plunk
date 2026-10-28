@@ -96,7 +96,21 @@ export interface RedisMemoryJobData {
 }
 
 /**
+ * Job data for the sweep of workflow runs nothing would move on any more: left RUNNING by a
+ * restart, or WAITING past the end of their wait (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `workflow-recovery`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface WorkflowRecoveryJobData {
+  // Empty - looks at the RUNNING and WAITING runs of every project
+}
+
+/**
  * Job data of Plunk Lite's own checks
  * Used by: plunkLiteChecksQueue worker
  */
-export type PlunkLiteChecksJobData = SecurityCheckJobData | SnsHealthJobData | RedisMemoryJobData;
+export type PlunkLiteChecksJobData =
+  | SecurityCheckJobData
+  | SnsHealthJobData
+  | RedisMemoryJobData
+  | WorkflowRecoveryJobData;

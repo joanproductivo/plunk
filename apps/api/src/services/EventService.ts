@@ -6,6 +6,7 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {ValidationError} from '../exceptions/index.js';
 import {Keys} from './keys.js';
 
 import {WorkflowEntryService} from './WorkflowEntryService.js';
@@ -38,11 +39,13 @@ export class EventService {
       },
     });
 
+    // Resume workflows waiting for this event. Plunk Lite: before starting new ones, so a run this
+    // event starts does not have its own wait for the same event met by it ("order -> wait for the
+    // next order")
+    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
+
     // Trigger workflows that are listening for this event
     await this.triggerWorkflows(projectId, eventName, contactId, data);
-
-    // Resume workflows waiting for this event
-    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
 
     return event;
   }
@@ -51,18 +54,23 @@ export class EventService {
    * Track the same event for several contacts, one at a time to avoid database deadlocks.
    * A failure is logged and the remaining contacts are still processed. `onTracked` runs after
    * each contact, failed or not, with how many are done; if it throws, the loop stops.
+   * (Plunk Lite) A failure `rethrow` picks -- the database out, say -- stops the loop instead,
+   * before that contact counts as done, so a job can retry from it.
    */
   public static async trackEventsSequentially(
     projectId: string,
     eventName: string,
     contactIds: string[],
     data?: Record<string, unknown>,
-    {onTracked}: {onTracked?: (done: number) => Promise<void>} = {},
+    {onTracked, rethrow}: {onTracked?: (done: number) => Promise<void>; rethrow?: (error: unknown) => boolean} = {},
   ): Promise<void> {
     for (const [index, contactId] of contactIds.entries()) {
       try {
         await this.trackEvent(projectId, eventName, contactId, undefined, data);
       } catch (error) {
+        if (rethrow?.(error)) {
+          throw error;
+        }
         // Suppress logging in test environments to reduce noise from cleanup race conditions
         if (process.env.NODE_ENV !== 'test') {
           signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
@@ -368,6 +376,26 @@ export class EventService {
     }
 
     return false;
+  }
+
+  /**
+   * Plunk Lite: refuse an event a caller may not track by hand, as the API's validation errors do
+   * @param field - The request field that holds the name (`event` on /v1/track, `name` on /events/track)
+   */
+  public static assertTrackable(eventName: string, field: string): void {
+    if (EventService.isReservedEvent(eventName)) {
+      throw new ValidationError(
+        [
+          {
+            field,
+            message: `Event name "${eventName}" is reserved for system use and cannot be manually tracked`,
+            code: 'reserved_event',
+            received: eventName,
+          },
+        ],
+        'Cannot track reserved system event',
+      );
+    }
   }
 
   /**

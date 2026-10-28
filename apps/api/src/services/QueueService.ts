@@ -12,12 +12,14 @@ import type {
   CardVerificationJobData,
   CardVerificationSweepJobData,
   ContactImportJobData,
+  ContactSubscriptionEventsJobData,
   DomainVerificationJobData,
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
   EmailRecoverySweepJobData,
   EventTrackingJobData,
   IdempotencyKeyCleanupJobData,
+  MembershipEventsJobData,
   MeterEventJobData,
   PlunkLiteChecksJobData,
   ScheduledCampaignJobData,
@@ -31,7 +33,11 @@ import type {
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
+import {errorMessage} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
+
+/** How long a change that is already written waits for a queue before carrying on without it */
+const QUEUE_WAIT_MS = 3000;
 
 /**
  * Queue Configuration
@@ -79,10 +85,22 @@ export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   },
 });
 
+/** Whether a job is still to run, or running: not finished, nor in no list */
+async function isStillToRun(job: Job): Promise<boolean> {
+  const state = await job.getState();
+  return state !== 'completed' && state !== 'failed' && state !== 'unknown';
+}
+
+/** The ID of the job that ends a delay, or a wait's timeout: one per step execution */
+const workflowJobId = (type: 'delay-end' | 'timeout', stepExecutionId: string) => `workflow-${type}-${stepExecutionId}`;
+
+// Plunk Lite: 8 attempts over about 4 minutes, like emails, so a delay's end or a wait's timeout
+// that comes due while the database restarts is not lost. Both claim the run before moving it, so a
+// retry never moves it twice.
 export const workflowQueue = new Queue<WorkflowStepJobData>('workflow', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 2000,
@@ -307,13 +325,17 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
 });
 
 /**
- * Static segment entry/exit events fired outside the request that changed the membership.
+ * Segment entry/exit events fired outside the request that changed the membership (static, or
+ * Plunk Lite: a dynamic segment recomputed from the dashboard), and (Plunk Lite) the subscription
+ * events of bulk subscription changes.
  * Retries are safe: the worker records how far it got and resumes from there.
  */
-export const segmentMembershipEventsQueue = new Queue<SegmentMembershipEventsJobData>('segment-membership-events', {
+export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('segment-membership-events', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Plunk Lite: 10 attempts over about 40 minutes, so a job stopped by the database being out
+    // (it fails then, and resumes from its progress) outlasts a restart or an outage
+    attempts: 10,
     backoff: {
       type: 'exponential',
       delay: 5000,
@@ -341,7 +363,9 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
 
 /**
  * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
- * for a burst of them, and whether SES events reach the webhook. Each job says how it is retried.
+ * for a burst of them, whether SES events reach the webhook, Redis memory, and the workflow runs
+ * nothing would move on any more (left RUNNING by a restart, or WAITING past the end of their
+ * wait). Each job says how it is retried.
  */
 export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
   connection: redisConnection,
@@ -407,26 +431,8 @@ export class QueueService {
   }
 
   /**
-   * Add workflow step to queue for execution
-   */
-  public static async queueWorkflowStep(
-    executionId: string,
-    stepId: string,
-    delay?: number,
-  ): Promise<Job<WorkflowStepJobData>> {
-    return workflowQueue.add(
-      'process-step',
-      {executionId, stepId, type: 'process-step'},
-      {
-        delay,
-        jobId: `workflow-${executionId}-${stepId}`,
-      },
-    );
-  }
-
-  /**
-   * Queue the end of a DELAY step that has no step after it, so the execution completes
-   * when the delay runs out instead of staying WAITING forever
+   * Queue the end of a DELAY step: when the delay runs out, the execution moves on to the step
+   * connected after it then, or completes if there is none
    */
   public static async queueWorkflowDelayEnd(
     executionId: string,
@@ -439,7 +445,7 @@ export class QueueService {
       {executionId, stepId, stepExecutionId, type: 'delay-end'},
       {
         delay: delayMs,
-        jobId: `workflow-delay-end-${stepExecutionId}`,
+        jobId: workflowJobId('delay-end', stepExecutionId),
       },
     );
   }
@@ -458,16 +464,47 @@ export class QueueService {
       {executionId, stepId, stepExecutionId, type: 'timeout'},
       {
         delay: timeoutMs,
-        jobId: `workflow-timeout-${stepExecutionId}`,
+        jobId: workflowJobId('timeout', stepExecutionId),
       },
     );
+  }
+
+  /**
+   * Plunk Lite: make sure the job that ends a delay or a wait's timeout is queued, to run now: for a
+   * run the recovery sweep finds still waiting well after it was due. A job that is still to run is
+   * left as it is; one that finished or failed is replaced. Safe to repeat: the job claims the run
+   * before moving it. Returns whether a job was queued.
+   */
+  public static async ensureWorkflowWaitEnd(
+    type: 'delay-end' | 'timeout',
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const jobId = workflowJobId(type, stepExecutionId);
+    if (await this.clearFinishedJob(workflowQueue, jobId)) {
+      return false;
+    }
+    await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
+    return true;
+  }
+
+  /**
+   * Plunk Lite: whether the job that ends a delay or a wait's timeout is still to run (or running)
+   */
+  public static async isWorkflowWaitEndPending(
+    type: 'delay-end' | 'timeout',
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const job = await workflowQueue.getJob(workflowJobId(type, stepExecutionId));
+    return job ? isStillToRun(job) : false;
   }
 
   /**
    * Cancel a queued timeout job
    */
   public static async cancelWorkflowTimeout(stepExecutionId: string): Promise<void> {
-    const jobId = `workflow-timeout-${stepExecutionId}`;
+    const jobId = workflowJobId('timeout', stepExecutionId);
     const job = await workflowQueue.getJob(jobId);
 
     if (job) {
@@ -540,13 +577,7 @@ export class QueueService {
     cancelledAt: Date,
   ): Promise<void> {
     const jobId = `campaign-cancel-cleanup-${campaignId}`;
-    const previous = await campaignCancelCleanupQueue.getJob(jobId);
-    const state = await previous?.getState();
-    if (previous && (state === 'completed' || state === 'failed')) {
-      // A concurrent cancel can have replaced it with a job that is now running, and
-      // removing that one fails as locked: the running job does the cleanup
-      await previous.remove().catch(() => undefined);
-    }
+    await this.clearFinishedJob(campaignCancelCleanupQueue, jobId);
 
     await campaignCancelCleanupQueue.add(
       'cleanup',
@@ -694,15 +725,82 @@ export class QueueService {
   }
 
   /**
-   * Queue the entry/exit events of a static segment membership change. The job ID is set here so
+   * Queue the entry/exit events of a segment membership change. The job ID is set here so
    * a command the Redis client resends after a dropped connection cannot add the job twice.
    */
   public static async queueSegmentMembershipEvents(
     data: SegmentMembershipEventsJobData,
-  ): Promise<Job<SegmentMembershipEventsJobData>> {
-    return segmentMembershipEventsQueue.add('track-segment-membership-events', data, {
-      jobId: `segment-events-${crypto.randomUUID()}`,
-    });
+  ): Promise<Job<MembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add(
+      'track-segment-membership-events',
+      {...data, type: 'segment-membership'},
+      {
+        jobId: `segment-events-${crypto.randomUUID()}`,
+      },
+    );
+  }
+
+  /**
+   * Plunk Lite: queue the contact.subscribed / contact.unsubscribed events of a bulk subscription
+   * change, in the same ordered queue, so they run with progress and retries instead of in a loop
+   * nobody waits for
+   */
+  public static async queueContactSubscriptionEvents(
+    data: Omit<ContactSubscriptionEventsJobData, 'type'>,
+  ): Promise<Job<MembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add(
+      'track-contact-subscription-events',
+      {type: 'contact-subscription', ...data},
+      {jobId: `contact-events-${crypto.randomUUID()}`},
+    );
+  }
+
+  /**
+   * Remove the job with this ID if it has finished (or sits in no list), so adding one with the same
+   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns true if a job that is
+   * still to run, or running, holds the ID. A concurrent caller can have replaced it with a job that
+   * is now running, and removing that one fails as locked: the running job does the work.
+   */
+  private static async clearFinishedJob(queue: Queue, jobId: string): Promise<boolean> {
+    const previous = await queue.getJob(jobId);
+    if (!previous) {
+      return false;
+    }
+    if (await isStillToRun(previous)) {
+      return true;
+    }
+    await previous.remove().catch(() => undefined);
+    return false;
+  }
+
+  /**
+   * Queue the job of a change that is already written, without letting the queue fail the caller
+   * or hold it up: a retried request would write the change again. With Redis down `add` waits
+   * instead of failing; it still completes once Redis is back, but the caller carries on after
+   * QUEUE_WAIT_MS. A job the queue refuses is logged and lost.
+   */
+  public static async queueWithoutWaiting(add: Promise<unknown>, what: string): Promise<void> {
+    const settled = add.then(
+      () => true,
+      error => {
+        // Only the message: ioredis attaches the command and its arguments (contact IDs) to errors
+        signale.error(`[QUEUE] Failed to queue ${what}: ${errorMessage(error)}`);
+        return true;
+      },
+    );
+
+    let timer: NodeJS.Timeout | undefined;
+    const done = await Promise.race([
+      settled,
+      new Promise<false>(resolve => {
+        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    if (!done) {
+      signale.warn(`[QUEUE] Queueing ${what} is taking long; not waiting for it`);
+    }
   }
 
   /**
