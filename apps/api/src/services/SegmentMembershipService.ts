@@ -122,30 +122,36 @@ export class SegmentMembershipService {
   /**
    * Plunk Lite: add contacts of the project (as the request just wrote them) to segments already
    * resolved, each as an entry, a current member included (D1). Returns who entered each one; the
-   * caller fires the entry events with `fireEntryEvents` when it suits its order. A segment (or a
-   * contact) deleted since it was resolved is skipped. If a write fails, the entries already
-   * written get their events before the error is passed on.
+   * caller fires the entry events with `fireEntryEvents` when it suits its order. A contact deleted
+   * since fails the whole write, which is tried once more without it; a segment deleted since is
+   * skipped. If a write fails otherwise, the entries already written get their events before the
+   * error is passed on.
    */
   public static async enterSegments(
     projectId: string,
     segments: Segment[],
     contactIds: string[],
   ): Promise<{segment: Segment; entered: string[]}[]> {
-    const ids = [...new Set(contactIds)];
-    const entries = [];
+    let ids = [...new Set(contactIds)];
+    const entries: {segment: Segment; entered: string[]}[] = [];
+    const gone = (error: unknown) =>
+      error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2003' || error.code === 'P2025');
     for (const segment of segments) {
-      try {
-        entries.push({segment, entered: await this.enter(segment, ids, {reenter: true})});
-      } catch (error) {
-        const gone =
-          error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2003' || error.code === 'P2025');
-        if (!gone) {
-          await this.fireEntryEvents(projectId, entries);
-          throw error;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          entries.push({segment, entered: await this.enter(segment, ids, {reenter: true})});
+          break;
+        } catch (error) {
+          if (!gone(error)) {
+            await this.fireEntryEvents(projectId, entries);
+            throw error;
+          }
+          if (attempt === 2) {
+            signale.warn(`[SEGMENTS] Segment ${segment.id} was deleted before the contacts were added; skipping it`);
+            break;
+          }
+          ids = await this.projectContactIds(projectId, ids);
         }
-        signale.warn(
-          `[SEGMENTS] Segment ${segment.id}, or a contact being added, was deleted before the contacts were added; skipping it`,
-        );
       }
     }
     return entries;

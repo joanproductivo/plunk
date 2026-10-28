@@ -151,7 +151,10 @@ function figureTone(figure: SupportingFigure, s: CampaignStats): string {
   return 'text-neutral-900';
 }
 
-/** Plunk Lite: a TRANSACTIONAL campaign reaches unsubscribed contacts too; its send dialogs say how many */
+/**
+ * Plunk Lite: a TRANSACTIONAL campaign reaches unsubscribed contacts too; its send dialogs say how many.
+ * Shown by the type saved, which is the one a send goes out with, even while another is being edited.
+ */
 function UnsubscribedNotice({campaignId}: {campaignId: string}) {
   const {data} = useSWR<{data: {unsubscribed: number}}>(`/campaigns/${campaignId}/audience`);
   const unsubscribed = data?.data.unsubscribed ?? 0;
@@ -997,7 +1000,7 @@ export default function CampaignDetailsPage() {
               </DialogHeader>
 
               <div className="space-y-5 py-2">
-                {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL && id && (
+                {c.type === TemplateType.TRANSACTIONAL && id && (
                   <UnsubscribedNotice campaignId={id as string} />
                 )}
 
@@ -1143,7 +1146,7 @@ export default function CampaignDetailsPage() {
                 </div>
               </div>
 
-              {(editedCampaign.type ?? c.type) === TemplateType.TRANSACTIONAL && id && (
+              {c.type === TemplateType.TRANSACTIONAL && id && (
                 <UnsubscribedNotice campaignId={id as string} />
               )}
 

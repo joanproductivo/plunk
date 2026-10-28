@@ -232,6 +232,26 @@ describe('segments on /v1/track and /v1/send', () => {
       expect(await members(first)).toEqual([{contactId: kept.id}]);
     });
 
+    it('still adds the other recipients when one of their contacts is deleted before they enter', async () => {
+      const enterSegments = SegmentMembershipService.enterSegments.bind(SegmentMembershipService);
+      vi.spyOn(SegmentMembershipService, 'enterSegments').mockImplementationOnce(async (projectId, segments, ids) => {
+        await prisma.contact.delete({where: {id: ids[0]!}});
+        return enterSegments(projectId, segments, ids);
+      });
+
+      const outcome = await send({
+        to: ['a@example.com', 'b@example.com'],
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hello@example.com',
+        segments: [first],
+      });
+
+      expect(outcome.status).toBe(200);
+      expect(await members(first)).toHaveLength(1);
+      expect(outcome.body!.data).not.toHaveProperty('segmentsError');
+    });
+
     it('refuses an invalid segment with 422 before sending anything', async () => {
       const outcome = await send({
         to: 'a@example.com',

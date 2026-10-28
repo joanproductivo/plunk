@@ -50,9 +50,9 @@ describe('CampaignService.send and the SES daily quota', () => {
   });
 
   it('counts what the campaigns still sending, in any project, have left to send', async () => {
-    vi.mocked(getDailyQuotaQuick).mockResolvedValue({max24HourSend: 100, sentLast24Hours: 50});
     const other = (await factories.createUserWithProject()).project.id;
-    await prisma.campaign.create({
+    // As a send leaves it: sentCount is only written as it finalizes, the progress is in Redis
+    const sending = await prisma.campaign.create({
       data: {
         projectId: other,
         name: 'Still sending',
@@ -61,15 +61,20 @@ describe('CampaignService.send and the SES daily quota', () => {
         from: 'hi@example.com',
         status: CampaignStatus.SENDING,
         totalRecipients: 60,
-        sentCount: 30,
+        sentCount: 0,
       },
     });
+    for (let i = 0; i < 30; i++) {
+      await CampaignService.countCampaignSent(sending.id);
+    }
+    // SES counts the 30 already sent
+    vi.mocked(getDailyQuotaQuick).mockResolvedValue({max24HourSend: 100, sentLast24Hours: 50});
 
     // 50 sent + 30 on their way + 10 for this one = 90, within 95
     expect((await CampaignService.send(projectId, (await draft()).id)).status).toBe(CampaignStatus.SENDING);
     // ...and the next one 50 + (30 + 10) + 10 = 100, past 95
     await expect(CampaignService.send(projectId, (await draft()).id)).rejects.toThrow(
-      /40 more are on their way in campaigns still sending/,
+      /40 more are on their way in 2 campaigns still sending/,
     );
   });
 

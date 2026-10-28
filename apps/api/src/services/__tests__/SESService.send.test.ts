@@ -210,6 +210,33 @@ describe('sendRawEmail against an SES endpoint', () => {
     // The test setup's endpoint, where nothing listens
     expect(await (await sesServiceAt('http://127.0.0.1:1')).getDailyQuotaQuick()).toBeNull();
   });
+
+  it('asks whether the account may send, and gives null without an answer', async () => {
+    const enabled = (value: string) => (res: http.ServerResponse) => {
+      res.writeHead(200, {'Content-Type': 'text/xml'});
+      res.end(
+        '<GetAccountSendingEnabledResponse xmlns="http://ses.amazonaws.com/doc/2010-12-01/"><GetAccountSendingEnabledResult>' +
+          value +
+          '</GetAccountSendingEnabledResult><ResponseMetadata><RequestId>r-e</RequestId></ResponseMetadata></GetAccountSendingEnabledResponse>',
+      );
+    };
+    const service = await sesServiceAt(local());
+
+    respond = enabled('<Enabled>false</Enabled>');
+    expect(await service.getAccountSendingEnabledQuick()).toBe(false);
+    respond = enabled('<Enabled>true</Enabled>');
+    expect(await service.getAccountSendingEnabledQuick()).toBe(true);
+
+    // The IAM policy without ses:GetAccountSendingEnabled
+    respond = res => {
+      res.writeHead(403, {'Content-Type': 'text/xml'});
+      res.end(
+        '<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code>' +
+          '<Message>not authorized to perform: ses:GetAccountSendingEnabled</Message></Error><RequestId>r-d</RequestId></ErrorResponse>',
+      );
+    };
+    expect(await service.getAccountSendingEnabledQuick()).toBeNull();
+  });
 });
 
 describe('safeToRetrySend', () => {

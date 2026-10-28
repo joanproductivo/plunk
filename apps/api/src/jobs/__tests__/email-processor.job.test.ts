@@ -8,7 +8,7 @@ import {CampaignService} from '../../services/CampaignService';
 import {EventService} from '../../services/EventService';
 import {SecurityService} from '../../services/SecurityService';
 import {SuppressionService} from '../../services/SuppressionService';
-import {holdSending, manyRejections, noteQuotaHeld, pauseSending} from '../../services/SesSendGate.js';
+import {holdSending, noteQuotaHeld, pauseSending, refusalMeansPause} from '../../services/SesSendGate.js';
 import {sendRawEmail} from '../../services/SESService';
 import {type EmailJob, failAbandonedEmail, processEmailJob} from '../email-processor';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -22,7 +22,7 @@ vi.mock('../../services/SESService', async importOriginal => ({
 vi.mock('../../services/SesSendGate.js', () => ({
   holdSending: vi.fn(async () => undefined),
   pauseSending: vi.fn(async () => undefined),
-  manyRejections: vi.fn(async () => false),
+  refusalMeansPause: vi.fn(async () => false),
   noteQuotaHeld: vi.fn(async () => undefined),
   noteSent: vi.fn(async () => undefined),
   SES_RATE_WAIT_MS: 1000,
@@ -196,14 +196,14 @@ describe('processEmailJob', () => {
       expect(await failures('ses:paused')).toBe(1);
     });
 
-    it('takes many refusals at once, from several sender domains, for a paused account', async () => {
+    it('takes a refusal for a paused account when the gate says the account is paused', async () => {
       const email = await pendingEmail();
       vi.mocked(sendRawEmail).mockRejectedValue(refusal('MessageRejected', 'Some wording this code does not know'));
-      vi.mocked(manyRejections).mockResolvedValueOnce(true);
+      vi.mocked(refusalMeansPause).mockResolvedValueOnce(true);
 
       await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
 
-      expect(manyRejections).toHaveBeenCalledWith(expect.any(String), 'Some wording this code does not know');
+      expect(refusalMeansPause).toHaveBeenCalledWith(expect.any(String), 'Some wording this code does not know');
       expect(pauseSending).toHaveBeenCalled();
     });
 

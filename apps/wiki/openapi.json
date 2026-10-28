@@ -920,6 +920,10 @@
                         "timestamp": {
                           "type": "string",
                           "format": "date-time"
+                        },
+                        "segmentsError": {
+                          "type": "string",
+                          "description": "Plunk Lite, only with `segments`: the emails were queued, but adding their contacts to some of the segments failed. Do not retry the send; add the contacts to the segments another way."
                         }
                       }
                     }
@@ -944,7 +948,7 @@
             }
           },
           "207": {
-            "description": "Sent to some recipients; `data.failed` lists the others",
+            "description": "Sent to some recipients; `data.failed` lists the others. As with `200`, `data.segmentsError` says when adding the recipients sent to to `segments` failed.",
             "content": {
               "application/json": {
                 "example": {
@@ -2241,7 +2245,7 @@
             }
           },
           "400": {
-            "description": "Unparseable `scheduledFor`, the campaign is not in a sendable state, or (Plunk Lite) the send would not fit in what is left of the SES 24-hour quota, keeping 5 % of it for transactional and workflow emails. The message gives the figures.",
+            "description": "Unparseable `scheduledFor`, the campaign is not in a sendable state, or (Plunk Lite) an immediate send would not fit in what is left of the SES 24-hour quota, keeping 5 % of it for transactional and workflow emails, counting what the campaigns still sending have left. The message gives the figures. A scheduled send is checked when its time comes: if it does not fit then, it stays scheduled and an alert says so.",
             "content": {
               "application/json": {
                 "schema": {
