@@ -122,7 +122,7 @@ A recipient can pause emails for 2 weeks, 1 month, 6 months, or a year instead o
 
 A background job resubscribes them when the window ends and fires `contact.subscribed` with `reason: "snooze_expired"`. The snooze itself fires `contact.unsubscribed` with `reason: "snooze"`.
 
-Any other change to `subscribed` cancels a running snooze, including a bounce or complaint — a suppressed address is never resurrected by a snooze that was in flight.
+Any other change to `subscribed` cancels a running snooze, including a bounce or complaint — a suppressed address is never resurrected by a snooze that was in flight. A bounce or complaint of a snoozed contact also fires `contact.unsubscribed`, with its `reason`.
 
 See [Unsubscribe & preferences pages](/guides/unsubscribe-pages#snoozing) for the full behaviour.
 
