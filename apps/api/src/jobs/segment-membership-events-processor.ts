@@ -20,9 +20,9 @@ import {isInfrastructureError} from '../utils/infrastructureErrors.js';
  *
  * Progress is the number of contacts done, so a run cut short (a restart, a Redis error) picks
  * up from there. (Plunk Lite) With the database or Redis out, the job fails at the contact it
- * reached, instead of skipping every one left, and is retried from it. The contact in flight when it stopped gets its event again; its workflow
- * execution may be left mid-way, and only re-runs if the workflow allows re-entry and that
- * execution had already finished or was waiting.
+ * reached, instead of skipping every one left, and is retried from it. The contact in flight when
+ * it stopped gets its event again; its workflow execution may be left mid-way, and only re-runs
+ * if the workflow allows re-entry and that execution had already finished or was waiting.
  *
  * The events keep the name the segment had when the change was made. A segment deleted, or no
  * longer tracking membership, by the time the job runs fires nothing.

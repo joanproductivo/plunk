@@ -85,6 +85,12 @@ export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   },
 });
 
+/** Whether a job is still to run, or running: not finished, nor in no list */
+async function isStillToRun(job: Job): Promise<boolean> {
+  const state = await job.getState();
+  return state !== 'completed' && state !== 'failed' && state !== 'unknown';
+}
+
 /** The ID of the job that ends a delay, or a wait's timeout: one per step execution */
 const workflowJobId = (type: 'delay-end' | 'timeout', stepExecutionId: string) => `workflow-${type}-${stepExecutionId}`;
 
@@ -357,8 +363,9 @@ export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-trackin
 
 /**
  * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
- * for a burst of them, whether SES events reach the webhook, Redis memory, and the workflow runs a
- * restart left RUNNING. Each job says how it is retried.
+ * for a burst of them, whether SES events reach the webhook, Redis memory, and the workflow runs
+ * nothing would move on any more (left RUNNING by a restart, or WAITING past the end of their
+ * wait). Each job says how it is retried.
  */
 export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
   connection: redisConnection,
@@ -480,6 +487,17 @@ export class QueueService {
     }
     await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
     return true;
+  }
+
+  /**
+   * Plunk Lite: whether the job that ends a delay or a wait's timeout is still to run (or running)
+   */
+  public static async isWorkflowWaitEndPending(
+    type: 'delay-end' | 'timeout',
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const job = await workflowQueue.getJob(workflowJobId(type, stepExecutionId));
+    return job ? isStillToRun(job) : false;
   }
 
   /**
@@ -748,12 +766,11 @@ export class QueueService {
     if (!previous) {
       return false;
     }
-    const state = await previous.getState();
-    if (state === 'completed' || state === 'failed' || state === 'unknown') {
-      await previous.remove().catch(() => undefined);
-      return false;
+    if (await isStillToRun(previous)) {
+      return true;
     }
-    return true;
+    await previous.remove().catch(() => undefined);
+    return false;
   }
 
   /**

@@ -182,6 +182,19 @@ describe('WorkflowRecoveryService.recoverWaits', () => {
     expect(await prisma.plunkLiteFailure.count({where: {projectId}})).toBe(3);
   });
 
+  it('leaves a wait a week overdue whose job is still queued: the worker was stopped, it is late', async () => {
+    const late = await waitingOn(WorkflowStepType.DELAY, {
+      status: StepExecutionStatus.COMPLETED,
+      resumeAt: minutesAgo(8 * 24 * 60),
+    });
+    vi.spyOn(QueueService, 'isWorkflowWaitEndPending').mockResolvedValue(true);
+
+    expect(await WorkflowRecoveryService.recoverWaits()).toBe(0);
+
+    expect(QueueService.isWorkflowWaitEndPending).toHaveBeenCalledWith('delay-end', late.stepExecutionId);
+    expect((await runOf(late.executionId)).status).toBe(WorkflowExecutionStatus.WAITING);
+  });
+
   it('leaves a run that waits half set up for less than 30 minutes', async () => {
     const recent = await waitingOn(WorkflowStepType.WAIT_FOR_EVENT, {status: StepExecutionStatus.RUNNING}, 10);
 
@@ -196,20 +209,43 @@ describe('WorkflowRecoveryService.sweep', () => {
     vi.restoreAllMocks();
   });
 
-  it('checks waits every time, and interrupted runs only once it swept within the last 10 minutes', async () => {
+  it('checks waits every time, and interrupted runs only after 10 minutes of sweeps without a gap', async () => {
     const waits = vi.spyOn(WorkflowRecoveryService, 'recoverWaits').mockResolvedValue(0);
     const interrupted = vi.spyOn(WorkflowRecoveryService, 'failInterrupted').mockResolvedValue(0);
     const start = Date.now() + 365 * 24 * 60 * 60_000;
+    const at = (minutes: number) => start + minutes * 60_000;
 
-    // After a pause (a start, Redis out): no repeatable job fired, so runs that hung get time first
-    await WorkflowRecoveryService.sweep(start);
+    // After a pause (a start, Redis out), BullMQ runs the overdue sweep and the next one a few
+    // seconds apart: runs that hung get 10 minutes of sweeps first
+    await WorkflowRecoveryService.sweep(at(0));
+    await WorkflowRecoveryService.sweep(at(0.05));
+    await WorkflowRecoveryService.sweep(at(5));
     expect(interrupted).not.toHaveBeenCalled();
 
-    await WorkflowRecoveryService.sweep(start + 5 * 60_000);
+    await WorkflowRecoveryService.sweep(at(10));
     expect(interrupted).toHaveBeenCalledTimes(1);
 
-    await WorkflowRecoveryService.sweep(start + 20 * 60_000);
+    // A gap starts the count again
+    await WorkflowRecoveryService.sweep(at(30));
     expect(interrupted).toHaveBeenCalledTimes(1);
-    expect(waits).toHaveBeenCalledTimes(3);
+    expect(waits).toHaveBeenCalledTimes(5);
+  });
+
+  it('does not count a sweep that failed (the database out) as one without a gap', async () => {
+    const waits = vi.spyOn(WorkflowRecoveryService, 'recoverWaits');
+    const interrupted = vi.spyOn(WorkflowRecoveryService, 'failInterrupted').mockResolvedValue(0);
+    const start = Date.now() + 2 * 365 * 24 * 60 * 60_000;
+    const at = (minutes: number) => start + minutes * 60_000;
+
+    waits.mockResolvedValue(0);
+    await WorkflowRecoveryService.sweep(at(0));
+    await WorkflowRecoveryService.sweep(at(5));
+    waits.mockRejectedValue(new Error('database down'));
+    await expect(WorkflowRecoveryService.sweep(at(10))).rejects.toThrow('database down');
+    await expect(WorkflowRecoveryService.sweep(at(15))).rejects.toThrow('database down');
+
+    waits.mockResolvedValue(0);
+    await WorkflowRecoveryService.sweep(at(20));
+    expect(interrupted).not.toHaveBeenCalled();
   });
 });

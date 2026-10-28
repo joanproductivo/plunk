@@ -14,6 +14,7 @@ import {
   unsubscribeFooterHtml,
 } from '@plunk/shared';
 
+import {POOL_WAIT_TRANSACTION} from '../utils/database.js';
 import {renderBody} from '../utils/emailBody.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
@@ -240,11 +241,8 @@ export class EmailService {
           },
         });
 
-      // maxWait as long as a lone query may wait for a pooled connection (the pool_timeout a
-      // deployment sets on DATABASE_URL): Prisma's 2 s default would fail the batch on every
-      // short pool spike
       email = guard
-        ? await prisma.$transaction(async tx => ((await guard(tx)) ? create(tx) : null), {maxWait: 20_000})
+        ? await prisma.$transaction(async tx => ((await guard(tx)) ? create(tx) : null), POOL_WAIT_TRANSACTION)
         : await create(prisma);
     } catch (error) {
       const existing =

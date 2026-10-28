@@ -1,7 +1,7 @@
 /**
  * Plunk Lite's checks worker: the reputation check after bounces and complaints, every 15 minutes
  * the check that SES events reach the webhook and the one of Redis's memory, and every 5 minutes
- * the sweep of workflow runs a restart interrupted
+ * the sweep of workflow runs nothing would move on any more
  */
 
 import type {PlunkLiteChecksJobData, SecurityCheckJobData} from '@plunk/types';
