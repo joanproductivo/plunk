@@ -197,6 +197,8 @@ Plunk bundles a self-hosted [ntfy](https://ntfy.sh) server for internal system n
 | `EMAIL_WORKER_CONCURRENCY`             | No       | Number of emails the worker processes in parallel. When unset, derived from the effective rate limit so a higher SES quota scales throughput automatically.                                                                               | —       |
 | `EMAIL_WORKER_MAX_CONCURRENCY`         | No       | Upper bound applied to the auto-derived worker concurrency. Raise this only after sizing the Prisma connection pool accordingly.                                                                                                          | `50`    |
 
+`EMAIL_RATE_LIMIT_PER_SECOND`, `EMAIL_WORKER_CONCURRENCY` and `EMAIL_WORKER_MAX_CONCURRENCY` take a whole number above 0. Anything else is ignored with a warning at startup, as if the variable were not set.
+
 The two `PLUNK_LITE_DISABLE_*_PERCENT` values accept a decimal comma (`0,4`). Any other value outside 0–100 is logged at startup and replaced by the default, so a typo never keeps Plunk from starting.
 
 ## Advanced

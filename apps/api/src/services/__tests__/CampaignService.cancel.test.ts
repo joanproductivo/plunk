@@ -1,10 +1,12 @@
 import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {deleteUnsentCampaignEmails} from '../../jobs/campaign-cancel-cleanup-processor';
+import {prisma as servicePrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {CampaignService} from '../CampaignService';
 import {Keys} from '../keys';
+import {NtfyService} from '../NtfyService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 /**
@@ -377,5 +379,62 @@ describe('deleteUnsentCampaignEmails', () => {
     expect(await prisma.email.count({where: {campaignId}})).toBe(0);
     // A full batch, the remainder, and then an empty batch ends the loop.
     expect(progress).toEqual([1000, 1100]);
+  });
+});
+
+/** Plunk Lite: a cancel and the end of the send at the same moment */
+describe('CampaignService - cancel and finalize racing', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+
+  beforeEach(async () => {
+    projectId = (await factories.createUserWithProject()).project.id;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps a campaign cancelled while its last email was being counted, and does not announce it', async () => {
+    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
+    await prisma.campaign.update({where: {id: campaign.id}, data: {totalRecipients: 1}});
+    const contact = await factories.createContact({projectId});
+    await prisma.email.create({
+      data: {
+        projectId,
+        contactId: contact.id,
+        campaignId: campaign.id,
+        subject: 'Done',
+        body: '<p>x</p>',
+        from: 'hello@plunk.test',
+        sourceType: 'CAMPAIGN',
+        status: EmailStatus.SENT,
+        sentAt: new Date(),
+      },
+    });
+    const announce = vi.spyOn(NtfyService, 'notifyCampaignSendCompleted');
+    const count = servicePrisma.email.count.bind(servicePrisma.email);
+    vi.spyOn(servicePrisma.email, 'count').mockImplementation((async (args: never) => {
+      await prisma.campaign.update({where: {id: campaign.id}, data: {status: CampaignStatus.CANCELLED}});
+      return count(args);
+    }) as never);
+
+    await CampaignService.finalizeIfDone(campaign.id);
+
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect(announce).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a campaign that finished sending since it was read', async () => {
+    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENT});
+    const get = CampaignService.get.bind(CampaignService);
+    vi.spyOn(CampaignService, 'get').mockImplementationOnce(async (...args) => ({
+      ...(await get(...args)),
+      status: CampaignStatus.SENDING,
+    }));
+
+    await expect(CampaignService.cancel(projectId, campaign.id)).rejects.toThrow('Can only cancel');
+
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.SENT);
   });
 });

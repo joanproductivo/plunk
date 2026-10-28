@@ -5,7 +5,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
-type Outcome = {status: number; body?: {success: boolean; data: Record<string, unknown>}};
+type Outcome = {status: number; message?: string; body?: {success: boolean; data: Record<string, unknown>}};
 
 /**
  * Plunk Lite: /v1/track takes the secret key too, from a server, in one call -- also with the public
@@ -45,8 +45,8 @@ describe('POST /v1/track with the secret key', () => {
     return new Promise<Outcome>(resolve => {
       // The modules are loaded afresh, so their HttpException is not this file's: read its code
       const failed: NextFunction = (error?: unknown) => {
-        const code = (error as {code?: unknown} | undefined)?.code;
-        resolve({status: typeof code === 'number' ? code : 500});
+        const {code, message} = (error ?? {}) as {code?: unknown; message?: string};
+        resolve({status: typeof code === 'number' ? code : 500, message});
       };
       res.json = ((json: Outcome['body']) => {
         resolve({status: res.statusCode, body: json});
@@ -71,10 +71,13 @@ describe('POST /v1/track with the secret key', () => {
     expect(await prisma.event.count({where: {projectId: project.id, contactId: contact.id}})).toBe(1);
   });
 
-  it('refuses a secret key no project has', async () => {
-    const outcome = await track('sk_nobodyhasthiskey123', {event: 'newsletter.signup', email: 'ana@example.com'});
+  it('refuses a key no project has, naming both keys /v1/track takes', async () => {
+    for (const key of ['sk_nobodyhasthiskey123', 'pk_nobodyhasthiskey123']) {
+      const outcome = await track(key, {event: 'newsletter.signup', email: 'ana@example.com'});
 
-    expect(outcome.status).toBe(401);
+      expect(outcome.status).toBe(401);
+      expect(outcome.message).toMatch(/public key \(pk_\*\) or a secret key \(sk_\*\)/);
+    }
   });
 
   it('still takes the secret key with the public key switched off, and only the public key gets 403', async () => {

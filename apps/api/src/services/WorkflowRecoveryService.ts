@@ -3,7 +3,9 @@ import {StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {errorMessage} from '../database/redis.js';
 import {utcTimestamp} from '../utils/database.js';
+import {isInfrastructureError} from '../utils/infrastructureErrors.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {QueueService} from './QueueService.js';
 
@@ -120,7 +122,16 @@ export class WorkflowRecoveryService {
    * moving it), then interrupted runs once sweeps have run without a gap (see STEADY_MS)
    */
   public static async sweep(now = Date.now()): Promise<void> {
-    await this.recoverWaits();
+    try {
+      await this.recoverWaits();
+    } catch (error) {
+      // With the database or Redis out the sweep fails, and does not count as one without a gap.
+      // Anything else is looked at again next time, without holding back interrupted runs.
+      if (isInfrastructureError(error)) {
+        throw error;
+      }
+      signale.error(`[WORKFLOW-RECOVERY] Could not recover waiting runs: ${errorMessage(error)}`);
+    }
     if (lastSweepAt === undefined || now - lastSweepAt >= STEADY_MS) {
       steadySince = now;
     }
@@ -183,52 +194,11 @@ export class WorkflowRecoveryService {
 
     let fixed = 0;
     for (const row of rows) {
-      const run: RunToFail = {
-        id: row.id,
-        workflowId: row.workflowId,
-        workflow: {name: row.workflowName, projectId: row.projectId},
-        contact: {email: row.email},
-      };
-      // Only while it still waits on the same step: one that moved on meanwhile is alive
-      const stillThere = {status: WorkflowExecutionStatus.WAITING, currentStepId: row.currentStepId};
-      switch (row.fix) {
-        case 'delay-end':
-        case 'timeout':
-          if (await QueueService.ensureWorkflowWaitEnd(row.fix, row.id, row.currentStepId!, row.stepExecutionId!)) {
-            fixed++;
-          }
-          break;
-        case 'deleted':
-          if (await this.failRun(run, {...STEP_DELETED, where: stillThere})) {
-            fixed++;
-          }
-          break;
-        case 'stuck':
-          // A job still to run is merely late (the worker was stopped for days): it ends the wait
-          if (
-            await QueueService.isWorkflowWaitEndPending(
-              row.stepType === 'DELAY' ? 'delay-end' : 'timeout',
-              row.stepExecutionId!,
-            )
-          ) {
-            break;
-          }
-          if (
-            await this.failRun(run, {
-              error: 'A wait has not ended a week after it was due',
-              exitReason: 'Stuck: its wait never ended',
-              where: stillThere,
-            })
-          ) {
-            fixed++;
-          }
-          break;
-        case 'interrupted':
-          if (await this.failRun(run, {...INTERRUPTED, where: {...stillThere, updatedAt: {lt: overdue}}})) {
-            fixed++;
-            await this.failOpenSteps(run.id);
-          }
-          break;
+      try {
+        fixed += (await this.recoverWait(row, overdue)) ? 1 : 0;
+      } catch (error) {
+        // One run that cannot be recovered now does not hold up the others
+        signale.error(`[WORKFLOW-RECOVERY] Could not recover run ${row.id}: ${errorMessage(error)}`);
       }
     }
 
@@ -236,6 +206,44 @@ export class WorkflowRecoveryService {
       signale.warn(`[WORKFLOW-RECOVERY] Recovered ${fixed} overdue waiting workflow run(s)`);
     }
     return fixed;
+  }
+
+  /** What recoverWaits does with one of its runs; whether it changed anything */
+  private static async recoverWait(row: OverdueWait, overdue: Date): Promise<boolean> {
+    const run: RunToFail = {
+      id: row.id,
+      workflowId: row.workflowId,
+      workflow: {name: row.workflowName, projectId: row.projectId},
+      contact: {email: row.email},
+    };
+    // Only while it still waits on the same step: one that moved on meanwhile is alive
+    const stillThere = {status: WorkflowExecutionStatus.WAITING, currentStepId: row.currentStepId};
+    switch (row.fix) {
+      case 'delay-end':
+      case 'timeout':
+        return QueueService.ensureWorkflowWaitEnd(row.fix, row.id, row.currentStepId!, row.stepExecutionId!);
+      case 'deleted':
+        return this.failRun(run, {...STEP_DELETED, where: stillThere});
+      case 'stuck': {
+        // A job still to run is merely late (the worker was stopped for days): it ends the wait
+        const kind = row.stepType === 'DELAY' ? 'delay-end' : 'timeout';
+        if (await QueueService.isWorkflowWaitEndPending(kind, row.stepExecutionId!)) {
+          return false;
+        }
+        return this.failRun(run, {
+          error: 'A wait has not ended a week after it was due',
+          exitReason: 'Stuck: its wait never ended',
+          where: stillThere,
+        });
+      }
+      case 'interrupted': {
+        const failed = await this.failRun(run, {...INTERRUPTED, where: {...stillThere, updatedAt: {lt: overdue}}});
+        if (failed) {
+          await this.failOpenSteps(run.id);
+        }
+        return failed;
+      }
+    }
   }
 
   /**

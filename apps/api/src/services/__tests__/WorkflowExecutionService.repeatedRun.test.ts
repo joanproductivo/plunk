@@ -146,7 +146,7 @@ describe('WorkflowExecutionService - a repeated run of the same steps', () => {
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
   });
 
-  it('sets up a wait once when the run reaches it again', async () => {
+  it('sets up a wait once when the run reaches it again, and leaves the run to the sweep', async () => {
     const route = await createRoute({type: WorkflowStepType.WAIT_FOR_EVENT, config: {eventName: 'x', timeout: 60}});
     await route.run();
     await prisma.workflowExecution.update({
@@ -160,7 +160,8 @@ describe('WorkflowExecutionService - a repeated run of the same steps', () => {
     expect(
       await prisma.workflowStepExecution.count({where: {executionId: route.executionId, stepId: route.steps[0]}}),
     ).toBe(1);
-    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
+    // A run RUNNING on a wait already set up only comes from writes before they were one transaction
+    expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.RUNNING);
   });
 
   it('resumes a waiting run once when two copies of an old job for it run at the same time', async () => {

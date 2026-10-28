@@ -93,9 +93,9 @@ export function bodyHasListManagementLink(html: string, contactId: string): bool
  * contact before recording it, and the contact id in the path still governs the
  * change — so a stripped or rewritten value costs attribution and nothing else.
  *
- * Only callers that hold a persisted email row can supply an id. Links rendered
- * before the email exists (campaign and workflow bodies, `POST /send`) pass
- * nothing and stay unattributed.
+ * Only callers that know the email's id can supply one. Links rendered before
+ * the email exists (workflow bodies, `POST /send`) pass nothing and stay
+ * unattributed; a campaign's (Plunk Lite) carry the id its batch gives the email.
  */
 export function withSourceEmail(url: string, sourceEmailId?: string): string {
   if (!sourceEmailId) {

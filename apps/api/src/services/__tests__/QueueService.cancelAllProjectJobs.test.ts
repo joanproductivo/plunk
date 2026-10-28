@@ -1,7 +1,8 @@
-import {CampaignStatus, WorkflowExecutionStatus} from '@plunk/db';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {CampaignStatus, EmailSourceType, WorkflowExecutionStatus} from '@plunk/db';
+import {Job} from 'bullmq';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
-import {QueueService, scheduledQueue} from '../QueueService';
+import {emailQueue, QueueService, scheduledQueue} from '../QueueService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 /**
@@ -17,6 +18,50 @@ describe('QueueService - cancelAllProjectJobs', () => {
   beforeEach(async () => {
     projectId = (await factories.createUserWithProject()).project.id;
     otherProjectId = (await factories.createUserWithProject()).project.id;
+    await emailQueue.obliterate({force: true});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await emailQueue.obliterate({force: true});
+  });
+
+  /** A pending email of `forProjectId`, with its job queued as the API queues it (with a priority) */
+  async function queuedEmail(forProjectId: string) {
+    const contact = await factories.createContact({projectId: forProjectId});
+    const email = await prisma.email.create({
+      data: {
+        projectId: forProjectId,
+        contactId: contact.id,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hello@example.com',
+        sourceType: EmailSourceType.TRANSACTIONAL,
+      },
+    });
+    await QueueService.queueEmail(email.id, EmailSourceType.TRANSACTIONAL);
+    return email;
+  }
+
+  it("removes the project's queued email jobs, prioritized ones included, and leaves other projects'", async () => {
+    const ours = await queuedEmail(projectId);
+    const theirs = await queuedEmail(otherProjectId);
+
+    await QueueService.cancelAllProjectJobs(projectId);
+
+    const left = (await emailQueue.getJobs(['waiting', 'prioritized', 'delayed'])).map(job => job.data.emailId);
+    expect(left).not.toContain(ours.id);
+    expect(left).toContain(theirs.id);
+  });
+
+  it('still cancels the executions when a job cannot be removed, as it just started', async () => {
+    await queuedEmail(projectId);
+    const waiting = await createExecution(projectId, WorkflowExecutionStatus.WAITING);
+    vi.spyOn(Job.prototype, 'remove').mockRejectedValue(new Error('Job could not be removed because it is locked'));
+
+    await QueueService.cancelAllProjectJobs(projectId);
+
+    expect((await statusOf(waiting.id)).status).toBe(WorkflowExecutionStatus.CANCELLED);
   });
 
   async function createExecution(forProjectId: string, status: WorkflowExecutionStatus) {
@@ -54,7 +99,9 @@ describe('QueueService - cancelAllProjectJobs', () => {
 
   it('cancels scheduled campaigns and removes their jobs', async () => {
     const scheduledFor = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const scheduled = await factories.createScheduledCampaign(projectId, scheduledFor, {status: CampaignStatus.SCHEDULED});
+    const scheduled = await factories.createScheduledCampaign(projectId, scheduledFor, {
+      status: CampaignStatus.SCHEDULED,
+    });
     await QueueService.scheduleCampaign(scheduled.id, scheduledFor);
     const draft = await factories.createCampaign({projectId});
     await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});

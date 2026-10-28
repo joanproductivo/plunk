@@ -349,6 +349,24 @@ export class Campaigns {
   }
 
   /**
+   * Plunk Lite: how many unsubscribed contacts a send would reach now, which only a TRANSACTIONAL
+   * campaign does (0 otherwise)
+   * GET /campaigns/:id/audience
+   */
+  @Get(':id/audience')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  private async audience(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    return res.json({
+      success: true,
+      data: await CampaignService.getSendAudience(auth.projectId, id!),
+    });
+  }
+
+  /**
    * Get campaign statistics
    * GET /campaigns/:id/stats
    */

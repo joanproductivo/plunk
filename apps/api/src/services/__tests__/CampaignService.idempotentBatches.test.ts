@@ -44,6 +44,27 @@ describe('CampaignService - idempotent batches', () => {
     generation,
   });
 
+  it('carries on after a cursor contact deleted between two batches (Plunk Lite)', async () => {
+    const campaign = await sendingCampaign();
+    const generation = campaign.sentAt!.getTime();
+    const contacts = await prisma.contact.findMany({where: {projectId}, orderBy: {id: 'asc'}});
+    vi.spyOn(QueueService, 'queueCampaignBatch').mockResolvedValue(undefined as never);
+    // The second batch starts after the first one's last contact, deleted in between
+    await prisma.contact.delete({where: {id: contacts[1]!.id}});
+
+    await CampaignService.processBatch({
+      campaignId: campaign.id,
+      batchNumber: 2,
+      offset: 2,
+      limit: 2,
+      cursor: contacts[1]!.id,
+      generation,
+    });
+
+    const emails = await prisma.email.findMany({where: {campaignId: campaign.id}});
+    expect(emails.map(email => email.contactId)).toEqual([contacts[2]!.id]);
+  });
+
   it('creates each email once when the same batch runs twice', async () => {
     const campaign = await sendingCampaign();
     const generation = campaign.sentAt!.getTime();

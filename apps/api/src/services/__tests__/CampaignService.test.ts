@@ -746,6 +746,8 @@ describe('CampaignService', () => {
       const emails = await sendBatch({subject: 'Hi', body: '<a href="{{unsubscribeUrl}}">Unsubscribe</a>'}, [{}]);
 
       expect(emails[0]?.body).toContain(`/unsubscribe/${emails[0]?.contactId}`);
+      // Plunk Lite: with the email's id, as this is its only render
+      expect(emails[0]?.body).toContain(`/unsubscribe/${emails[0]?.contactId}?e=${emails[0]?.id}`);
     });
   });
 });

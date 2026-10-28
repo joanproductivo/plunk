@@ -68,6 +68,11 @@ process.env.IGNORE_AUTOMATIC_OPENS = 'true';
 // depend on (example.com takes no email). The tests of that check switch it on with a fake resolver.
 process.env.PLUNK_LITE_VERIFY_SIGNUPS = 'false';
 
+// Plunk Lite: SES at a local port nothing listens on, so no test reaches AWS whatever it leaves
+// unmocked: a call fails at once, as with SES down (a campaign's quota check, for one, then lets the
+// send go on). A test that wants an answer stands in for SES itself.
+process.env.AWS_ENDPOINT_URL_SES = 'http://127.0.0.1:1';
+
 // Static import is safe: database.ts only reads env in initialize(), which runs
 // in beforeAll — well after the env mutations above.
 import {testDatabase} from './helpers/database';

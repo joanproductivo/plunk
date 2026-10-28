@@ -23,6 +23,27 @@ interface Campaign {
   /** What the API actually returns. `recipientCount` is accepted as a fallback. */
   totalRecipients?: number;
   recipientCount?: number;
+  type?: string;
+}
+
+/**
+ * Plunk Lite: how many of a TRANSACTIONAL campaign's recipients are unsubscribed -- such a campaign
+ * reaches them too -- or undefined when the API cannot say. 0 for any other campaign.
+ */
+async function unsubscribedRecipients(client: PlunkClient, campaign: Campaign): Promise<number | undefined> {
+  if (campaign.type !== 'TRANSACTIONAL') {
+    return 0;
+  }
+  try {
+    const audience = unwrap(
+      await client.request<{unsubscribed: number} | {success: boolean; data: {unsubscribed: number}}>({
+        path: `/campaigns/${encodeURIComponent(campaign.id)}/audience`,
+      }),
+    );
+    return typeof audience?.unsubscribed === 'number' ? audience.unsubscribed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -186,10 +207,17 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
           .string()
           .optional()
           .describe('ISO 8601 timestamp to schedule the send. Omit to send immediately.'),
+        includeUnsubscribed: z
+          .boolean()
+          .optional()
+          .describe(
+            'Only for a TRANSACTIONAL campaign, which reaches unsubscribed contacts too: set true to send it ' +
+              'when the number of them cannot be checked, and only once the user has said to.',
+          ),
       }),
       annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true},
     },
-    async ({id, scheduledFor}, context) =>
+    async ({id, scheduledFor, includeUnsubscribed}, context) =>
       runTool(async () => {
         // Read the campaign first so the confirmation names the real audience
         // size — "send to 43,812 people" is a very different decision from
@@ -205,11 +233,25 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
 
         const when = scheduledFor ? `scheduled for ${scheduledFor}` : 'sent immediately';
 
+        // Plunk Lite: a TRANSACTIONAL campaign also reaches whoever asked to receive nothing, so the
+        // confirmation says how many; without the number, the user has to say so explicitly
+        const unsubscribed = await unsubscribedRecipients(client, campaign);
+        if (unsubscribed === undefined && !includeUnsubscribed) {
+          return errorResult(
+            'This is a TRANSACTIONAL campaign, which reaches unsubscribed contacts too, and how many of them it ' +
+              'includes could not be checked. Ask the user first; only if they say to send it anyway, call again ' +
+              'with includeUnsubscribed: true.',
+          );
+        }
+        const unsubscribedNote = unsubscribed
+          ? ` It includes ${unsubscribed.toLocaleString()} unsubscribed contacts, since a TRANSACTIONAL campaign reaches them too.`
+          : '';
+
         const pending = requireConfirmation(
           context as {mcpReq?: {inputResponses?: unknown}},
           'confirm_campaign_send',
           `Send campaign "${campaign.name ?? id}" (subject: "${campaign.subject ?? '—'}") to ${audience}? ` +
-            `It will be ${when}. This cannot be undone.`,
+            `It will be ${when}.${unsubscribedNote} This cannot be undone.`,
         );
 
         if (pending) {

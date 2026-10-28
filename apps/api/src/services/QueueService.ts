@@ -33,7 +33,7 @@ import type {
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
-import {errorMessage} from '../database/redis.js';
+import {errorMessage, redis} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
 
 /** How long a change that is already written waits for a queue before carrying on without it */
@@ -482,7 +482,7 @@ export class QueueService {
     stepExecutionId: string,
   ): Promise<boolean> {
     const jobId = workflowJobId(type, stepExecutionId);
-    if (await this.clearFinishedJob(workflowQueue, jobId)) {
+    if (!(await this.clearFinishedJob(workflowQueue, jobId))) {
       return false;
     }
     await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
@@ -577,6 +577,8 @@ export class QueueService {
     cancelledAt: Date,
   ): Promise<void> {
     const jobId = `campaign-cancel-cleanup-${campaignId}`;
+    // False while the cleanup is still to run, which then does the work, or when a finished one
+    // would not go, which clearFinishedJob logs
     await this.clearFinishedJob(campaignCancelCleanupQueue, jobId);
 
     await campaignCancelCleanupQueue.add(
@@ -757,20 +759,30 @@ export class QueueService {
 
   /**
    * Remove the job with this ID if it has finished (or sits in no list), so adding one with the same
-   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns true if a job that is
-   * still to run, or running, holds the ID. A concurrent caller can have replaced it with a job that
-   * is now running, and removing that one fails as locked: the running job does the work.
+   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns whether the ID is free
+   * -- false while a job that is still to run, or running, holds it, or one that would not go. A
+   * concurrent caller can have replaced it with a job that is now running, and removing that one
+   * fails as locked: the running job does the work.
    */
   private static async clearFinishedJob(queue: Queue, jobId: string): Promise<boolean> {
     const previous = await queue.getJob(jobId);
     if (!previous) {
-      return false;
-    }
-    if (await isStillToRun(previous)) {
       return true;
     }
-    await previous.remove().catch(() => undefined);
-    return false;
+    if (await isStillToRun(previous)) {
+      return false;
+    }
+    try {
+      await previous.remove();
+      return true;
+    } catch (error) {
+      // Free only if it went anyway; otherwise an add with its ID would do nothing
+      const free = !(await queue.getJob(jobId));
+      if (!free) {
+        signale.warn(`[QUEUE] Could not clear job ${jobId} to queue it again: ${errorMessage(error)}`);
+      }
+      return free;
+    }
   }
 
   /**
@@ -903,7 +915,55 @@ export class QueueService {
   }
 
   /**
-   * Pause all queues (for maintenance)
+   * Plunk Lite: give a job that failed for good another round of its attempts, counting the rounds
+   * in its data. BullMQ keeps the attempts already made, and the times the job stalled, for the
+   * job's whole life, so both are reset for the round.
+   */
+  public static async retryForAnotherRound<T extends {sweepRetries?: number}>(job: Job<T>): Promise<void> {
+    await job.updateData({...job.data, sweepRetries: (job.data.sweepRetries ?? 0) + 1});
+    await redis.hdel(`${job.queueQualifiedName}:${job.id}`, 'stc');
+    await job.retry('failed', {resetAttemptsMade: true});
+  }
+
+  /**
+   * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time,
+   * every page before anything is removed. The worker still takes jobs meanwhile, which can shift a
+   * page so that one is read twice (its second removal fails and is skipped) or never: the job left
+   * behind is one the caller has already made pointless, and finds so when it runs. A job that has
+   * started meanwhile cannot be removed either. Returns how many were removed.
+   */
+  private static async removeQueuedJobs<T>(
+    queue: Queue<T>,
+    pick: (jobs: Job<T>[]) => Promise<Job<T>[]>,
+  ): Promise<number> {
+    const PAGE = 1000;
+    const picked: Job<T>[] = [];
+    for (let start = 0; ; start += PAGE) {
+      // The range is per state, so a page holds up to one range of each
+      const jobs = (await queue.getJobs(['waiting', 'prioritized', 'delayed'], start, start + PAGE - 1)).filter(
+        job => job,
+      );
+      if (jobs.length === 0) {
+        break;
+      }
+      picked.push(...(await pick(jobs)));
+    }
+
+    let removed = 0;
+    for (const job of picked) {
+      try {
+        await job.remove();
+        removed++;
+      } catch {
+        // Started since it was read: it finds the project disabled, or the campaign cancelled
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Pause all queues (for maintenance). Plunk Lite: the email queue's pause lasts at most until the
+   * recovery sweep's probe resumes it, 5 minutes later (SesSendGate.resumeSendingIfDue)
    */
   public static async pauseAll(): Promise<void> {
     await Promise.all([
@@ -997,32 +1057,31 @@ export class QueueService {
       signale.info(`[QUEUE] Cancelled ${scheduledCampaigns.length} scheduled campaigns for project ${projectId}`);
     }
 
-    // Cancel all pending emails for this project
-    const pendingEmails = await emailQueue.getJobs(['waiting', 'delayed']);
-    for (const job of pendingEmails) {
-      const email = await prisma.email.findUnique({
-        where: {id: job.data.emailId},
-        select: {projectId: true},
+    // Cancel all pending emails and campaign batches for this project. Plunk Lite: also the
+    // `prioritized` ones -- every email job has a priority, so they were all missed -- a page at a
+    // time, and on their own: Redis failing here must not keep the cancel below from running
+    try {
+      const emails = await this.removeQueuedJobs(emailQueue, async jobs => {
+        const ofProject = await prisma.email.findMany({
+          where: {projectId, id: {in: jobs.map(job => job.data.emailId)}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(email => email.id));
+        return jobs.filter(job => ids.has(job.data.emailId));
       });
-
-      if (email?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed email job ${job.id}`);
-      }
-    }
-
-    // Cancel all pending campaign batches for this project
-    const campaignBatches = await campaignQueue.getJobs(['waiting', 'delayed']);
-    for (const job of campaignBatches) {
-      const campaign = await prisma.campaign.findUnique({
-        where: {id: job.data.campaignId},
-        select: {projectId: true},
+      const batches = await this.removeQueuedJobs(campaignQueue, async jobs => {
+        const ofProject = await prisma.campaign.findMany({
+          where: {projectId, id: {in: [...new Set(jobs.map(job => job.data.campaignId))]}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(campaign => campaign.id));
+        return jobs.filter(job => ids.has(job.data.campaignId));
       });
-
-      if (campaign?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed campaign batch job ${job.id}`);
-      }
+      signale.info(
+        `[QUEUE] Removed ${emails} email job(s) and ${batches} campaign batch job(s) of project ${projectId}`,
+      );
+    } catch (error) {
+      signale.error(`[QUEUE] Could not remove the queued jobs of project ${projectId}: ${errorMessage(error)}`);
     }
 
     // Cancel every workflow execution still in progress. Removing their queued jobs alone left them

@@ -25,7 +25,7 @@ import {uuidv5} from '../utils/uuid.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
-import {buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
+import {buildEmailHeaders, classifyEmail, withSourceEmail} from './EmailHeaderService.js';
 import {EmailService, POSSIBLY_SENT_NOTE} from './EmailService.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
@@ -33,9 +33,11 @@ import {QueueService} from './QueueService.js';
 import {SegmentService} from './SegmentService.js';
 import {Keys} from './keys.js';
 import {DASHBOARD_URI, STRIPE_ENABLED} from '../app/constants.js';
-import {sendRawEmail} from './SESService.js';
+import {getDailyQuotaQuick, sendRawEmail} from './SESService.js';
 
 const BATCH_SIZE = 500; // Number of emails to process per batch (increased for better performance)
+/** Plunk Lite: the share of SES's 24-hour quota a campaign may use up when it starts */
+const DAILY_QUOTA_SHARE = 0.95;
 
 /** Namespace of the campaign email ids; fixed, and used for nothing else */
 const CAMPAIGN_EMAIL_ID_NAMESPACE = 'b438d7ec-4f8c-4929-b750-e677bcec6d06';
@@ -621,6 +623,27 @@ export class CampaignService {
       recipientCount = await this.getRecipientCount(projectId, campaign);
     }
 
+    // Plunk Lite: refuse a send that would not fit in what is left of SES's 24-hour quota, keeping
+    // 5 % of it for the day's transactional and workflow emails. The campaigns still sending, in any
+    // project (they share the SES account), count with what they have left. Without an answer from
+    // SES, or with no limit, the send goes on.
+    const quota = await getDailyQuotaQuick();
+    if (quota && quota.max24HourSend >= 0) {
+      const allowed = Math.floor(DAILY_QUOTA_SHARE * quota.max24HourSend);
+      const sending = await prisma.campaign.aggregate({
+        where: {status: CampaignStatus.SENDING},
+        _sum: {totalRecipients: true, sentCount: true},
+      });
+      const pending = Math.max(0, (sending._sum.totalRecipients ?? 0) - (sending._sum.sentCount ?? 0));
+      if (quota.sentLast24Hours + pending + recipientCount > allowed) {
+        const others = pending > 0 ? `, ${pending} more are on their way in campaigns still sending` : '';
+        throw new HttpException(
+          400,
+          `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours${others}, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
+        );
+      }
+    }
+
     // Move to SENDING only from DRAFT or SCHEDULED, in one statement: of two sends that race
     // (a double click, a manual send of a campaign whose schedule fires at the same moment),
     // exactly one starts. Two would be two generations, and every recipient would get two
@@ -745,7 +768,9 @@ export class CampaignService {
     // Queue emails for each contact
     for (const contact of contacts) {
       try {
-        // Render template with contact data
+        // Render template with contact data. Plunk Lite: this is the only render of a campaign
+        // email (the worker sends it as it is), so its links carry the email's id here
+        const id = this.emailIdFor(campaign.id, generation, contact.id);
         const contactData =
           contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data) ? contact.data : {};
         const variables = {
@@ -753,9 +778,9 @@ export class CampaignService {
           email: contact.email,
           ...contactData,
           data: contactData,
-          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
-          subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
-          manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
+          unsubscribeUrl: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, id),
+          subscribeUrl: withSourceEmail(`${DASHBOARD_URI}/subscribe/${contact.id}`, id),
+          manageUrl: withSourceEmail(`${DASHBOARD_URI}/manage/${contact.id}`, id),
         };
 
         const renderedSubject = subjectTemplate.render(variables);
@@ -768,7 +793,7 @@ export class CampaignService {
         // cancel and its cleanup to find. This is the only path that creates campaign emails.
         const email = await EmailService.sendCampaignEmail(
           {
-            id: this.emailIdFor(campaign.id, generation, contact.id),
+            id,
             projectId: campaign.projectId,
             contactId: contact.id,
             campaignId: campaign.id,
@@ -1080,10 +1105,15 @@ export class CampaignService {
       return;
     }
 
-    await prisma.campaign.update({
-      where: {id: campaignId},
+    // Plunk Lite: only a send still going on -- one cancelled (or closed by another run) between the
+    // read above and here keeps its status, and is not reconciled or announced twice
+    const closed = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: CampaignStatus.SENDING},
       data: {status: CampaignStatus.SENT, sentCount},
     });
+    if (closed.count === 0) {
+      return;
+    }
 
     // Fold every counter back to what the emails actually say, now that the send is
     // over, and settle `sentCount` against the live Redis delta. Events that arrive
@@ -1202,11 +1232,19 @@ export class CampaignService {
 
     // Stop the send first -- see the ordering note above. Already CANCELLED on the
     // repair path, but the write is idempotent and keeps the timestamp fresh.
-    const cancelledCampaign = await prisma.campaign.update({
-      where: {id: campaignId},
-      data: {
-        status: CampaignStatus.CANCELLED,
+    // Plunk Lite: only from the statuses read above -- a send that finished meanwhile stays SENT
+    const stopped = await prisma.campaign.updateMany({
+      where: {
+        id: campaignId,
+        status: {in: [CampaignStatus.SCHEDULED, CampaignStatus.SENDING, CampaignStatus.CANCELLED]},
       },
+      data: {status: CampaignStatus.CANCELLED},
+    });
+    if (stopped.count === 0) {
+      throw new HttpException(400, 'Can only cancel scheduled or sending campaigns');
+    }
+    const cancelledCampaign = await prisma.campaign.findUniqueOrThrow({
+      where: {id: campaignId},
       include: {
         project: {
           select: {name: true},
@@ -1601,6 +1639,22 @@ export class CampaignService {
   }
 
   /**
+   * Plunk Lite: how many unsubscribed contacts a send of the campaign would reach now. Only a
+   * TRANSACTIONAL campaign reaches them (0 otherwise), so its send dialogs say so. Suppressed
+   * addresses are not left out of the count (their table has no relation to contacts); the send
+   * still skips them.
+   */
+  public static async getSendAudience(projectId: string, campaignId: string): Promise<{unsubscribed: number}> {
+    const campaign = await this.get(projectId, campaignId);
+    if (campaign.type !== TemplateType.TRANSACTIONAL) {
+      return {unsubscribed: 0};
+    }
+    const where = await this.buildRecipientWhereAsync(projectId, campaign);
+    // In an AND, so no key of the audience's own filter can override it
+    return {unsubscribed: await prisma.contact.count({where: {AND: [where, {subscribed: false}]}})};
+  }
+
+  /**
    * Get recipient count for a campaign
    */
   private static async getRecipientCount(projectId: string, campaign: Campaign): Promise<number> {
@@ -1619,12 +1673,12 @@ export class CampaignService {
   ): Promise<{contacts: Contact[]; nextCursor?: string; hasMore: boolean}> {
     const where = await this.buildRecipientWhereAsync(projectId, campaign);
 
-    // Fetch one extra to determine if there are more results
+    // Fetch one extra to determine if there are more results. Plunk Lite: the contacts after the
+    // cursor by id, rather than Prisma's cursor, which starts from the cursor's row -- and skipped
+    // one, or failed, when that contact had been deleted or had left the audience since
     const contacts = await prisma.contact.findMany({
-      where,
+      where: cursor ? {AND: [where, {id: {gt: cursor}}]} : where,
       take: limit + 1,
-      skip: cursor ? 1 : 0,
-      cursor: cursor ? {id: cursor} : undefined,
       orderBy: {id: 'asc'}, // Use ID for consistent cursor ordering
     });
 

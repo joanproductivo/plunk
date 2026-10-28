@@ -59,9 +59,7 @@ export const MAIL_FROM_SUBDOMAIN = validateEnv('MAIL_FROM_SUBDOMAIN', '').trim()
 // Email Processing Rate Limit (optional override)
 // If not set, will automatically fetch from AWS SES account quota
 // Set this to override AWS quota (useful for setting lower limits or testing)
-export const EMAIL_RATE_LIMIT_PER_SECOND = process.env.EMAIL_RATE_LIMIT_PER_SECOND
-  ? Number(process.env.EMAIL_RATE_LIMIT_PER_SECOND)
-  : undefined;
+export const EMAIL_RATE_LIMIT_PER_SECOND = parsePositiveInt('EMAIL_RATE_LIMIT_PER_SECOND');
 
 // How long the api and the worker get to finish in-flight requests and jobs when they are
 // stopped. Below pm2's `kill_timeout` (30s, docker-entrypoint-nginx.sh), so a shutdown that
@@ -72,15 +70,11 @@ export const SHUTDOWN_TIMEOUT_MS = 25_000;
 // If not set, concurrency is derived from the effective rate limit so a higher
 // SES quota actually translates into higher throughput. Set this to pin a fixed
 // value (useful when Prisma pool size or memory is the binding constraint).
-export const EMAIL_WORKER_CONCURRENCY = process.env.EMAIL_WORKER_CONCURRENCY
-  ? Number(process.env.EMAIL_WORKER_CONCURRENCY)
-  : undefined;
+export const EMAIL_WORKER_CONCURRENCY = parsePositiveInt('EMAIL_WORKER_CONCURRENCY');
 
 // Upper bound for auto-derived concurrency. Raise this if you have a large SES
 // quota AND have sized the Prisma connection pool accordingly.
-export const EMAIL_WORKER_MAX_CONCURRENCY = process.env.EMAIL_WORKER_MAX_CONCURRENCY
-  ? Number(process.env.EMAIL_WORKER_MAX_CONCURRENCY)
-  : 50;
+export const EMAIL_WORKER_MAX_CONCURRENCY = parsePositiveInt('EMAIL_WORKER_MAX_CONCURRENCY') ?? 50;
 
 // Storage
 export const REDIS_URL = validateEnv('REDIS_URL');
@@ -137,9 +131,8 @@ export const PLUNK_ENABLED = PLUNK_API_KEY !== '' && PLUNK_FROM_ADDRESS !== '';
 export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') === 'true';
 
 /**
- * A percentage from the environment, strictly between 0 and 100. Anything else stops the process at
- * startup, rather than leaving a threshold that never or always trips (Plunk Lite). Exported for
- * lot E1 (E1.6), whose variables reuse it.
+ * A percentage from the environment, strictly between 0 and 100. Anything else is warned about at
+ * startup and gives the default, rather than a threshold that never or always trips (Plunk Lite).
  */
 export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string): number {
   const raw = validateEnv(key, defaultValue);
@@ -150,6 +143,25 @@ export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string)
     // from starting at all; the default is the safe threshold
     console.warn(`${key} must be a percentage between 0 and 100 (exclusive), got "${raw}": using ${defaultValue}`);
     return Number(defaultValue);
+  }
+  return value;
+}
+
+/**
+ * Plunk Lite: a whole number above 0 from the environment, or undefined when it is not set. Anything
+ * else ("0", "-3", "1.5", "abc") is warned about at startup and treated as not set, so the worker
+ * falls back to its own value instead of a rate or a concurrency of NaN, with which it would not
+ * start. No throw: every process imports these constants.
+ */
+export function parsePositiveInt(key: keyof NodeJS.ProcessEnv): number | undefined {
+  const raw = process.env[key]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.warn(`${key} must be a whole number above 0, got "${raw}": ignoring it`);
+    return undefined;
   }
   return value;
 }

@@ -143,7 +143,7 @@ const TRANSACTIONAL: SourceKind = {
  * reputation and SES conditions that led to it or came after. The SES account keeps working, since
  * `disabled` is Plunk's own mark, and in a self-hosted installation it is the owner's account.
  */
-const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'brake', 'redis'];
+const ALERTED_WHILE_DISABLED = ['project', 'security', 'sns', 'ses', 'brake', 'redis'];
 
 function sourceKind(sourceKey: string): {kind: SourceKind; rest: string} {
   const parts = sourceKey.split(':');

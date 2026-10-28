@@ -41,6 +41,8 @@ Campaigns support three audience types:
 
 `MARKETING` and `HEADLESS` campaigns automatically skip unsubscribed contacts. `TRANSACTIONAL` campaigns deliver to everyone matching the audience regardless of subscription state — use it sparingly and only for genuine transactional content.
 
+In Plunk Lite, the send dialogs of a `TRANSACTIONAL` campaign say how many unsubscribed contacts it reaches (`GET /campaigns/:id/audience`), and so does the MCP before it sends one.
+
 ## Sender domain verification
 
 The `from` address must be on a domain you've verified for sending. Creating or updating a campaign with an unverified `from` returns `403`. See [Verifying domains](/guides/verifying-domains).
@@ -60,6 +62,10 @@ Once a campaign is `SENT` or `CANCELLED` it can't be edited or resent — duplic
 ## Sending and scheduling
 
 Trigger a send with `POST /campaigns/:id/send`. The campaign is queued and sent in the background; depending on the audience size, this can take seconds for small lists to longer for very large ones. You can monitor progress on the campaign detail page in the dashboard.
+
+In Plunk Lite, a send that would not fit in what is left of your SES 24-hour quota is refused with `400` as it starts, and the campaign stays as it was. Campaigns get up to 95 % of the quota, counting what was sent in the last 24 hours and what the campaigns still sending have left; the other 5 % stays free for transactional and workflow emails. Without an answer from SES, the send goes on.
+
+While a campaign sends, the queue keeps to what SES says about the whole account. If it reports the sending rate, the queue waits a second. If the daily quota is used up, the queue waits a quarter of an hour and tries again. If the account is paused, the queue pauses and tries again every 30 minutes. None of these spend an email's attempts. The quota and the pause each raise an "Amazon SES" alert, which the first email out afterwards resolves. An email SES refuses for itself (an address or sender that is not verified, for one) fails at once, without retries.
 
 To cancel a `SCHEDULED` or `SENDING` campaign, call `POST /campaigns/:id/cancel`. Cancellation stops further sending but cannot recall emails that have already been handed off to the recipient's mail server.
 

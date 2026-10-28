@@ -195,6 +195,10 @@ Plunk's secret key is all-or-nothing over its project, so this server adds its o
   can start workflows. Confirmation is not a tool argument, so the model cannot grant it to itself.
   Clients that cannot show a prompt cannot send — set `PLUNK_ALLOW_UNCONFIRMED_SENDS=true` if you are
   running headless and accept that.
+- **A `TRANSACTIONAL` campaign says how many unsubscribed contacts it reaches.** Such a campaign
+  reaches them too, so `plunk_send_campaign` puts their number in the confirmation. If the number
+  cannot be read, it refuses to send unless called again with `includeUnsubscribed: true`, which the
+  model is told to pass only once you have said to (Plunk Lite).
 - **Read-only mode is enforced by registration**, not by convention. With `PLUNK_READ_ONLY=true` the
   mutating tools are never registered, so they cannot be called even by name.
 - **Billing, project deletion, and key rotation are unreachable.** Those endpoints require a dashboard

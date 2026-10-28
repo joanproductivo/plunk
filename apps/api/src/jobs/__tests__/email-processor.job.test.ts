@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
+import {CampaignStatus, EmailSourceType, EmailStatus, WorkflowExecutionStatus} from '@plunk/db';
 import type {SendEmailJobData} from '@plunk/types';
 import {UnrecoverableError} from 'bullmq';
 
@@ -8,6 +8,7 @@ import {CampaignService} from '../../services/CampaignService';
 import {EventService} from '../../services/EventService';
 import {SecurityService} from '../../services/SecurityService';
 import {SuppressionService} from '../../services/SuppressionService';
+import {holdSending, manyRejections, noteQuotaHeld, pauseSending} from '../../services/SesSendGate.js';
 import {sendRawEmail} from '../../services/SESService';
 import {type EmailJob, failAbandonedEmail, processEmailJob} from '../email-processor';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -15,6 +16,17 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 vi.mock('../../services/SESService', async importOriginal => ({
   ...(await importOriginal<typeof import('../../services/SESService')>()),
   sendRawEmail: vi.fn(),
+}));
+
+// Plunk Lite: the queue's limiter and pause are Redis's; here, what the processor asks of them
+vi.mock('../../services/SesSendGate.js', () => ({
+  holdSending: vi.fn(async () => undefined),
+  pauseSending: vi.fn(async () => undefined),
+  manyRejections: vi.fn(async () => false),
+  noteQuotaHeld: vi.fn(async () => undefined),
+  noteSent: vi.fn(async () => undefined),
+  SES_RATE_WAIT_MS: 1000,
+  SES_DAILY_QUOTA_WAIT_MS: 15 * 60_000,
 }));
 
 vi.mock('../../services/MeterService.js', () => ({
@@ -37,6 +49,7 @@ describe('processEmailJob', () => {
   beforeEach(async () => {
     const {project} = await factories.createUserWithProject();
     projectId = project.id;
+    vi.clearAllMocks();
     vi.mocked(sendRawEmail).mockReset();
     vi.mocked(sendRawEmail).mockResolvedValue({messageId: 'ses-message-1'});
   });
@@ -123,6 +136,121 @@ describe('processEmailJob', () => {
     const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
     expect(params.tags).toEqual({emailId: email.id, projectId, kind: 'email'});
     expect(Object.keys(params.headers ?? {}).filter(name => name.toLowerCase().startsWith('x-ses-'))).toEqual([]);
+  });
+
+  describe('what SES says about the whole account (Plunk Lite)', () => {
+    /** An error SES answered with, named as the SDK names it */
+    function refusal(name: string, message: string) {
+      return Object.assign(new Error(message), {name, $metadata: {httpStatusCode: 400}});
+    }
+    const failures = (sourceKey: string) => prisma.plunkLiteFailure.count({where: {projectId, sourceKey}});
+    const held = expect.objectContaining({message: 'bullmq:rateLimitExceeded'});
+
+    it('holds the queue back a second for the sending rate, without spending an attempt', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal('Throttling', 'Maximum sending rate exceeded.'));
+      const job = makeJob(email.id);
+
+      await expect(processEmailJob(job)).rejects.toEqual(held);
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.PENDING);
+      expect(holdSending).toHaveBeenCalledWith(1000);
+      expect(job.data.rateLimitedStarts).toBe(1);
+    });
+
+    it('holds the queue back a quarter of an hour for the daily quota, and says so', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal('Throttling', 'Daily message quota exceeded.'));
+
+      await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
+
+      expect(holdSending).toHaveBeenCalledWith(15 * 60_000);
+      expect(noteQuotaHeld).toHaveBeenCalled();
+      expect(await failures('ses:daily-quota')).toBe(1);
+    });
+
+    it('puts the email back to PENDING before anything else, so a failure there still lets it be sent', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal('Throttling', 'Maximum sending rate exceeded.'));
+      const job = makeJob(email.id);
+      job.updateData = vi.fn(async () => {
+        throw new Error('Redis is down');
+      });
+
+      await expect(processEmailJob(job)).rejects.toThrow('Redis is down');
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.PENDING);
+    });
+
+    it.each([
+      ['AccountSendingPausedException', 'Email sending is disabled for your entire Amazon SES account.'],
+      ['MessageRejected', 'Sending paused for this account. For more information, check the AWS console.'],
+    ])('pauses the queue when the account is paused (%s), and says so', async (name, message) => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal(name, message));
+
+      await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
+
+      expect(pauseSending).toHaveBeenCalledWith(message);
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.PENDING);
+      expect(await failures('ses:paused')).toBe(1);
+    });
+
+    it('takes many refusals at once, from several sender domains, for a paused account', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(refusal('MessageRejected', 'Some wording this code does not know'));
+      vi.mocked(manyRejections).mockResolvedValueOnce(true);
+
+      await expect(processEmailJob(makeJob(email.id))).rejects.toEqual(held);
+
+      expect(manyRejections).toHaveBeenCalledWith(expect.any(String), 'Some wording this code does not know');
+      expect(pauseSending).toHaveBeenCalled();
+    });
+
+    it('fails a refused email at once, without retries: a sandbox address that is not verified', async () => {
+      const campaign = await sendingCampaign();
+      const email = await pendingEmail({campaign});
+      vi.mocked(sendRawEmail).mockRejectedValue(
+        refusal('MessageRejected', 'Email address is not verified. The following identities failed the check'),
+      );
+
+      await expect(processEmailJob(makeJob(email.id, 0))).rejects.toBeInstanceOf(UnrecoverableError);
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.FAILED);
+      expect(pauseSending).not.toHaveBeenCalled();
+      expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.SENT);
+    });
+
+    it('fails an email whose configuration set is missing, with one alert for the installation', async () => {
+      const email = await pendingEmail();
+      vi.mocked(sendRawEmail).mockRejectedValue(
+        refusal('ConfigurationSetDoesNotExistException', 'Configuration set <plunk> does not exist.'),
+      );
+
+      await expect(processEmailJob(makeJob(email.id, 0))).rejects.toBeInstanceOf(UnrecoverableError);
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).status).toBe(EmailStatus.FAILED);
+      expect(await failures('ses:config-set')).toBe(1);
+    });
+
+    it('goes back to the usual retries once held back too long', async () => {
+      const throttled = await pendingEmail();
+      const paused = await pendingEmail();
+      vi.mocked(sendRawEmail)
+        .mockRejectedValueOnce(refusal('Throttling', 'Maximum sending rate exceeded.'))
+        .mockRejectedValueOnce(refusal('AccountSendingPausedException', 'Sending paused'));
+
+      await expect(processEmailJob(makeJob(throttled.id, 0, {rateLimitedStarts: 50}))).rejects.toThrow(
+        'Maximum sending rate exceeded.',
+      );
+      await expect(processEmailJob(makeJob(paused.id, 0, {heldSince: Date.now() - 49 * 60 * 60_000}))).rejects.toThrow(
+        'Sending paused',
+      );
+
+      expect(holdSending).not.toHaveBeenCalled();
+      expect(pauseSending).not.toHaveBeenCalled();
+      expect((await prisma.email.findUniqueOrThrow({where: {id: throttled.id}})).status).toBe(EmailStatus.PENDING);
+    });
   });
 
   describe('before SES accepts the email', () => {
@@ -247,6 +375,74 @@ describe('processEmailJob', () => {
       expect(row?.status).toBe(EmailStatus.SENT);
       expect(row?.messageId).toBe('ses-message-1');
       expect(sendRawEmail).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('rendering (Plunk Lite)', () => {
+    it('sends a campaign email as its batch rendered it, without rendering it again', async () => {
+      const campaign = await sendingCampaign();
+      const email = await pendingEmail({campaign});
+      // What a contact named "{{ email }}" leaves in a body its batch already rendered
+      await prisma.email.update({
+        where: {id: email.id},
+        data: {subject: 'Hi {{ email }}', body: '<p>Hi {{ email }}</p>'},
+      });
+
+      await processEmailJob(makeJob(email.id));
+
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      expect(params.content.subject).toBe('Hi {{ email }}');
+      expect(params.content.html).toContain('Hi {{ email }}');
+    });
+
+    it('still renders a transactional email at send time', async () => {
+      const email = await pendingEmail({sourceType: EmailSourceType.TRANSACTIONAL});
+      await prisma.email.update({where: {id: email.id}, data: {subject: 'Hi {{ email }}'}});
+
+      await processEmailJob(makeJob(email.id));
+
+      const [params] = vi.mocked(sendRawEmail).mock.calls[0]!;
+      const {email: address} = await prisma.contact.findUniqueOrThrow({where: {id: email.contactId}});
+      expect(params.content.subject).toBe(`Hi ${address}`);
+    });
+  });
+
+  describe('a workflow run cancelled after its email was queued (Plunk Lite)', () => {
+    /** A pending email of a run of a workflow, in `status` */
+    async function workflowEmail(status: WorkflowExecutionStatus, exitReason?: string) {
+      const email = await pendingEmail({sourceType: EmailSourceType.WORKFLOW});
+      const workflow = await factories.createWorkflow({projectId});
+      const execution = await prisma.workflowExecution.create({
+        data: {workflowId: workflow.id, contactId: email.contactId, status, exitReason},
+      });
+      await prisma.email.update({where: {id: email.id}, data: {workflowExecutionId: execution.id}});
+      return email;
+    }
+
+    it('does not send it, and says why', async () => {
+      const email = await workflowEmail(
+        WorkflowExecutionStatus.CANCELLED,
+        'Workflow disabled for its bounces or complaints',
+      );
+
+      await processEmailJob(makeJob(email.id));
+
+      const row = await prisma.email.findUniqueOrThrow({where: {id: email.id}});
+      expect(row).toMatchObject({status: EmailStatus.FAILED, error: 'Workflow disabled for its bounces or complaints'});
+      expect(sendRawEmail).not.toHaveBeenCalled();
+    });
+
+    it('still sends the email of a run that is running, or that failed later on', async () => {
+      const running = await workflowEmail(WorkflowExecutionStatus.RUNNING);
+      const failed = await workflowEmail(WorkflowExecutionStatus.FAILED);
+      vi.mocked(sendRawEmail)
+        .mockResolvedValueOnce({messageId: 'ses-running'})
+        .mockResolvedValueOnce({messageId: 'ses-failed'});
+
+      await processEmailJob(makeJob(running.id));
+      await processEmailJob(makeJob(failed.id));
+
+      expect(sendRawEmail).toHaveBeenCalledTimes(2);
     });
   });
 

@@ -58,7 +58,9 @@ const steps: SetupStep[] = [
   },
 ];
 
-function buildTrackSnippets(apiUrl: string, publicKey: string): CodeSnippet[] {
+// Plunk Lite: server code, so it uses the secret key -- /v1/track takes it, and a server can switch
+// the public key off (PLUNK_LITE_PUBLIC_TRACK=off)
+function buildTrackSnippets(apiUrl: string, secretKey: string): CodeSnippet[] {
   const body = {
     event: 'user.signed-up',
     email: 'user@example.com',
@@ -66,14 +68,14 @@ function buildTrackSnippets(apiUrl: string, publicKey: string): CodeSnippet[] {
   };
 
   const curl = `curl -X POST ${apiUrl}/v1/track \\
-  -H "Authorization: Bearer ${publicKey}" \\
+  -H "Authorization: Bearer ${secretKey}" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(body, null, 2).replace(/\n/g, '\n    ')}'`;
 
   const node = `await fetch("${apiUrl}/v1/track", {
   method: "POST",
   headers: {
-    Authorization: "Bearer ${publicKey}",
+    Authorization: "Bearer ${secretKey}",
     "Content-Type": "application/json",
   },
   body: JSON.stringify(${JSON.stringify(body, null, 2).replace(/\n/g, '\n  ')}),
@@ -83,7 +85,7 @@ function buildTrackSnippets(apiUrl: string, publicKey: string): CodeSnippet[] {
 
 requests.post(
     "${apiUrl}/v1/track",
-    headers={"Authorization": "Bearer ${publicKey}"},
+    headers={"Authorization": "Bearer ${secretKey}"},
     json=${JSON.stringify(body, null, 4).replace(/\n/g, '\n    ')},
 )`;
 
@@ -92,7 +94,7 @@ curl_setopt_array($ch, [
     CURLOPT_POST => true,
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_HTTPHEADER => [
-        "Authorization: Bearer ${publicKey}",
+        "Authorization: Bearer ${secretKey}",
         "Content-Type: application/json",
     ],
     CURLOPT_POSTFIELDS => json_encode(${JSON.stringify(body, null, 4).replace(/\n/g, '\n        ')}),
@@ -114,8 +116,8 @@ export default function OnboardingWorkflows() {
   const {path, setPath} = useOnboardingPath(activeProject?.id);
 
   const snippets = useMemo(
-    () => buildTrackSnippets(API_URI, activeProject?.public ?? 'pk_your_public_key'),
-    [activeProject?.public],
+    () => buildTrackSnippets(API_URI, activeProject?.secret ?? 'sk_your_secret_key'),
+    [activeProject?.secret],
   );
 
   useEffect(() => {
@@ -196,9 +198,10 @@ export default function OnboardingWorkflows() {
                     <div className="flex flex-col gap-3 border-t border-neutral-100 pt-4">
                       {activeProject ? (
                         <ApiKeyDisplay
-                          label="Public key"
-                          value={activeProject.public}
-                          description="Use this key to track events from browsers or clients."
+                          label="Secret key"
+                          value={activeProject.secret}
+                          description="Keep this server-side. Treat it like a password."
+                          isSecret
                         />
                       ) : (
                         <Skeleton className="h-16 rounded-lg" />

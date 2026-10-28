@@ -284,6 +284,19 @@ describe('WorkflowExecutionService - a delay with a step after it (Plunk Lite)',
     expect(await status(route.executionId)).toBe(WorkflowExecutionStatus.WAITING);
   });
 
+  it('leaves the run waiting, for the recovery sweep, when queueing the end of its delay fails', async () => {
+    vi.mocked(QueueService.queueWorkflowDelayEnd).mockRejectedValueOnce(new Error('redis down'));
+
+    const run = await createRun();
+    await expect(run.start()).rejects.toThrow('redis down');
+
+    expect(await outcome(run)).toEqual({status: WorkflowExecutionStatus.WAITING, emails: 0});
+    const delay = await prisma.workflowStepExecution.findFirstOrThrow({
+      where: {executionId: run.executionId, stepId: run.delayStepId},
+    });
+    expect(delay.status).toBe('COMPLETED');
+  });
+
   it('leaves alone a run an old job finds already moved on', async () => {
     const route = await createRoute(0);
     await route.endDelay();
