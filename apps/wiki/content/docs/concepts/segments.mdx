@@ -55,7 +55,7 @@ Programmatically, use:
 - `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`, the number of contacts that were in the segment and left it.
 - `segments` on `POST /v1/track` (with the secret key) and `POST /v1/send` — a list of up to 20 static segment ids the contact, or each recipient sent to, joins in the same call. With `/v1/track` the contact joins before the event is recorded, so the workflows the event starts see it in them. These are entries like the ones above, with their events.
 
-Both endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`.
+The two `/segments/:id/members` endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`; the `segments` field answers `422` for an id that is not a static segment of the project.
 
 Membership changes via these API calls are immediate. When the segment has **Track membership changes** enabled, they also fire the `entry` / `exit` events described below, a moment after the response: the events go through a background queue, one request at a time, and a restart resumes where it stopped. A request whose segment is deleted, or stops tracking, before its turn fires nothing. A request with many contacts and slow workflows (webhooks, for example) delays the requests queued after it.
 

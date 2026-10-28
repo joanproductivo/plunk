@@ -5,6 +5,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ZodError} from 'zod';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {prisma as servicePrisma} from '../../database/prisma.js';
 import {Actions} from '../../controllers/Actions.js';
 import {HttpException} from '../../exceptions/index.js';
 import {requireTrackKey} from '../../middleware/auth.js';
@@ -95,7 +96,8 @@ describe('segments on /v1/track and /v1/send', () => {
       const order: string[] = [];
       const trackEvent = EventService.trackEvent.bind(EventService);
       vi.spyOn(EventService, 'trackEvent').mockImplementation(async (...args) => {
-        order.push('event');
+        // The contact is already in both segments when its event is tracked
+        order.push(`event with ${(await members(first)).length + (await members(second)).length} memberships`);
         return trackEvent(...args);
       });
       vi.mocked(QueueService.queueSegmentMembershipEvents).mockImplementation(async () => {
@@ -113,7 +115,44 @@ describe('segments on /v1/track and /v1/send', () => {
       const contactId = outcome.body!.data.contact as string;
       expect(await members(first)).toEqual([{contactId}]);
       expect(await members(second)).toEqual([{contactId}]);
-      expect(order).toEqual(['event', 'entry', 'entry']);
+      expect(order).toEqual(['event with 2 memberships', 'entry', 'entry']);
+    });
+
+    it('skips a segment deleted after it was checked, and adds the contact to the others', async () => {
+      const resolve = SegmentMembershipService.resolveStaticSegments.bind(SegmentMembershipService);
+      vi.spyOn(SegmentMembershipService, 'resolveStaticSegments').mockImplementation(async (...args) => {
+        const segments = await resolve(...args);
+        await prisma.segment.delete({where: {id: first}});
+        return segments;
+      });
+
+      const outcome = await track(project.secret, {
+        event: 'signup',
+        email: 'ana@example.com',
+        segments: [first, second],
+      });
+
+      expect(outcome.status).toBe(200);
+      expect(await members(second)).toHaveLength(1);
+      expect(QueueService.queueSegmentMembershipEvents).toHaveBeenCalledTimes(1);
+    });
+
+    it('still queues the entry events of the segments written when a later one fails', async () => {
+      const create = servicePrisma.segmentMembership.createManyAndReturn.bind(servicePrisma.segmentMembership);
+      vi.spyOn(servicePrisma.segmentMembership, 'createManyAndReturn')
+        .mockImplementationOnce(create as never)
+        .mockRejectedValueOnce(new Error('database went away'));
+
+      const outcome = await track(project.secret, {
+        event: 'signup',
+        email: 'ana@example.com',
+        segments: [first, second],
+      });
+
+      expect(outcome.status).toBe(500);
+      expect(await members(first)).toHaveLength(1);
+      expect(QueueService.queueSegmentMembershipEvents).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(QueueService.queueSegmentMembershipEvents).mock.calls[0]![0]).toMatchObject({segmentId: first});
     });
 
     it('refuses segments with the public key, and writes nothing', async () => {

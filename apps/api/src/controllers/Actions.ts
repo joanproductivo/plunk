@@ -70,7 +70,7 @@ export class Actions {
     // Plunk Lite: static segments to add the contact to, only with the secret key -- anyone can read
     // the public key in a page, and would add any address to any segment and start its workflows.
     // All of them are checked before anything is written.
-    if (segmentIds.length > 0 && auth.key === 'public') {
+    if (segmentIds.length > 0 && auth.key !== 'secret') {
       throw new NotAllowed('Adding contacts to segments needs the secret key (sk_*): call /v1/track from your server.');
     }
     const segments = await SegmentMembershipService.resolveStaticSegments(auth.projectId, segmentIds);
@@ -91,21 +91,25 @@ export class Actions {
     );
 
     // Plunk Lite: into its segments before the event, so the workflows the event starts see it there
-    const entries = await SegmentMembershipService.enterSegments(segments, [contact.id]);
+    const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, [contact.id]);
 
     // Track the event with ALL data (persistent + non-persistent)
     // Non-persistent data flows to workflows via execution context
-    const eventRecord = await EventService.trackEvent(
-      auth.projectId,
-      event,
-      contact.id,
-      undefined,
-      data as Record<string, unknown> | undefined,
-    );
-
-    // Plunk Lite: the segments' entry events after the event, so a workflow they start that waits
-    // for this very event never sees it happen first
-    await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+    let eventRecord;
+    try {
+      eventRecord = await EventService.trackEvent(
+        auth.projectId,
+        event,
+        contact.id,
+        undefined,
+        data as Record<string, unknown> | undefined,
+      );
+    } finally {
+      // Plunk Lite: the segments' entry events after the event, so a workflow they start that waits
+      // for this very event never sees it happen first -- and also when it failed, as the contact
+      // is in the segments already
+      await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+    }
 
     return res.status(200).json({
       success: true,
@@ -151,6 +155,8 @@ export class Actions {
    * - data: object with emails array and timestamp
    *   - failed (Plunk Lite): recipients that could not be sent, as {email, code, message}, when
    *     some were; the status is then 207. A request that sent nothing answers with the error.
+   *   - segmentsError (Plunk Lite): when adding the recipients sent to to `segments` failed after
+   *     their emails were queued
    *
    * Examples:
    *
@@ -433,13 +439,10 @@ export class Actions {
     let segmentsError: string | undefined;
     if (segments.length > 0 && sentContactIds.length > 0) {
       try {
-        const entries = await SegmentMembershipService.enterSegments(segments, sentContactIds);
+        const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, sentContactIds);
         await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
       } catch (error) {
-        segmentsError =
-          error instanceof HttpException
-            ? error.message
-            : 'The emails were queued, but adding their contacts to the segments failed';
+        segmentsError = 'The emails were queued, but adding their contacts to some of the segments failed';
         logger.error('Could not add the recipients of /v1/send to its segments', error, {}, res);
       }
     }

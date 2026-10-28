@@ -122,10 +122,12 @@ export class SegmentMembershipService {
   /**
    * Plunk Lite: add contacts of the project (as the request just wrote them) to segments already
    * resolved, each as an entry, a current member included (D1). Returns who entered each one; the
-   * caller fires the entry events with `fireEntryEvents` when it suits its order. A segment deleted
-   * since it was resolved is skipped.
+   * caller fires the entry events with `fireEntryEvents` when it suits its order. A segment (or a
+   * contact) deleted since it was resolved is skipped. If a write fails, the entries already
+   * written get their events before the error is passed on.
    */
   public static async enterSegments(
+    projectId: string,
     segments: Segment[],
     contactIds: string[],
   ): Promise<{segment: Segment; entered: string[]}[]> {
@@ -138,9 +140,12 @@ export class SegmentMembershipService {
         const gone =
           error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2003' || error.code === 'P2025');
         if (!gone) {
+          await this.fireEntryEvents(projectId, entries);
           throw error;
         }
-        signale.warn(`[SEGMENTS] Segment ${segment.id} was deleted before its contacts were added; skipping it`);
+        signale.warn(
+          `[SEGMENTS] Segment ${segment.id}, or a contact being added, was deleted before the contacts were added; skipping it`,
+        );
       }
     }
     return entries;

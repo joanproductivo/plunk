@@ -708,7 +708,10 @@
                   },
                   "segments": {
                     "type": "array",
-                    "items": {"type": "string", "format": "uuid"},
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
                     "maxItems": 20,
                     "description": "Static segments to add each recipient that is sent to, by id (up to 20). Checked before anything is sent: an id that is not a static segment of the project answers `422`. A recipient whose email is refused is not added. Adding a current member counts as a new entry: with **Track membership changes** on, the segment's `entry` event fires again. If adding fails after the emails were queued, the answer carries `segmentsError` instead of an error, so a retry does not send them again."
                   },
@@ -1042,9 +1045,12 @@
                   },
                   "segments": {
                     "type": "array",
-                    "items": {"type": "string", "format": "uuid"},
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
                     "maxItems": 20,
-                    "description": "Static segments to add the contact to, by id (up to 20). **Secret key only**: with the public key the request is refused with `403`. Checked before anything is written: an id that is not a static segment of the project answers `422`. The contact joins them before the event is recorded, so the workflows the event starts see it in them; their `entry` events (with **Track membership changes** on) fire after it. Adding a current member counts as a new entry, so repeating the call fires the entry again \u2014 send an `Idempotency-Key` to refuse a repeat."
+                    "description": "Static segments to add the contact to, by id (up to 20). **Secret key only**: with the public key the request is refused with `403`. Checked before anything is written: an id that is not a static segment of the project answers `422`. The contact joins them before the event is recorded, so the workflows the event starts see it in them; their `entry` events (with **Track membership changes** on) fire after it. Adding a current member counts as a new entry, so repeating the call fires the entry again — send an `Idempotency-Key` to refuse a repeat."
                   },
                   "subscribed": {
                     "type": "boolean",

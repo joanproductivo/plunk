@@ -115,6 +115,8 @@ Not every failed request burns the key.
 
 If a `5xx` burns a key for a request you're confident never went through, retry with a new key.
 
+A request with `segments` (on `/v1/track` or `/v1/send`) checks the segments before writing anything, so a `4xx` for them leaves nothing behind. A `5xx` on `/v1/track` can leave the contact already in its segments: retrying with a new key adds it again, which counts as a new entry.
+
 ## Scope and expiry
 
 Keys are scoped to your **project**, not to an endpoint. A key used on `/v1/track` cannot be reused on `/v1/send`. Two different projects can use the same key string independently.
