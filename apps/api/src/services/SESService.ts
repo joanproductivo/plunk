@@ -21,8 +21,8 @@ import {
   htmlToPlainText,
 } from '../utils/mime.js';
 
-const SES_CLIENT_CONFIG = {
-  apiVersion: '2010-12-01',
+/** The region and credentials of every AWS client: SES's, as the rest of the account is reached with them */
+export const AWS_CLIENT_CONFIG = {
   region: AWS_SES_REGION,
   credentials: {
     accessKeyId: AWS_SES_ACCESS_KEY_ID,
@@ -30,13 +30,15 @@ const SES_CLIENT_CONFIG = {
   },
 };
 
+const SES_CLIENT_CONFIG = {apiVersion: '2010-12-01', ...AWS_CLIENT_CONFIG};
+
 /**
  * Timeouts for every SES request. The SDK sets none by default, and without
  * `throwOnRequestTimeout` a request past its `requestTimeout` only logs a warning, so a hung
  * connection held a worker slot for good. The request timeout stays under the worker's
  * shutdown timeout, so a send cut short by a deploy is settled before the process exits.
  */
-const SES_HTTP_OPTIONS = {connectionTimeout: 5_000, requestTimeout: 15_000, throwOnRequestTimeout: true};
+export const SES_HTTP_OPTIONS = {connectionTimeout: 5_000, requestTimeout: 15_000, throwOnRequestTimeout: true};
 
 /** Ceiling on a whole send, under the worker's shutdown timeout like the request timeout */
 const SEND_TIMEOUT_MS = 20_000;
@@ -161,15 +163,10 @@ export function configurationSetFor(tracking: boolean): string | undefined {
 }
 
 /**
- * AWS STS Client, used only to look up the account the SES credentials belong to
+ * AWS STS Client, used only to look up the account the SES credentials belong to. With SES's
+ * timeouts: a lookup that hangs held up whatever waited on it, the checks every 15 minutes among them.
  */
-const sts = new STS({
-  region: AWS_SES_REGION,
-  credentials: {
-    accessKeyId: AWS_SES_ACCESS_KEY_ID,
-    secretAccessKey: AWS_SES_SECRET_ACCESS_KEY,
-  },
-});
+const sts = new STS({...AWS_CLIENT_CONFIG, requestHandler: SES_HTTP_OPTIONS});
 
 let awsAccountId: Promise<string> | undefined;
 
@@ -598,12 +595,7 @@ export async function getDailyQuotaQuick(): Promise<{max24HourSend: number; sent
  * Plunk Lite: SES API v2, only to read the account's status. One attempt, like the send client: the
  * question is asked again soon enough.
  */
-const sesv2 = new SESv2({
-  region: AWS_SES_REGION,
-  credentials: SES_CLIENT_CONFIG.credentials,
-  maxAttempts: 1,
-  requestHandler: SES_HTTP_OPTIONS,
-});
+const sesv2 = new SESv2({...AWS_CLIENT_CONFIG, maxAttempts: 1, requestHandler: SES_HTTP_OPTIONS});
 
 /**
  * Plunk Lite: whether the account is paused, from GetAccount (SES API v2): 'paused' when SES has

@@ -73,6 +73,9 @@ process.env.PLUNK_LITE_VERIFY_SIGNUPS = 'false';
 // send go on). A test that wants an answer stands in for SES itself.
 process.env.AWS_ENDPOINT_URL_SES = 'http://127.0.0.1:1';
 process.env.AWS_ENDPOINT_URL_SESV2 = 'http://127.0.0.1:1';
+// And STS and SQS, which the checks every 15 minutes reach for the dead-letter queue of SES events
+process.env.AWS_ENDPOINT_URL_STS = 'http://127.0.0.1:1';
+process.env.AWS_ENDPOINT_URL_SQS = 'http://127.0.0.1:1';
 
 // Static import is safe: database.ts only reads env in initialize(), which runs
 // in beforeAll — well after the env mutations above.

@@ -83,7 +83,7 @@ export interface SecurityCheckJobData {
  */
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface SnsHealthJobData {
-  // Empty - checks the recent emails of every project
+  // Empty - checks the recent emails of every project, and the dead-letter queue of SES events
 }
 
 /**
@@ -103,6 +103,16 @@ export interface RedisMemoryJobData {
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface WorkflowRecoveryJobData {
   // Empty - looks at the RUNNING and WAITING runs of every project
+}
+
+/**
+ * Job data for draining the dead-letter queue of SES events: what SNS could not deliver to the
+ * webhook, taken back and handled by it (Plunk Lite)
+ * Used by: plunkLiteDlqQueue worker, job `dlq-drain`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface DlqDrainJobData {
+  // Empty - reads the queue of the installation's AWS account
 }
 
 /**

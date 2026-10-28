@@ -21,6 +21,7 @@ import {createCardVerificationWorker} from './card-verification-processor.js';
 import {createCampaignStatsSweepWorker} from './campaign-stats-sweep-processor.js';
 import {createSnoozeSweepWorker} from './snooze-sweep-processor.js';
 import {createCardVerificationSweepWorker} from './card-verification-sweep-processor.js';
+import {createDlqWorker} from './dlq-processor.js';
 import {createDomainVerificationWorker} from './domain-verification-processor.js';
 import {createEmailBodyCleanupWorker} from './email-body-cleanup-processor.js';
 import {createEmailRecoverySweepWorker} from './email-recovery-sweep-processor.js';
@@ -144,6 +145,11 @@ async function startWorkers() {
     const plunkLiteChecksWorker = createPlunkLiteChecksWorker();
     workers.push({name: 'plunk-lite-checks', worker: plunkLiteChecksWorker});
     signale.success('[WORKER] Plunk Lite checks worker started');
+
+    // Start Plunk Lite's drain of the dead-letter queue of SES events
+    const dlqWorker = createDlqWorker();
+    workers.push({name: 'plunk-lite-dlq', worker: dlqWorker});
+    signale.success('[WORKER] Dead-letter queue worker started');
 
     signale.success('[WORKER] All workers started successfully');
 

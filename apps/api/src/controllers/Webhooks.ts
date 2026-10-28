@@ -48,11 +48,14 @@ import {
   reportSubscriptionRemoved,
   reportUnreadable,
   sentAddress,
+  sesEventTime,
+  subscribedAgainSince,
   suppressUnmatched,
 } from '../services/SesEventMatch.js';
 import {SnsMessages} from '../services/SnsMessages.js';
 import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
+import {isDlqReplay} from '../services/dlqConstants.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {SES_EVENT_TRANSACTION} from '../utils/database.js';
 
@@ -128,6 +131,8 @@ export class Webhooks {
   public async receiveSNSWebhook(req: Request, res: Response) {
     // The SNS message this request claimed, settled once it is answered (see SnsMessages)
     let claimedMessage: string | undefined;
+    // Plunk Lite: handed over by the drain of the dead-letter queue, days late perhaps
+    const replayed = isDlqReplay(req);
     try {
       // Verify SNS message signature before processing anything
       const signature = await SnsSignature.verify(req.body as Record<string, string>);
@@ -142,7 +147,10 @@ export class Webhooks {
         // until someone notices that no engagement has been recorded for days. Every event
         // for every project drops here, and nothing else in the system counts the misses.
         signale.error('[WEBHOOK] SNS signature verification failed — request rejected. All SES events are being dropped.');
-        await noteSnsRejection('signature');
+        // A message taken back from the dead-letter queue says nothing of what SNS delivers now
+        if (!replayed) {
+          await noteSnsRejection('signature');
+        }
         return res.status(403).json({success: false, message: 'Invalid SNS signature'});
       }
 
@@ -156,7 +164,9 @@ export class Webhooks {
       }
       if (topicOrigin === 'foreign') {
         signale.warn(`[WEBHOOK] SNS message rejected — topic is not in this AWS account: ${String(req.body.TopicArn)}`);
-        await noteSnsRejection('topic');
+        if (!replayed) {
+          await noteSnsRejection('topic');
+        }
         return res.status(403).json({success: false, message: 'Untrusted SNS topic'});
       }
 
@@ -644,6 +654,13 @@ export class Webhooks {
           return res.status(200).json({success: true});
       }
 
+      // Plunk Lite: an event taken back from the dead-letter queue says so, and when it happened:
+      // what it records is stamped now, as if SNS had delivered it late
+      const occurredAt = replayed ? sesEventTime(eventType, body) : undefined;
+      if (replayed) {
+        eventData = {...eventData, recoveredFromDlq: true, occurredAt: occurredAt?.toISOString()};
+      }
+
       // The addresses a bounce or complaint is about. The contact is only unsubscribed -- and
       // the event only tracked against them -- when the email went to them: a workflow email sent
       // to a custom recipient bounces for that recipient, not the contact, and that address is
@@ -683,6 +700,19 @@ export class Webhooks {
           return res.status(claim === 'seen' ? 200 : 503).json({success: claim === 'seen'});
         }
         claimedMessage = snsMessageId;
+      }
+
+      // Plunk Lite: a complaint taken back from the dead-letter queue, of a contact who subscribed
+      // again after making it and still is, keeps them subscribed: that later choice stands. The
+      // address is still suppressed, which keeps mail from it.
+      const keptSubscribed =
+        replayed &&
+        eventType === 'Complaint' &&
+        contactIsAffected &&
+        email.contact.subscribed &&
+        (await subscribedAgainSince(email.contactId, occurredAt));
+      if (keptSubscribed) {
+        eventData = {...eventData, keptSubscribed: true};
       }
 
       // Whether this copy of the event is the one that records it. SNS is at-least-once, so the
@@ -725,7 +755,7 @@ export class Webhooks {
             // Only the copy that records the event unsubscribes: an old bounce delivered again --
             // from the dead-letter queue, say -- must not unsubscribe a contact who has since
             // subscribed again
-            if (isNew && contactIsAffected) {
+            if (isNew && contactIsAffected && !keptSubscribed) {
               // A contact already off the list -- unsubscribed by hand, or by an earlier bounce -- is
               // left alone. A snoozed one is coming back, so a bounce or complaint ends the snooze
               // for good, and is their unsubscribe.
@@ -867,7 +897,7 @@ export class Webhooks {
       }
 
       signale.success(`[WEBHOOK] Processed ${eventType} event for email ${email.id}`);
-      return res.status(200).json({success: true});
+      return res.status(200).json({success: true, ...(keptSubscribed && {keptSubscribed: true})});
     } catch (error) {
       signale.error('[WEBHOOK] Error processing SNS webhook:', error);
       // 500 makes SNS deliver the notification again. Everything that reaches here failed
