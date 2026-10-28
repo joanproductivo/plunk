@@ -14,6 +14,9 @@ A `/v1/send` request can be at most 10 MB, so attachments, which travel base64-e
 ## Sending from a template
 You can also send transactional emails using a [template](/concepts/templates) you have created in the dashboard. This allows you to reuse the same design and content for multiple emails, while still personalizing them with contact data.
 
+## Adding recipients to segments
+Pass `segments`, a list of up to 20 static segment ids, and every recipient an email is created for joins them in the same call — for example, the people a signup form sends a welcome email to. The ids are checked before anything is sent, so one that is not a static segment of the project answers `422`. A recipient whose email is refused is not added. Adding a current member counts as a new entry, which fires the segment's `entry` event again when it tracks membership. See [Segments](/concepts/segments).
+
 ## What's next
 
 <Cards>

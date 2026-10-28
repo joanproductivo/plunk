@@ -706,6 +706,15 @@
                     "type": "string",
                     "description": "**Deprecated.** Sender display name. Prefer `from: { name, email }`. Used only as a fallback when `from` is a string and no name is set there."
                   },
+                  "segments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "maxItems": 20,
+                    "description": "Static segments to add each recipient that is sent to, by id (up to 20). Checked before anything is sent: an id that is not a static segment of the project answers `422`. A recipient whose email is refused is not added. Adding a current member counts as a new entry: with **Track membership changes** on, the segment's `entry` event fires again. If adding fails after the emails were queued, the answer carries `segmentsError` instead of an error, so a retry does not send them again."
+                  },
                   "subscribed": {
                     "type": "boolean",
                     "description": "Subscription state to apply to the recipient. For **new** contacts, defaults to `false` on `/v1/send`. For **existing** contacts, omitting this preserves their current state — pass `true` or `false` to explicitly change it. A change emits `contact.subscribed` or `contact.unsubscribed`."
@@ -1034,6 +1043,15 @@
                     "type": "string",
                     "description": "Event name. Cannot match the reserved patterns above."
                   },
+                  "segments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "maxItems": 20,
+                    "description": "Static segments to add the contact to, by id (up to 20). **Secret key only**: with the public key the request is refused with `403`. Checked before anything is written: an id that is not a static segment of the project answers `422`. The contact joins them before the event is recorded, so the workflows the event starts see it in them; their `entry` events (with **Track membership changes** on) fire after it. Adding a current member counts as a new entry, so repeating the call fires the entry again — send an `Idempotency-Key` to refuse a repeat."
+                  },
                   "subscribed": {
                     "type": "boolean",
                     "description": "Subscription state to apply to the contact. **New** contacts default to subscribed (`true`). **Existing** contacts keep their current state unless you pass an explicit value here. Pass `false` to track an event without resubscribing an unsubscribed contact."
@@ -1093,7 +1111,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "description": "The public key is switched off on this server (`PLUNK_LITE_PUBLIC_TRACK=off`): call it from a server with the secret key. Or the project is disabled.",
+            "description": "The public key is switched off on this server (`PLUNK_LITE_PUBLIC_TRACK=off`), or was sent with `segments`: call it from a server with the secret key. Or the project is disabled.",
             "content": {
               "application/json": {
                 "schema": {

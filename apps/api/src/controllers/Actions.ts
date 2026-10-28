@@ -10,7 +10,8 @@ import {DomainService} from '../services/DomainService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EmailVerificationService} from '../services/EmailVerificationService.js';
 import {EventService} from '../services/EventService.js';
-import {describeError, HttpException, NotFound, ValidationError} from '../exceptions/index.js';
+import {SegmentMembershipService} from '../services/SegmentMembershipService.js';
+import {describeError, HttpException, NotAllowed, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {logger} from '../utils/logger.js';
 import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
@@ -36,6 +37,7 @@ export class Actions {
    * - data: object (optional) - Event and contact data
    *   - Simple values are saved to contact (persistent)
    *   - {value: any, persistent: false} are only available to workflows (non-persistent)
+   * - segments: string[] (optional, Plunk Lite) - Static segments the contact joins, by id; secret key only
    *
    * Response:
    * - success: boolean
@@ -60,10 +62,18 @@ export class Actions {
     const auth = res.locals.auth;
 
     // Zod validation - errors automatically handled by global error handler
-    const {event, email, subscribed, data} = ActionSchemas.track.parse(req.body);
+    const {event, email, subscribed, data, segments: segmentIds = []} = ActionSchemas.track.parse(req.body);
 
     // Prevent manual tracking of reserved system events
     EventService.assertTrackable(event, 'event');
+
+    // Plunk Lite: static segments to add the contact to, only with the secret key -- anyone can read
+    // the public key in a page, and would add any address to any segment and start its workflows.
+    // All of them are checked before anything is written.
+    if (segmentIds.length > 0 && auth.key !== 'secret') {
+      throw new NotAllowed('Adding contacts to segments needs the secret key (sk_*): call /v1/track from your server.');
+    }
+    const segments = await SegmentMembershipService.resolveStaticSegments(auth.projectId, segmentIds);
 
     // Create or update contact with persistent data only
     // ContactService.upsert will filter out non-persistent fields
@@ -80,15 +90,26 @@ export class Actions {
       {verifySignup: true},
     );
 
+    // Plunk Lite: into its segments before the event, so the workflows the event starts see it there
+    const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, [contact.id]);
+
     // Track the event with ALL data (persistent + non-persistent)
     // Non-persistent data flows to workflows via execution context
-    const eventRecord = await EventService.trackEvent(
-      auth.projectId,
-      event,
-      contact.id,
-      undefined,
-      data as Record<string, unknown> | undefined,
-    );
+    let eventRecord;
+    try {
+      eventRecord = await EventService.trackEvent(
+        auth.projectId,
+        event,
+        contact.id,
+        undefined,
+        data as Record<string, unknown> | undefined,
+      );
+    } finally {
+      // Plunk Lite: the segments' entry events after the event, so a workflow they start that waits
+      // for this very event never sees it happen first -- and also when it failed, as the contact
+      // is in the segments already
+      await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+    }
 
     return res.status(200).json({
       success: true,
@@ -123,6 +144,7 @@ export class Actions {
    * - data: object (optional) - Contact data and template variables
    *   - Simple values are saved to contact (persistent)
    *   - {value: any, persistent: false} are only used for this email (non-persistent)
+   * - segments: string[] (optional, Plunk Lite) - Static segments each recipient sent to joins, by id
    * - attachments: array (optional) - Email attachments (configurable via MAX_ATTACHMENTS_COUNT / MAX_ATTACHMENT_SIZE_MB, defaults: 10 / 10MB)
    *   - filename: string (required) - Attachment filename
    *   - content: string (required) - Base64 encoded file content
@@ -133,6 +155,8 @@ export class Actions {
    * - data: object with emails array and timestamp
    *   - failed (Plunk Lite): recipients that could not be sent, as {email, code, message}, when
    *     some were; the status is then 207. A request that sent nothing answers with the error.
+   *   - segmentsError (Plunk Lite): when adding the recipients sent to to `segments` failed after
+   *     their emails were queued
    *
    * Examples:
    *
@@ -181,8 +205,23 @@ export class Actions {
     const auth = res.locals.auth;
 
     // Zod validation - errors automatically handled by global error handler
-    const {to, subject, body, subscribed, name, from, reply, headers, data, template, attachments} =
-      ActionSchemas.send.parse(req.body);
+    const {
+      to,
+      subject,
+      body,
+      subscribed,
+      name,
+      from,
+      reply,
+      headers,
+      data,
+      template,
+      attachments,
+      segments: segmentIds = [],
+    } = ActionSchemas.send.parse(req.body);
+
+    // Plunk Lite: the static segments each recipient sent to joins, all checked before anything else
+    const segments = await SegmentMembershipService.resolveStaticSegments(auth.projectId, segmentIds);
 
     // Inline subject/body are templates too, but they are deliberately NOT syntax
     // checked here. Transactional bodies are generated by whatever system calls us —
@@ -274,6 +313,8 @@ export class Actions {
     const emailResults = [];
     // Plunk Lite: one recipient's failure no longer drops the ones after it
     const failed: {email: string; code: string; message: string; suggestedEmail?: string}[] = [];
+    // Plunk Lite: the contacts of the emails created, which join the request's segments
+    const sentContactIds: string[] = [];
     let firstClientError: unknown;
     let firstServerError: unknown;
 
@@ -352,6 +393,7 @@ export class Actions {
           },
           email: email.id,
         });
+        sentContactIds.push(contact.id);
       } catch (error) {
         const {status, code, message} = describeError(error);
         // An address refused at sign-up comes with its likely correction, kept out of the message
@@ -392,6 +434,19 @@ export class Actions {
       );
     }
 
+    // Plunk Lite: the recipients sent to join the segments, all at once. Their emails are queued, so
+    // a failure here is told in the answer, not as an error a retry would answer by sending again.
+    let segmentsError: string | undefined;
+    if (segments.length > 0 && sentContactIds.length > 0) {
+      try {
+        const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, sentContactIds);
+        await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+      } catch (error) {
+        segmentsError = 'The emails were queued, but adding their contacts to some of the segments failed';
+        logger.error('Could not add the recipients of /v1/send to its segments', error, {}, res);
+      }
+    }
+
     // Plunk Lite: a partial send is 207, with the recipients that failed; still 2xx, so its
     // idempotency key stays claimed and a blind retry cannot send the others twice
     return res.status(failed.length > 0 ? 207 : 200).json({
@@ -399,6 +454,7 @@ export class Actions {
       data: {
         emails: emailResults,
         ...(failed.length > 0 ? {failed} : {}),
+        ...(segmentsError ? {segmentsError} : {}),
         timestamp: timestamp.toISOString(),
       },
     });

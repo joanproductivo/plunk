@@ -3,7 +3,12 @@ import type {FilterCondition, FilterGroup} from '@plunk/types';
 import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
 
-import {SEGMENT_MEMBERS_MAX, SEGMENTS_BULK_MAX, WORKFLOW_SEGMENT_CHANGES_MAX} from '../segments.js';
+import {
+  REQUEST_SEGMENTS_MAX,
+  SEGMENT_MEMBERS_MAX,
+  SEGMENTS_BULK_MAX,
+  WORKFLOW_SEGMENT_CHANGES_MAX,
+} from '../segments.js';
 import type {ProjectBrand} from '../template/brand.js';
 import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
@@ -571,6 +576,9 @@ export const CampaignSchemas = {
   }),
 } as const;
 
+/** Plunk Lite: the static segments a /v1 request adds its contacts to, by id; none when empty */
+const requestSegments = z.array(uuid).max(REQUEST_SEGMENTS_MAX).optional();
+
 export const ActionSchemas = {
   track: z.object({
     event: z
@@ -583,6 +591,8 @@ export const ActionSchemas = {
     email,
     subscribed: z.boolean().optional(),
     data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+    /** Plunk Lite: static segments to add the contact to, by id (secret key only) */
+    segments: requestSegments,
   }),
   send: z
     .object({
@@ -643,6 +653,8 @@ export const ActionSchemas = {
         )
         .optional(),
       data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+      /** Plunk Lite: static segments to add each recipient sent to to, by id */
+      segments: requestSegments,
       attachments: z
         .array(
           z.object({

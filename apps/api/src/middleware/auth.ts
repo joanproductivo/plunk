@@ -166,6 +166,7 @@ export const requirePublicKey = async (req: Request, res: Response, next: NextFu
     res.locals.auth = {
       type: 'apiKey',
       projectId: project.id,
+      key: 'public',
     };
 
     // Check if project is disabled - block write operations
@@ -229,6 +230,7 @@ export const requireSecretKey = async (req: Request, res: Response, next: NextFu
     res.locals.auth = {
       type: 'apiKey',
       projectId: project.id,
+      key: 'secret',
     };
 
     // Check if project is disabled - block write operations
@@ -278,6 +280,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       res.locals.auth = {
         type: 'apiKey',
         projectId: project.id,
+        key: 'secret',
       } as AuthResponse;
 
       // Check if project is disabled - block write operations

@@ -15,6 +15,9 @@ export interface AuthResponse {
 
 	/** Project ID associated with this request */
 	projectId: string;
+
+	/** Plunk Lite: which API key authenticated it (only for `apiKey`) */
+	key?: 'public' | 'secret';
 }
 
 /**

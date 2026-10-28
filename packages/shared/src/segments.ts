@@ -28,5 +28,8 @@ export function segmentEventName(segmentName: string, kind: SegmentEventKind): s
   return `segment.${slugifySegmentName(segmentName)}.${kind}`;
 }
 
+/** Plunk Lite: most static segments one /v1/track or /v1/send call adds its contacts to */
+export const REQUEST_SEGMENTS_MAX = 20;
+
 /** Most segments one Update contact workflow step adds to, and removes from, each */
 export const WORKFLOW_SEGMENT_CHANGES_MAX = 20;
