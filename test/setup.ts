@@ -72,6 +72,7 @@ process.env.PLUNK_LITE_VERIFY_SIGNUPS = 'false';
 // unmocked: a call fails at once, as with SES down (a campaign's quota check, for one, then lets the
 // send go on). A test that wants an answer stands in for SES itself.
 process.env.AWS_ENDPOINT_URL_SES = 'http://127.0.0.1:1';
+process.env.AWS_ENDPOINT_URL_SESV2 = 'http://127.0.0.1:1';
 
 // Static import is safe: database.ts only reads env in initialize(), which runs
 // in beforeAll — well after the env mutations above.

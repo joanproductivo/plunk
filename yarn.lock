@@ -215,7 +215,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@aws-sdk/client-sesv2@npm:^3.839.0":
+"@aws-sdk/client-sesv2@npm:3.950.0, @aws-sdk/client-sesv2@npm:^3.839.0":
   version: 3.950.0
   resolution: "@aws-sdk/client-sesv2@npm:3.950.0"
   dependencies:
@@ -8227,6 +8227,7 @@ __metadata:
   dependencies:
     "@aws-sdk/client-s3": "npm:^3.937.0"
     "@aws-sdk/client-ses": "npm:^3.937.0"
+    "@aws-sdk/client-sesv2": "npm:3.950.0"
     "@aws-sdk/client-sts": "npm:3.948.0"
     "@overnightjs/core": "npm:^1.7.6"
     "@plunk/db": "npm:*"
