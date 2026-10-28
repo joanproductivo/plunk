@@ -102,6 +102,63 @@ export function safeToRetrySend(error: unknown): boolean {
   );
 }
 
+/** Plunk Lite: what a refusal from SES calls for */
+export type SesRefusal = 'rate' | 'daily-quota' | 'account-paused' | 'config-set' | 'rejected' | 'other';
+
+/**
+ * How SES words a pause of the whole account. A pause AWS imposes for reputation may come as a
+ * MessageRejected with this text rather than as AccountSendingPausedException; never matches a
+ * sandbox's "Email address is not verified".
+ */
+const ACCOUNT_PAUSED_MESSAGE = /account is paused|sending paused|sending is paused|sending suspended/i;
+
+/** Refusals about the email itself or its sender, which a retry would only repeat */
+const REJECTED_NAMES = new Set([
+  'MessageRejected',
+  'InvalidParameterValue',
+  'MailFromDomainNotVerifiedException',
+  'FromEmailAddressNotVerifiedException',
+]);
+
+/**
+ * Plunk Lite: sort an error SES answered a send with. Only an answer from SES (an HTTP error status)
+ * is sorted; anything else is 'other', as is any refusal not known here, which keeps today's
+ * retries. `mainConfigurationSet` says whether the email went through SES_CONFIGURATION_SET: a
+ * pause of that one stops every send, a pause or loss of the no-tracking one only its emails.
+ */
+export function classifySesRefusal(
+  error: unknown,
+  {mainConfigurationSet}: {mainConfigurationSet: boolean},
+): SesRefusal {
+  const failure = error as {$metadata?: {httpStatusCode?: unknown}; name?: unknown; message?: unknown};
+  const status = failure?.$metadata?.httpStatusCode;
+  if (typeof status !== 'number' || status < 400) {
+    return 'other';
+  }
+  const name = typeof failure.name === 'string' ? failure.name : '';
+  const message = typeof failure.message === 'string' ? failure.message : '';
+
+  if (name === 'Throttling' || name === 'ThrottlingException') {
+    return /daily message quota/i.test(message) ? 'daily-quota' : 'rate';
+  }
+  // By name first: a configuration set's pause is worded like the account's
+  if (name === 'ConfigurationSetSendingPausedException') {
+    return mainConfigurationSet ? 'account-paused' : 'config-set';
+  }
+  if (name === 'ConfigurationSetDoesNotExistException') {
+    return 'config-set';
+  }
+  if (name === 'AccountSendingPausedException' || ACCOUNT_PAUSED_MESSAGE.test(message)) {
+    return 'account-paused';
+  }
+  return REJECTED_NAMES.has(name) ? 'rejected' : 'other';
+}
+
+/** The configuration set an email goes through: the no-tracking one only for an untracked email */
+export function configurationSetFor(tracking: boolean): string | undefined {
+  return TRACKING_TOGGLE_ENABLED && !tracking ? SES_CONFIGURATION_SET_NO_TRACKING : SES_CONFIGURATION_SET;
+}
+
 /**
  * AWS STS Client, used only to look up the account the SES credentials belong to
  */
@@ -339,8 +396,7 @@ ${breakLongLines(attachment.content, 76)}`;
 
   // Determine which configuration set to use
   // Only use NO_TRACKING if tracking toggle is enabled AND tracking is disabled
-  const configurationSetName =
-    TRACKING_TOGGLE_ENABLED && !tracking ? SES_CONFIGURATION_SET_NO_TRACKING : SES_CONFIGURATION_SET;
+  const configurationSetName = configurationSetFor(tracking);
 
   // Send via SES
   const response = await sesSend.sendRawEmail(

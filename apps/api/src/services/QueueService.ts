@@ -913,7 +913,8 @@ export class QueueService {
   }
 
   /**
-   * Pause all queues (for maintenance)
+   * Pause all queues (for maintenance). Plunk Lite: the email queue's pause lasts at most until the
+   * recovery sweep's probe resumes it, 5 minutes later (SesSendGate.resumeSendingIfDue)
    */
   public static async pauseAll(): Promise<void> {
     await Promise.all([

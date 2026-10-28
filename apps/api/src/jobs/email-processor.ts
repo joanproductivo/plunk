@@ -23,6 +23,7 @@ import {
   EMAIL_RATE_LIMIT_PER_SECOND,
   EMAIL_WORKER_CONCURRENCY,
   EMAIL_WORKER_MAX_CONCURRENCY,
+  SES_CONFIGURATION_SET,
 } from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {CampaignService} from '../services/CampaignService.js';
@@ -42,7 +43,21 @@ import {ProjectFooterService} from '../services/ProjectFooterService.js';
 import {emailQueue} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {SuppressionService} from '../services/SuppressionService.js';
-import {getSendingQuota, safeToRetrySend, sendRawEmail} from '../services/SESService.js';
+import {
+  classifySesRefusal,
+  configurationSetFor,
+  getSendingQuota,
+  safeToRetrySend,
+  sendRawEmail,
+} from '../services/SESService.js';
+import {
+  holdSending,
+  manyRejections,
+  noteSent,
+  pauseSending,
+  SES_DAILY_QUOTA_WAIT_MS,
+  SES_RATE_WAIT_MS,
+} from '../services/SesSendGate.js';
 
 /**
  * Determine the email sending rate limit (emails per second)
@@ -104,6 +119,57 @@ type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
 /** What `processEmailJob` uses of a BullMQ job, so tests can drive it without a queue */
 export type EmailJob = Pick<Job<SendEmailJobData>, 'data' | 'attemptsMade' | 'opts' | 'updateData'>;
 
+/** Plunk Lite: most times SES's sending rate puts an email back without spending an attempt */
+const MAX_RATE_LIMITED_STARTS = 50;
+/** Plunk Lite: longest a daily quota or an account pause holds an email back without spending attempts */
+const MAX_HELD_MS = 48 * 60 * 60_000;
+
+/**
+ * Plunk Lite: hold an email back for what SES said about the whole account -- its sending rate, its
+ * daily quota, a pause -- and return the error that puts its job back without spending an attempt:
+ * the queue waits a second, a quarter of an hour, or until the sweep's probe resumes it. Undefined
+ * once the email has been held back too long, so it goes on with the usual retries and, in the
+ * end, fails with its alert.
+ */
+async function holdBack(
+  job: EmailJob,
+  refusal: 'rate' | 'daily-quota' | 'account-paused',
+  emailId: string,
+  message: string,
+): Promise<Error | undefined> {
+  const now = Date.now();
+  if (refusal === 'rate') {
+    const starts = (job.data.rateLimitedStarts ?? 0) + 1;
+    if (starts > MAX_RATE_LIMITED_STARTS) {
+      return undefined;
+    }
+    await job.updateData({...job.data, rateLimitedStarts: starts});
+  } else {
+    const heldSince = job.data.heldSince ?? now;
+    if (now - heldSince > MAX_HELD_MS) {
+      return undefined;
+    }
+    if (job.data.heldSince === undefined) {
+      await job.updateData({...job.data, heldSince});
+    }
+  }
+
+  await prisma.email.updateMany({
+    where: {id: emailId, status: EmailStatus.SENDING},
+    data: {status: EmailStatus.PENDING},
+  });
+  if (refusal === 'rate') {
+    await holdSending(SES_RATE_WAIT_MS);
+  } else if (refusal === 'daily-quota') {
+    await holdSending(SES_DAILY_QUOTA_WAIT_MS);
+    await FailureAlertService.recordForAll({sourceKey: 'ses:daily-quota', label: 'Amazon SES', error: message});
+  } else {
+    await pauseSending(message);
+    await FailureAlertService.recordForAll({sourceKey: 'ses:paused', label: 'Amazon SES', error: message});
+  }
+  return Worker.RateLimitError();
+}
+
 /**
  * Finalize a campaign whose email has just reached a terminal state, without letting a failure
  * here fail the job that got it there
@@ -164,6 +230,9 @@ async function recordSent(email: EmailToSend, accepted: AcceptedEmail, recipient
   if (email.campaignId) {
     await CampaignService.countCampaignSent(email.campaignId);
   }
+
+  // Plunk Lite: an email going out after a pause of SES resolves the pause's alert
+  await noteSent();
 
   // Record usage for billing (pay-per-email)
   // Uses email ID as idempotency key to prevent double-charging on retries
@@ -549,6 +618,41 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
 
     if (disabledForPolicy) {
       // Already marked failed, and the project is disabled: a retry could only fail again
+      await finalizeCampaignSafely(email.campaignId);
+      throw new UnrecoverableError(message);
+    }
+
+    // Plunk Lite: what SES said about the whole account, rather than about this email
+    let refusal = handedToSes
+      ? classifySesRefusal(error, {
+          mainConfigurationSet:
+            configurationSetFor(EmailService.shouldTrackEmail(email.project.tracking, email.sourceType)) ===
+            SES_CONFIGURATION_SET,
+        })
+      : 'other';
+    // A paused account refuses every sender, in words this code may not know: many refusals at
+    // once, from more than one sender domain, are taken for one
+    if (refusal === 'rejected' && (await manyRejections(email.from.split('@')[1] ?? email.from))) {
+      refusal = 'account-paused';
+    }
+
+    if (refusal === 'rate' || refusal === 'daily-quota' || refusal === 'account-paused') {
+      const held = await holdBack(job, refusal, emailId, message);
+      if (held) {
+        throw held;
+      }
+      // Held back for too long: on with today's retries, and in the end a failure with its alert
+    }
+
+    if (refusal === 'rejected' || refusal === 'config-set') {
+      // SES refused this email for itself (its address, sender or configuration set): a retry
+      // would only be refused again
+      await prisma.email.update({where: {id: emailId}, data: {status: EmailStatus.FAILED, error: message}});
+      if (refusal === 'config-set') {
+        await FailureAlertService.recordForAll({sourceKey: 'ses:config-set', label: 'Amazon SES', error: message});
+      } else {
+        await FailureAlertService.recordEmail(email, message);
+      }
       await finalizeCampaignSafely(email.campaignId);
       throw new UnrecoverableError(message);
     }

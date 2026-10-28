@@ -24,9 +24,11 @@ import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {errorMessage} from '../database/redis.js';
 import {POSSIBLY_SENT_NOTE} from '../services/EmailService.js';
 import {FailureAlertService} from '../services/FailureAlertService.js';
 import {emailQueue, emailRecoverySweepQueue} from '../services/QueueService.js';
+import {resumeSendingIfDue} from '../services/SesSendGate.js';
 
 import {finalizeCampaignSafely} from './email-processor.js';
 
@@ -188,6 +190,13 @@ export async function sweepStuckEmails(now = new Date()): Promise<RecoverySweepR
 }
 
 async function processSweep(_job: Job<EmailRecoverySweepJobData>): Promise<RecoverySweepResult> {
+  // Plunk Lite: first, and on its own, so a sweep that fails cannot keep a paused queue paused
+  try {
+    await resumeSendingIfDue();
+  } catch (error) {
+    signale.error(`[EMAIL-RECOVERY-SWEEP] Could not check whether to resume sending: ${errorMessage(error)}`);
+  }
+
   const result = await sweepStuckEmails();
 
   if (result.retried + result.failed > 0) {
