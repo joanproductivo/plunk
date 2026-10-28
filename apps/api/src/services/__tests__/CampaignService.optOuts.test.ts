@@ -15,9 +15,10 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
  * row the way the SES webhook stamps them — what matters here is which
  * suppressions the opt-out count excludes, not how the timestamp got there.
  *
- * The three ways a recipient can leave must never describe the same person twice —
- * a bounce, a complaint, and a deliberate unsubscribe each belong to exactly one
- * count.
+ * An opt-out from the page never counts an email a bounce or complaint already
+ * suppressed. Plunk Lite: the unsubscribe that bounce or complaint caused is counted
+ * by the SES webhook instead (Webhooks.unsubscribed.test.ts), and `lostCount` counts
+ * each recipient once.
  */
 describe('CampaignService - opt-outs and complaints', () => {
   const prisma = getPrismaClient();
@@ -112,8 +113,8 @@ describe('CampaignService - opt-outs and complaints', () => {
   });
 
   /**
-   * A hard bounce unsubscribes the contact too. Counting it here would report the
-   * same suppression twice, once as a bounce and once as an opt-out.
+   * A hard bounce unsubscribes the contact too, and the webhook counts that unsubscribe when it
+   * happens. Counting it here as well would report the same opt-out twice.
    */
   it('does not count suppression from a bounced email', async () => {
     const {contact, email} = await sendTo('four@example.com');
@@ -154,7 +155,7 @@ describe('CampaignService - opt-outs and complaints', () => {
 
     /**
      * The drill-down is only worth opening if it agrees with the figure it is opened from.
-     * The stamp and the counter move in one transaction, so the two can never drift.
+     * The stamp and the counter move in one statement, so the two can never drift.
      */
     it('lists exactly the recipients the counter counts', async () => {
       const first = await sendTo('listed-one@example.com');
@@ -330,8 +331,8 @@ describe('CampaignService - opt-outs and complaints', () => {
     });
 
     /**
-     * A complaint suppresses the contact as well. It is reported as a complaint,
-     * not as an opt-out, so the two counts never describe the same recipient.
+     * A complaint suppresses the contact as well. An opt-out from the page that follows it is
+     * not counted again: the webhook counted the unsubscribe the complaint caused.
      */
     it('keeps complaints out of the unsubscribe count', async () => {
       const {contact, email} = await sendTo('c4@example.com');

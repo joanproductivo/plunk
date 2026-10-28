@@ -2,6 +2,7 @@ import {Controller, Post} from '@overnightjs/core';
 import type {Prisma} from '@plunk/db';
 import {EmailSourceType, EmailStatus} from '@plunk/db';
 import {isMailboxSimulatorAddress} from '@plunk/shared';
+import type {SubscriptionChangeReason} from '@plunk/types';
 import type {Request, Response} from 'express';
 import {simpleParser} from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
@@ -39,6 +40,7 @@ import {
   keepsSendStatus,
   matchEmail,
   noteSnsRejection,
+  ON_THE_LIST,
   parseSnsMessage,
   readNotJson,
   readSesNotification,
@@ -686,6 +688,8 @@ export class Webhooks {
       let isNew = true;
       // The row was deleted (its contact was) after it was matched
       let gone = false;
+      // Whether this copy took the contact off the list: only then is `contact.unsubscribed` tracked
+      let contactUnsubscribed = false;
 
       if (unsubscribes) {
         // Everything that records a bounce or complaint, written together: if any of it fails,
@@ -718,10 +722,14 @@ export class Webhooks {
             // from the dead-letter queue, say -- must not unsubscribe a contact who has since
             // subscribed again
             if (isNew && contactIsAffected) {
-              await tx.contact.update({
-                where: {id: email.contactId},
+              // A contact already off the list -- unsubscribed by hand, or by an earlier bounce -- is
+              // left alone. A snoozed one is coming back, so a bounce or complaint ends the snooze
+              // for good, and is their unsubscribe.
+              const flipped = await tx.contact.updateMany({
+                where: {id: email.contactId, AND: [ON_THE_LIST]},
                 data: {subscribed: false, snoozedUntil: null},
               });
+              contactUnsubscribed = flipped.count === 1;
             }
 
             // And kept off every later send, whatever resubscribes the contact in passing. Not for
@@ -812,12 +820,38 @@ export class Webhooks {
         // workflows, segments and webhooks would read it as the contact's own.
         if (!unsubscribes || contactIsAffected) {
           await QueueService.queueEventTracking(
-            {projectId: email.projectId, eventName, contactId: email.contactId, emailId: email.id, data: eventData},
+            {
+              projectId: email.projectId,
+              eventName,
+              contactId: email.contactId,
+              emailId: email.id,
+              data: eventData,
+              // The unsubscribe the bounce or complaint caused, tracked after it
+              ...(contactUnsubscribed
+                ? {
+                    followUp: {
+                      eventName: 'contact.unsubscribed',
+                      data: {
+                        reason: (eventType === 'Complaint' ? 'complaint' : 'bounce') satisfies SubscriptionChangeReason,
+                      },
+                    },
+                  }
+                : {}),
+            },
             snsMessageId,
           );
         }
       } catch (error) {
         signale.error(`[WEBHOOK] ${eventType} recorded for email ${email.id}, but queueing the event failed:`, error);
+      }
+
+      // The unsubscribe this caused counts against the campaign as an opt-out from the page does.
+      // Unlike the counters above, it is written here: only the bounces and complaints that
+      // unsubscribe someone do, one statement each, and the opt-out list must match it. After the
+      // event is queued, which is what a workflow mirroring unsubscribes waits on, and outside the
+      // transaction, so a wait for the campaign row never holds up the suppression. Never throws.
+      if (contactUnsubscribed && email.campaignId) {
+        await ContactService.recordCampaignUnsubscribe(email.id, email.campaignId);
       }
 
       if (notify) {

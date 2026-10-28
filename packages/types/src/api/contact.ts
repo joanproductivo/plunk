@@ -27,7 +27,8 @@ export type SnoozeDuration = (typeof SNOOZE_DURATIONS)[number];
  * `WAIT_FOR_EVENT` steps, the activity feed and the campaign opt-out counters all read them
  * already, and a sender who wants to treat a snooze differently branches on this field.
  *
- * `bounce` and `complaint` predate this type and are written by the SES webhook.
+ * `bounce` and `complaint` are written by the SES webhook (Plunk Lite: on the `contact.unsubscribed`
+ * tracked after the bounce or complaint, when it took the contact off the list).
  */
 export type SubscriptionChangeReason = 'bounce' | 'complaint' | 'snooze' | 'snooze_expired';
 

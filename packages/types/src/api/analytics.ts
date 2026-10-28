@@ -139,9 +139,15 @@ export interface AnalyticsHeatmap {
 export interface AnalyticsAudiencePoint {
   bucket: string;
   newContacts: number;
+  /** Every unsubscribe, including the ones a hard bounce or a spam complaint caused */
   unsubscribed: number;
   /** Contacts suppressed by a hard bounce or a spam complaint */
   suppressed: number;
+  /**
+   * Plunk Lite: the contacts that left either way, each counted once. A bounce or complaint also
+   * unsubscribes the contact, so `unsubscribed + suppressed` counts them twice; totals use this.
+   */
+  lost: number;
 }
 
 /** GET /analytics/audience */
@@ -150,8 +156,8 @@ export interface AnalyticsAudience {
   subscribedContacts: number;
   granularity: AnalyticsGranularity;
   current: AnalyticsAudiencePoint[];
-  totals: {newContacts: number; unsubscribed: number; suppressed: number};
-  previousTotals: {newContacts: number; unsubscribed: number; suppressed: number};
+  totals: Omit<AnalyticsAudiencePoint, 'bucket'>;
+  previousTotals: Omit<AnalyticsAudiencePoint, 'bucket'>;
 }
 
 export interface AnalyticsTopEvent {
