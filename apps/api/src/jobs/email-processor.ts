@@ -12,7 +12,7 @@
  * only records the send.
  */
 
-import {CampaignStatus, EmailStatus, Prisma} from '@plunk/db';
+import {CampaignStatus, EmailStatus, Prisma, WorkflowExecutionStatus} from '@plunk/db';
 import {isMailboxSimulatorAddress} from '@plunk/shared';
 import type {AcceptedEmail, SendEmailJobData} from '@plunk/types';
 import {type Job, UnrecoverableError, Worker} from 'bullmq';
@@ -96,6 +96,7 @@ const EMAIL_INCLUDE = {
   project: true,
   template: {select: {type: true}},
   campaign: {select: {type: true, status: true, name: true, sentAt: true}},
+  workflowExecution: {select: {status: true, exitReason: true}},
 } satisfies Prisma.EmailInclude;
 
 type EmailToSend = Prisma.EmailGetPayload<{include: typeof EMAIL_INCLUDE}>;
@@ -327,6 +328,21 @@ export async function processEmailJob(job: EmailJob): Promise<void> {
     if (email.campaignId) {
       await CampaignService.finalizeIfDone(email.campaignId);
     }
+    return;
+  }
+
+  // Plunk Lite: an email of a workflow run cancelled since it was queued -- by hand, all at once,
+  // by the workflow's brake for its bounces or complaints, or with its project -- is not sent: a
+  // step that was running when the run was cancelled can create one after the cancel cleared the rest
+  if (email.workflowExecution?.status === WorkflowExecutionStatus.CANCELLED) {
+    signale.info(`[EMAIL-PROCESSOR] Workflow run of email ${emailId} was cancelled, skipping it`);
+    await prisma.email.update({
+      where: {id: emailId},
+      data: {
+        status: EmailStatus.FAILED,
+        error: email.workflowExecution.exitReason ?? 'Workflow run cancelled',
+      },
+    });
     return;
   }
 

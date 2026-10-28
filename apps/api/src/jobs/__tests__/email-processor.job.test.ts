@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
+import {CampaignStatus, EmailSourceType, EmailStatus, WorkflowExecutionStatus} from '@plunk/db';
 import type {SendEmailJobData} from '@plunk/types';
 import {UnrecoverableError} from 'bullmq';
 
@@ -247,6 +247,45 @@ describe('processEmailJob', () => {
       expect(row?.status).toBe(EmailStatus.SENT);
       expect(row?.messageId).toBe('ses-message-1');
       expect(sendRawEmail).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a workflow run cancelled after its email was queued (Plunk Lite)', () => {
+    /** A pending email of a run of a workflow, in `status` */
+    async function workflowEmail(status: WorkflowExecutionStatus, exitReason?: string) {
+      const email = await pendingEmail({sourceType: EmailSourceType.WORKFLOW});
+      const workflow = await factories.createWorkflow({projectId});
+      const execution = await prisma.workflowExecution.create({
+        data: {workflowId: workflow.id, contactId: email.contactId, status, exitReason},
+      });
+      await prisma.email.update({where: {id: email.id}, data: {workflowExecutionId: execution.id}});
+      return email;
+    }
+
+    it('does not send it, and says why', async () => {
+      const email = await workflowEmail(
+        WorkflowExecutionStatus.CANCELLED,
+        'Workflow disabled for its bounces or complaints',
+      );
+
+      await processEmailJob(makeJob(email.id));
+
+      const row = await prisma.email.findUniqueOrThrow({where: {id: email.id}});
+      expect(row).toMatchObject({status: EmailStatus.FAILED, error: 'Workflow disabled for its bounces or complaints'});
+      expect(sendRawEmail).not.toHaveBeenCalled();
+    });
+
+    it('still sends the email of a run that is running, or that failed later on', async () => {
+      const running = await workflowEmail(WorkflowExecutionStatus.RUNNING);
+      const failed = await workflowEmail(WorkflowExecutionStatus.FAILED);
+      vi.mocked(sendRawEmail)
+        .mockResolvedValueOnce({messageId: 'ses-running'})
+        .mockResolvedValueOnce({messageId: 'ses-failed'});
+
+      await processEmailJob(makeJob(running.id));
+      await processEmailJob(makeJob(failed.id));
+
+      expect(sendRawEmail).toHaveBeenCalledTimes(2);
     });
   });
 
