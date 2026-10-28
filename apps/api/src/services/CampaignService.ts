@@ -626,17 +626,27 @@ export class CampaignService {
     // Plunk Lite: refuse a send that would not fit in what is left of SES's 24-hour quota, keeping
     // 5 % of it for the day's transactional and workflow emails. The campaigns still sending, in any
     // project (they share the SES account), count with what they have left. Without an answer from
-    // SES, or with no limit, the send goes on.
+    // SES, or with no limit, the send goes on. Two sends at the same moment can both pass: what does
+    // not fit then waits for the quota in the email queue, without being lost.
     const quota = await getDailyQuotaQuick();
     if (quota && quota.max24HourSend >= 0) {
       const allowed = Math.floor(DAILY_QUOTA_SHARE * quota.max24HourSend);
-      const sending = await prisma.campaign.aggregate({
+      // What each one has sent is in its live progress (sentCount is only written as it finalizes),
+      // and SES already counts it in sentLast24Hours. Without Redis it reads 0: the cautious side
+      const sending = await prisma.campaign.findMany({
         where: {status: CampaignStatus.SENDING},
-        _sum: {totalRecipients: true, sentCount: true},
+        select: {id: true, totalRecipients: true, sentCount: true},
       });
-      const pending = Math.max(0, (sending._sum.totalRecipients ?? 0) - (sending._sum.sentCount ?? 0));
+      let pending = 0;
+      for (const other of sending) {
+        const sent = other.sentCount + (await this.readSentProgress(other.id));
+        pending += Math.max(0, other.totalRecipients - sent);
+      }
       if (quota.sentLast24Hours + pending + recipientCount > allowed) {
-        const others = pending > 0 ? `, ${pending} more are on their way in campaigns still sending` : '';
+        const others =
+          pending > 0
+            ? `, ${pending} more are on their way in ${sending.length === 1 ? 'a campaign' : `${sending.length} campaigns`} still sending`
+            : '';
         throw new HttpException(
           400,
           `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours${others}, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
