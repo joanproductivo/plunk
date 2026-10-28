@@ -19,7 +19,7 @@ Include your API key in the `Authorization` header:
 Authorization: Bearer YOUR_API_KEY
 ```
 
-- **Secret Key (sk_*)** — Required for all endpoints except `/v1/track`
+- **Secret Key (sk_*)** — Required for all endpoints except `/v1/track`, which takes it too (from a server)
 - **Public Key (pk_*)** — Only works with `/v1/track` for client-side event tracking
 
 ## Making requests
@@ -200,7 +200,7 @@ A complete, grouped reference of every endpoint exposed by the Plunk API.
 
 ### Public API
 
-The `/v1/*` endpoints are designed for use from your applications and accept simple, denormalised payloads. `POST /v1/track` is the only endpoint callable with a public (`pk_*`) key.
+The `/v1/*` endpoints are designed for use from your applications and accept simple, denormalised payloads. `POST /v1/track` is the only endpoint callable with a public (`pk_*`) key; it takes the secret key too.
 
 | Method | Path         | Description                                                                                  | Key      |
 | ------ | ------------ | -------------------------------------------------------------------------------------------- | -------- |

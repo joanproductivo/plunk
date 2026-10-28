@@ -1,7 +1,7 @@
 import {Controller, Middleware, Post} from '@overnightjs/core';
 import {ActionSchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
-import {requirePublicKey, requireSecretKey} from '../middleware/auth.js';
+import {requireSecretKey, requireTrackKey} from '../middleware/auth.js';
 import {idempotency} from '../middleware/idempotency.js';
 import {sendRateLimit, trackRateLimit} from '../middleware/rateLimit.js';
 import {prisma} from '../database/prisma.js';
@@ -54,7 +54,7 @@ export class Actions {
    * }
    */
   @Post('track')
-  @Middleware([requirePublicKey, trackRateLimit, idempotency])
+  @Middleware([requireTrackKey, trackRateLimit, idempotency])
   @CatchAsync
   public async track(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;

@@ -173,9 +173,9 @@ already exists — opting someone in never creates a new record.
 must be a member of the Plunk project; any other address is rejected. If a send is already scheduled or
 in flight, `plunk_cancel_campaign` stops whatever has not gone out yet — it cannot recall what has.
 
-**Event tracking.** `/v1/track` requires the public key. Without `PLUNK_PUBLIC_KEY` the server gets
-the same result using the secret key, creating or updating the contact first and then recording the
-event. Either way the contact is created if it does not exist.
+**Event tracking.** With `PLUNK_PUBLIC_KEY` the server calls `/v1/track`. Without it, it gets the same
+result with the secret key, creating or updating the contact first and then recording the event.
+Either way the contact is created if it does not exist.
 
 **Workflows.** `plunk_create_workflow` creates a workflow that starts when a contact triggers the given
 event. It starts disabled, with only its trigger step. `plunk_add_workflow_steps` then adds the steps —

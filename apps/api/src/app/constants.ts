@@ -166,8 +166,8 @@ function isSwitchedOff(key: keyof NodeJS.ProcessEnv): boolean {
 }
 
 // Plunk Lite: whether /v1/track takes the public key (default: on). A form that calls it from the
-// browser exposes the key; with 'off' (or false, 0, no) it answers 403, and contacts come through
-// POST /contacts with a secret key from the form's server instead.
+// browser exposes the key; with 'off' (or false, 0, no) the public key gets 403, and the form's
+// server calls /v1/track with the secret key instead, which it always takes.
 export const PLUNK_LITE_PUBLIC_TRACK = !isSwitchedOff('PLUNK_LITE_PUBLIC_TRACK');
 
 // Plunk Lite: a new contact from /v1/track, /v1/send or POST /contacts needs an address whose domain
