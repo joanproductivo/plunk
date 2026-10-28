@@ -7,6 +7,9 @@ export const failuresUrl = (projectId: string) => `/projects/${projectId}/alerts
 /** The URL a project's alert settings are read from and saved to */
 export const alertSettingsUrl = (projectId: string) => `/projects/${projectId}/alerts/settings`;
 
+/** The URL that queues a drain of the AWS dead-letter queue of SES events */
+export const deadLetterDrainUrl = (projectId: string) => `/projects/${projectId}/alerts/dead-letter-queue/drain`;
+
 const ERROR_SHOWN = 140;
 
 /**
