@@ -6,12 +6,13 @@ import {ErrorCode, HttpException} from '../exceptions/index.js';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
 import {FailureAlertService} from '../services/FailureAlertService.js';
 import {MembershipService} from '../services/MembershipService.js';
+import {QueueService} from '../services/QueueService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
 /**
  * A project's failure alerts (Plunk Lite): the failures the dashboard banner shows, and where the
  * alert emails go. Only the dashboard uses them; any member reviews failures, admins change where
- * the emails go.
+ * the emails go and drain the AWS dead-letter queue of SES events.
  */
 @Controller('projects')
 export class Alerts {
@@ -51,6 +52,20 @@ export class Alerts {
       throw new HttpException(400, error instanceof Error ? error.message : 'The test alert could not be sent');
     }
     return res.status(200).json({success: true});
+  }
+
+  /**
+   * POST /projects/:id/alerts/dead-letter-queue/drain — take back now what SNS left in the AWS
+   * dead-letter queue of SES events. The queue is the installation's: what the drain does for this
+   * project shows on its dashboard, and nothing of the others' is said here.
+   */
+  @Post(':id/alerts/dead-letter-queue/drain')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async drainDeadLetterQueue(req: Request, res: Response, _next: NextFunction) {
+    await Alerts.project(req, res, 'admin');
+    await QueueService.queueDlqDrain();
+    return res.status(202).json({queued: true});
   }
 
   /** GET /projects/:id/alerts/failures — the sources with failures not reviewed yet */

@@ -221,7 +221,10 @@ function getActivityConfig(activity: Activity): ActivityConfig {
         tile: TILE.red,
         title: subject ?? 'Email bounced',
         badge: {label: 'Bounced', variant: 'destructive'},
-        detail: str(metadata.bounceType) === 'Permanent' ? 'Hard bounce' : undefined,
+        detail:
+          [str(metadata.bounceType) === 'Permanent' ? 'Hard bounce' : undefined, recoveredNote(metadata)]
+            .filter(Boolean)
+            .join(' · ') || undefined,
       };
 
     case 'email.complaint':
@@ -230,6 +233,7 @@ function getActivityConfig(activity: Activity): ActivityConfig {
         tile: TILE.red,
         title: subject ?? 'Spam complaint',
         badge: {label: 'Complaint', variant: 'destructive'},
+        detail: recoveredNote(metadata),
       };
 
     case 'workflow.started':
@@ -303,6 +307,11 @@ function getActivityConfig(activity: Activity): ActivityConfig {
   }
 }
 
+/** Plunk Lite: the short note on a bounce or complaint taken back from the AWS dead-letter queue */
+function recoveredNote(metadata: Activity['metadata']): string | undefined {
+  return metadata.recoveredFromDlq === true ? 'Recovered from the AWS dead-letter queue' : undefined;
+}
+
 /**
  * The details revealed when a row is opened: everything the row had no room for, and in
  * particular the "why" behind it (the link clicked, the bounce type, the event payload).
@@ -354,7 +363,24 @@ function getDetails(activity: Activity): {label: string; value: ReactNode}[] {
   }
 
   if (type === 'email.complaint') {
-    add('Complaint', 'The recipient marked this email as spam. The contact was unsubscribed.');
+    add(
+      'Complaint',
+      metadata.keptSubscribed === true
+        ? 'The recipient marked this email as spam. They had subscribed again since, so they were left subscribed; their address no longer gets email.'
+        : 'The recipient marked this email as spam. The contact was unsubscribed.',
+    );
+  }
+
+  // Plunk Lite: a bounce or complaint SNS could not deliver at the time, taken back from the AWS
+  // dead-letter queue later
+  if ((type === 'email.bounced' || type === 'email.complaint') && recoveredNote(metadata)) {
+    const occurredAt = str(metadata.occurredAt);
+    add(
+      'Recovered',
+      `Taken back from the AWS dead-letter queue: SNS could not deliver it when it happened${
+        occurredAt ? `, ${dayjs(occurredAt).format('ddd, MMM D, YYYY [at] HH:mm')}` : ''
+      }. It is shown at the time it was recorded.`,
+    );
   }
 
   if (type === 'workflow.started' || type === 'workflow.completed') {

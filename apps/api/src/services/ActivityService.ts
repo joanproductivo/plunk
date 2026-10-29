@@ -49,6 +49,34 @@ interface SubscriptionSourceEmail {
   workflowExecution: {workflow: {name: string}} | null;
 }
 
+/** Plunk Lite: how an event taken back from the AWS dead-letter queue is shown, with when it happened */
+interface RecoveredMark {
+  recoveredFromDlq: true;
+  occurredAt?: string;
+  /** A complaint of a contact who had subscribed again since, left subscribed */
+  keptSubscribed?: true;
+}
+
+/** What an email's events say that its row does not (see fetchEmailOutcomes) */
+interface EmailOutcome {
+  link?: string;
+  bounceType?: string;
+  bounceRecovered?: RecoveredMark;
+  complaintRecovered?: RecoveredMark;
+}
+
+/** The mark of an event's data written by the drain of the dead-letter queue, if it has one */
+function recoveredFrom(data: Prisma.JsonObject): RecoveredMark | undefined {
+  if (data.recoveredFromDlq !== true) {
+    return undefined;
+  }
+  return {
+    recoveredFromDlq: true,
+    ...(typeof data.occurredAt === 'string' && {occurredAt: data.occurredAt}),
+    ...(data.keptSubscribed === true && {keptSubscribed: true}),
+  };
+}
+
 export class ActivityService {
   private static readonly DEFAULT_LIMIT = 50;
   private static readonly MAX_LIMIT = 100;
@@ -823,6 +851,7 @@ export class ActivityService {
             ...baseMetadata,
             error: email.error,
             bounceType: outcome?.bounceType,
+            ...outcome?.bounceRecovered,
           },
         });
       }
@@ -842,6 +871,7 @@ export class ActivityService {
           metadata: {
             ...baseMetadata,
             error: email.error,
+            ...outcome?.complaintRecovered,
           },
         });
       }
@@ -851,29 +881,34 @@ export class ActivityService {
   }
 
   /**
-   * What the email rows on a page cannot say themselves: which link was clicked and what
-   * kind of bounce it was. Both live only on the email's events.
+   * What the email rows on a page cannot say themselves: which link was clicked, what kind of
+   * bounce it was, and (Plunk Lite) whether its bounce or complaint was taken back from the AWS
+   * dead-letter queue, and when it happened. All of it lives only on the email's events.
    *
    * One query per page, over at most `limit` emails, served by the events (emailId) index,
-   * and skipped when the page has no clicked or bounced email the caller asked for.
+   * and skipped when the page has no clicked, bounced or complained email the caller asked for.
    */
   private static async fetchEmailOutcomes(
-    emails: {id: string; clickedAt: Date | null; bouncedAt: Date | null}[],
+    emails: {id: string; clickedAt: Date | null; bouncedAt: Date | null; complainedAt: Date | null}[],
     types?: ActivityType[],
-  ): Promise<Map<string, {link?: string; bounceType?: string}>> {
+  ): Promise<Map<string, EmailOutcome>> {
     const wantClicks = !types || types.includes(ActivityType.EMAIL_CLICKED);
     const wantBounces = !types || types.includes(ActivityType.EMAIL_BOUNCED);
+    const wantComplaints = !types || types.includes(ActivityType.EMAIL_COMPLAINT);
     const ids = emails
-      .filter(email => (wantClicks && email.clickedAt) || (wantBounces && email.bouncedAt))
+      .filter(
+        email =>
+          (wantClicks && email.clickedAt) || (wantBounces && email.bouncedAt) || (wantComplaints && email.complainedAt),
+      )
       .map(email => email.id);
 
-    const outcomes = new Map<string, {link?: string; bounceType?: string}>();
+    const outcomes = new Map<string, EmailOutcome>();
     if (ids.length === 0) {
       return outcomes;
     }
 
     const events = await prisma.event.findMany({
-      where: {emailId: {in: ids}, name: {in: ['email.click', 'email.bounce']}},
+      where: {emailId: {in: ids}, name: {in: ['email.click', 'email.bounce', 'email.complaint']}},
       select: {emailId: true, name: true, data: true},
       // Oldest first, so the first click and the bounce that suppressed the contact win
       orderBy: {createdAt: 'asc'},
@@ -895,6 +930,11 @@ export class ActivityService {
         data.bounceType !== 'Transient'
       ) {
         outcome.bounceType = data.bounceType;
+        outcome.bounceRecovered = recoveredFrom(data);
+      }
+      // The first complaint, the one that recorded `complainedAt`
+      if (event.name === 'email.complaint' && !('complaintRecovered' in outcome)) {
+        outcome.complaintRecovered = recoveredFrom(data);
       }
 
       outcomes.set(event.emailId, outcome);

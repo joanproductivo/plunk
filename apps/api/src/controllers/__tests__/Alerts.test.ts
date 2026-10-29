@@ -4,6 +4,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {HttpException} from '../../exceptions/index.js';
 import {FailureAlertService} from '../../services/FailureAlertService.js';
 import {MembershipService} from '../../services/MembershipService.js';
+import {QueueService} from '../../services/QueueService.js';
 import {Alerts} from '../Alerts.js';
 
 vi.mock('../../services/FailureAlertService.js', () => ({
@@ -15,6 +16,9 @@ vi.mock('../../services/FailureAlertService.js', () => ({
     review: vi.fn(async () => 1),
   },
 }));
+vi.mock('../../services/QueueService.js', () => ({
+  QueueService: {queueDlqDrain: vi.fn(async () => ({}))},
+}));
 vi.mock('../../services/MembershipService.js', () => ({
   MembershipService: {requireAccess: vi.fn(async () => ({})), requireAdminAccess: vi.fn(async () => ({}))},
 }));
@@ -23,7 +27,7 @@ const PROJECT = '3f1c2a8e-7b4d-4c3a-9e2f-1a2b3c4d5e6f';
 const FAILURE = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 const SESSION = {type: 'jwt', userId: 'user-1', projectId: PROJECT};
 
-type Handler = 'getSettings' | 'saveSettings' | 'sendTest' | 'listFailures' | 'reviewFailures';
+type Handler = 'getSettings' | 'saveSettings' | 'sendTest' | 'listFailures' | 'reviewFailures' | 'drainDeadLetterQueue';
 
 /** Calls a handler as Express would, as in Footers.test.ts */
 async function call(handler: Handler, auth: Record<string, unknown>, body?: unknown) {
@@ -120,8 +124,31 @@ describe('/projects/:id/alerts', () => {
     expect((error as HttpException).message).toBe('Email address is not verified.');
   });
 
+  it('lets admins drain the AWS dead-letter queue, saying nothing of what it holds', async () => {
+    const {status, json} = await call('drainDeadLetterQueue', SESSION);
+
+    expect(status).toBe(202);
+    expect(json).toEqual({queued: true});
+    expect(QueueService.queueDlqDrain).toHaveBeenCalledOnce();
+    expect(MembershipService.requireAdminAccess).toHaveBeenCalledWith('user-1', PROJECT);
+  });
+
+  it('does not let a member drain the dead-letter queue', async () => {
+    vi.mocked(MembershipService.requireAdminAccess).mockRejectedValueOnce(new HttpException(403, 'Admin only'));
+
+    expect(((await call('drainDeadLetterQueue', SESSION)).error as HttpException).code).toBe(403);
+    expect(QueueService.queueDlqDrain).not.toHaveBeenCalled();
+  });
+
   it('refuses API keys', async () => {
-    for (const handler of ['getSettings', 'saveSettings', 'sendTest', 'listFailures', 'reviewFailures'] as const) {
+    for (const handler of [
+      'getSettings',
+      'saveSettings',
+      'sendTest',
+      'listFailures',
+      'reviewFailures',
+      'drainDeadLetterQueue',
+    ] as const) {
       expect(((await call(handler, {type: 'apiKey', projectId: PROJECT}, {})).error as HttpException).code).toBe(403);
     }
   });

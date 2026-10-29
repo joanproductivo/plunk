@@ -13,6 +13,7 @@ import type {
   CardVerificationSweepJobData,
   ContactImportJobData,
   ContactSubscriptionEventsJobData,
+  DlqDrainJobData,
   DomainVerificationJobData,
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
@@ -35,6 +36,7 @@ import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {errorMessage, redis} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
+import {withTimeout} from '../utils/withTimeout.js';
 
 /** How long a change that is already written waits for a queue before carrying on without it */
 const QUEUE_WAIT_MS = 3000;
@@ -375,6 +377,21 @@ export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lit
     removeOnFail: 500,
   },
 });
+
+/**
+ * Plunk Lite: the drain of the dead-letter queue of SES events, one at a time. Kept apart from the
+ * checks, so a long drain holds none of their slots.
+ */
+export const plunkLiteDlqQueue = new Queue<DlqDrainJobData>('plunk-lite-dlq', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    removeOnComplete: 20,
+    removeOnFail: 100,
+  },
+});
+
+/** How long asking for a drain of the dead-letter queue may wait for Redis */
+const DLQ_QUEUE_TIMEOUT_MS = 3000;
 
 /** How long a reputation check waits for the rest of a burst of bounces and complaints */
 const SECURITY_CHECK_DELAY_MS = 10_000;
@@ -844,25 +861,64 @@ export class QueueService {
    * check queued meanwhile does the same, two run, which judges the project twice and changes nothing.
    */
   public static async queueSecurityCheck(data: SecurityCheckJobData): Promise<Job> {
-    const deduplicationId = `security-check-${data.projectId}`;
+    return this.addOnce(
+      plunkLiteChecksQueue,
+      'security-check',
+      data,
+      {delay: SECURITY_CHECK_DELAY_MS, attempts: 5, backoff: {type: 'exponential', delay: 5000}},
+      `security-check-${data.projectId}`,
+      `The reputation check of project ${data.projectId}`,
+    );
+  }
+
+  /**
+   * Plunk Lite: drain the dead-letter queue of SES events. One at a time: asked for while one runs,
+   * it runs again after it; while one waits, that one is enough. Bounded: BullMQ waits for Redis for
+   * as long as it is down, and the webhook and the checks that ask for it must go on.
+   */
+  public static async queueDlqDrain(): Promise<Job> {
+    return withTimeout(this.addDlqDrain(), DLQ_QUEUE_TIMEOUT_MS);
+  }
+
+  private static async addDlqDrain(): Promise<Job> {
+    return this.addOnce(
+      plunkLiteDlqQueue,
+      'dlq-drain',
+      {},
+      {attempts: 1},
+      'dlq-drain',
+      'The drain of the dead-letter queue',
+    );
+  }
+
+  /**
+   * Adds a job no more than once at a time under `deduplicationId`: one asked for while another runs
+   * is kept and added when it ends. A key that outlived its job (left by a job that ended without
+   * releasing it) is removed and the job added again.
+   */
+  private static async addOnce<T>(
+    queue: Queue<T>,
+    name: string,
+    data: T,
+    opts: Parameters<Queue<T>['add']>[2],
+    deduplicationId: string,
+    what: string,
+  ): Promise<Job> {
     const add = () =>
-      plunkLiteChecksQueue.add('security-check', data, {
+      // @ts-expect-error BullMQ types the name and data of a queue's jobs tighter than a generic can say
+      queue.add(name, data, {
+        ...opts,
         // BullMQ ignores a ttl with keepLastIfActive; a job id would stop the one queued behind a run
         deduplication: {id: deduplicationId, keepLastIfActive: true},
-        delay: SECURITY_CHECK_DELAY_MS,
-        attempts: 5,
-        backoff: {type: 'exponential', delay: 5000},
-      });
+      }) as Promise<Job>;
 
     const job = await add();
     const state = await job.getState();
     if (state !== 'completed' && state !== 'failed' && state !== 'unknown') {
       return job;
     }
-    signale.warn(
-      `[QUEUE] The reputation check of project ${data.projectId} was held by job ${job.id}, ${state}: queueing it again`,
-    );
-    await plunkLiteChecksQueue.removeDeduplicationKey(deduplicationId);
+    signale.warn(`[QUEUE] ${what} was held by job ${job.id}, ${state}: queueing it again`);
+    await queue.removeDeduplicationKey(deduplicationId);
     return add();
   }
 
@@ -1161,6 +1217,7 @@ export class QueueService {
       segmentMembershipEventsQueue.close(),
       eventTrackingQueue.close(),
       plunkLiteChecksQueue.close(),
+      plunkLiteDlqQueue.close(),
     ]);
   }
 }

@@ -158,7 +158,7 @@ const SES_KINDS: SesMessageTags['kind'][] = ['email', 'test', 'alert'];
  * The tags Plunk sent the email with (see SES_TAG), each only when it has the expected shape: the
  * ids any UUID (a campaign's emails have version 5 ones), the kind one of the known ones.
  */
-function sesTags(mail: SesMail): Partial<SesMessageTags> {
+export function sesTags(mail: SesMail): Partial<SesMessageTags> {
   const tag = (name: string) => {
     const values = mail.tags?.[name];
     const value: unknown = Array.isArray(values) ? values[0] : undefined;
@@ -174,6 +174,45 @@ function sesTags(mail: SesMail): Partial<SesMessageTags> {
     projectId: id(SES_TAG.projectId),
     kind: kind && SES_KINDS.includes(kind) ? kind : undefined,
   };
+}
+
+/**
+ * When an SES event happened, by the timestamp of its own part (`bounce`, `complaint`, `delivery`,
+ * `open`, `click`), or else when the email was sent. Undefined when neither is a date.
+ */
+export function sesEventTime(eventType: SesEventType, body: unknown): Date | undefined {
+  const fields = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const part = fields[eventType.toLowerCase()] as {timestamp?: unknown} | undefined;
+  const mail = fields.mail as {timestamp?: unknown} | undefined;
+  for (const value of [part?.timestamp, mail?.timestamp]) {
+    const time = typeof value === 'string' ? Date.parse(value) : NaN;
+    if (Number.isFinite(time)) {
+      return new Date(time);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Plunk Lite: whether a contact chose to subscribe again after `since`, by the `contact.subscribed`
+ * events tracked for them. The end of a snooze is not a choice made after it, and does not count.
+ * False when `since` is not known: nothing says the event came before.
+ */
+export async function subscribedAgainSince(contactId: string, since: Date | undefined): Promise<boolean> {
+  if (!since) {
+    return false;
+  }
+  // The latest few, by the (contactId, name, createdAt) index: a contact subscribes again rarely
+  const events = await prisma.event.findMany({
+    where: {contactId, name: 'contact.subscribed', createdAt: {gt: since}},
+    select: {data: true},
+    orderBy: {createdAt: 'desc'},
+    take: 20,
+  });
+  return events.some(event => {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
+    return (data as {reason?: unknown}).reason !== ('snooze_expired' satisfies SubscriptionChangeReason);
+  });
 }
 
 /** An address as SES writes it, bare or as `Name <address>`: lowercased, without the name */

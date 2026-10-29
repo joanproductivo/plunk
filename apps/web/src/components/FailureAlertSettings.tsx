@@ -5,7 +5,7 @@ import {useState} from 'react';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 
-import {alertSettingsUrl, parseRecipients} from '../lib/failureAlerts';
+import {alertSettingsUrl, deadLetterDrainUrl, parseRecipients} from '../lib/failureAlerts';
 import {network} from '../lib/network';
 
 interface FailureAlertSettingsProps {
@@ -38,8 +38,42 @@ export function FailureAlertSettings(props: FailureAlertSettingsProps) {
         ) : (
           <p className="text-sm text-neutral-500">Loading…</p>
         )}
+        {props.canEdit && <DeadLetterQueueDrain projectId={props.projectId} />}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Takes back now what SNS left in the AWS dead-letter queue of SES events (Plunk Lite). Plunk
+ * already does this when the queue's alarm goes off and every 15 minutes; this is for not waiting.
+ */
+function DeadLetterQueueDrain({projectId}: {projectId: string}) {
+  const [busy, setBusy] = useState(false);
+
+  const drain = async () => {
+    setBusy(true);
+    try {
+      await network.fetch('POST', deadLetterDrainUrl(projectId));
+      toast.success('Queued: what it takes back for this project shows on the dashboard');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Couldn’t queue the drain. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 border-t border-neutral-200 pt-4">
+      <p className="text-sm font-medium">AWS dead-letter queue</p>
+      <p className="mt-1 text-xs text-neutral-500">
+        Bounces, complaints and other SES events SNS could not deliver to Plunk wait there for 14 days. Plunk takes them
+        back on its own when the queue&apos;s alarm goes off and every 15 minutes.
+      </p>
+      <Button variant="outline" className="mt-3" onClick={drain} disabled={busy}>
+        {busy ? 'Queueing…' : 'Process AWS dead-letter queue now'}
+      </Button>
+    </div>
   );
 }
 
