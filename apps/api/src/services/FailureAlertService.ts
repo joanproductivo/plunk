@@ -20,7 +20,7 @@ export interface FailureReport {
    * `brake:workflow:<id>` (stopped for their bounces), `security:warning`, `security:critical`,
    * `security:check` (the reputation not being checked), `domain:<id>`, `sns:<what>` (the SES event
    * pipeline), `ses:<what>` (the SES account: its quota, a pause), `aws:alarm:<name>`,
-   * `aws:alarm-subscription`, `aws:dlq`, `aws:dlq-invalid` and `aws:dlq-access:<what>` (the drain of
+   * `aws:alarm-subscription`, `aws:dlq`, `aws:dlq-unattributed` and `aws:dlq-access:<what>` (the drain of
    * the dead-letter queue of SES events) and `redis:memory`. Each kind is in SOURCE_KINDS.
    */
   sourceKey: string;
@@ -132,14 +132,14 @@ const SOURCE_KINDS: Record<string, SourceKind> = {
   },
   // Confirmation emails of the double opt-in that could not be sent, or the project's limit reached
   'optin': {name: {en: () => 'Double opt-in', es: () => 'Doble opt-in'}, path: () => '/settings?tab=brand'},
-  // The drain of the dead-letter queue of SES events (DlqDrainService): what it took back, what it
-  // had to give up on, and the queue it cannot read
+  // The drain of the dead-letter queue of SES events (DlqDrainService): what it did for the project,
+  // what it did with what belongs to none, and the queue it cannot read
   'aws:dlq': {
-    name: {en: label => label, es: () => 'Eventos de SES recuperados de la cola de AWS'},
+    name: {en: label => label, es: () => 'Cola de AWS de eventos de SES'},
     path: () => '/activity',
   },
-  'aws:dlq-invalid': {
-    name: {en: label => label, es: () => 'Eventos de SES descartados de la cola de AWS'},
+  'aws:dlq-unattributed': {
+    name: {en: label => label, es: () => 'Cola de AWS de eventos de SES: mensajes sin proyecto'},
     path: () => SECURITY_PATH,
   },
   'aws:dlq-access': {

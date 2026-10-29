@@ -16,7 +16,7 @@ export interface FailureAlert {
    * `isFailureNotice` in `@plunk/shared`): `project`, `project:reactivated`, `brake:campaign:<id>`,
    * `brake:workflow:<id>`, `security:warning`, `security:critical`, `security:check`,
    * `domain:<id>`, `sns:<what>`, `ses:<what>`, `aws:alarm:<name>`, `aws:alarm-subscription`,
-   * `aws:dlq`, `aws:dlq-invalid` or `aws:dlq-access:<what>`
+   * `aws:dlq`, `aws:dlq-unattributed` or `aws:dlq-access:<what>`
    */
   sourceKey: string;
   label: string;

@@ -55,7 +55,7 @@ import {
 import {SnsMessages} from '../services/SnsMessages.js';
 import {SnsSignature} from '../services/SnsSignature.js';
 import {SuppressionService} from '../services/SuppressionService.js';
-import {isDlqReplay} from '../services/dlqConstants.js';
+import {isDlqReplay, UNTRUSTED_TOPIC_MESSAGE} from '../services/dlqConstants.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {SES_EVENT_TRANSACTION} from '../utils/database.js';
 
@@ -167,7 +167,7 @@ export class Webhooks {
         if (!replayed) {
           await noteSnsRejection('topic');
         }
-        return res.status(403).json({success: false, message: 'Untrusted SNS topic'});
+        return res.status(403).json({success: false, message: UNTRUSTED_TOPIC_MESSAGE});
       }
 
       // Handle SNS subscription confirmation FIRST (before parsing Message field)

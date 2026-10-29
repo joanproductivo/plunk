@@ -5,14 +5,16 @@ import {AWS_SES_REGION} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {redisReady} from '../database/redis.js';
 import {HandlerTimedOut, invokeHandler} from '../utils/invokeHandler.js';
+import {withTimeout} from '../utils/withTimeout.js';
 
 import {
   DLQ_ACCESS_SOURCE,
   DLQ_ALARM_SOURCE,
-  DLQ_INVALID_SOURCE,
   DLQ_NAME,
   DLQ_REPLAY,
   DLQ_SUMMARY_SOURCE,
+  DLQ_UNATTRIBUTED_SOURCE,
+  UNTRUSTED_TOPIC_MESSAGE,
 } from './dlqConstants.js';
 import {FailureAlertService} from './FailureAlertService.js';
 import {parseSnsMessage, readSesNotification, sesTags} from './SesEventMatch.js';
@@ -38,8 +40,8 @@ const MAX_DRAIN_MS = 10 * 60 * 1000;
 const READ_VISIBILITY_SECONDS = 900;
 /**
  * A message the webhook asked to have again is read again after this long, doubled with every read.
- * SQS takes at most 12 hours from when the message was read, and refuses more; a drain settles a
- * message within its own 10 minutes of reading it, so this stays under what is left.
+ * SQS takes at most 12 hours from when the message was read, and refuses more; a drain settles each
+ * message right after handling it, within its own 10 minutes, so this stays under what is left.
  */
 const RETRY_VISIBILITY_SECONDS = 600;
 const RETRY_VISIBILITY_MAX_SECONDS = 42_000;
@@ -47,17 +49,21 @@ const RETRY_VISIBILITY_MAX_SECONDS = 42_000;
 const MAX_FAILURES_IN_A_ROW = 3;
 /**
  * A refused signature is taken for a passing failure (SNS's certificate briefly not found) until
- * the message was read this many times: a forged one comes from no other path but the queue's
- * policy, and a real one must not be lost to a moment of DNS.
+ * the message was read this many times, and published this long ago: a forged one comes from no
+ * other path but the queue's policy, and a real one must not be lost to a moment of DNS. The age
+ * counts too because a message given back during an outage is read again without being handled.
  */
 const SIGNATURE_RETRY_RECEIVES = 4;
+const SIGNATURE_MIN_AGE_MS = 60 * 60 * 1000;
 /**
  * A message that fails every time is given up on once it was read this many times, more than a
- * day after SNS published it, in a drain where another message went through: what fails it is not
- * the database, AWS or Redis, which a message just handled shows to be up.
+ * day after SNS published it, and only while the database, Redis and AWS are up -- a message just
+ * handled, or a check of them right then, shows it: what fails it is then the message itself.
  */
 const POISON_RECEIVES = 8;
 const POISON_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+/** How long the check that the database and AWS are up may take before it counts as no */
+const INFRASTRUCTURE_CHECK_MS = 3000;
 /**
  * How long the webhook may take over one message. A deploy that stops the worker halfway may still
  * cut it short: the message comes back when its visibility ends. A bounce or complaint is then
@@ -259,8 +265,6 @@ export class DlqDrainService {
     const tallies = new Map<string, Tally>();
     const unattributed = emptyTally();
     const startedAt = Date.now();
-    // Failing every time, kept in flight until the end of the drain says whether anything went through
-    const poisoned: {message: Message; handled: Handled}[] = [];
     let anyHandled = false;
     let lookupsFailed = 0;
 
@@ -365,11 +369,17 @@ export class DlqDrainService {
           anyHandled = true;
         }
 
-        if (handled.poison) {
-          poisoned.push({message, handled});
-        } else {
-          await conclude(message, handled);
-        }
+        // A message that fails every time is given up on only while what it needs is up: shown by a
+        // message that went through, or else checked right now
+        const givenUp =
+          handled.poison && (anyHandled || (await this.infrastructureUp()))
+            ? {
+                ...handled,
+                outcome: 'invalid' as const,
+                reason: `failed in each of its ${receivesOf(message)} reads over more than a day, with the database, Redis and AWS up`,
+              }
+            : handled;
+        await conclude(message, givenUp);
 
         // What fails one message (the database, STS, SNS's certificates) fails the next: the drain
         // stops, and the messages come back when it is over, instead of each being read again
@@ -385,20 +395,6 @@ export class DlqDrainService {
       if (batch === MAX_BATCHES - 1) {
         result.more = true;
       }
-    }
-
-    // A message that fails every time is given up on only beside one that went through
-    for (const {message, handled} of poisoned) {
-      await conclude(
-        message,
-        anyHandled
-          ? {
-              ...handled,
-              outcome: 'invalid',
-              reason: `failed in each of its ${receivesOf(message)} reads over more than a day, while others went through`,
-            }
-          : handled,
-      );
     }
 
     if (lookupsFailed) {
@@ -453,12 +449,13 @@ export class DlqDrainService {
       }
       if (answer.status === 403) {
         const message403 = (answer.body as {message?: unknown} | undefined)?.message;
-        if (message403 === 'Untrusted SNS topic') {
+        if (message403 === UNTRUSTED_TOPIC_MESSAGE) {
           return {outcome: 'invalid', type, ...owner, reason: 'its topic is of another AWS account'};
         }
         // A signature refused because SNS's certificate was not found a moment ago: read again a
-        // few times before it is given up on
-        return receives < SIGNATURE_RETRY_RECEIVES
+        // few times, over an hour at least, before it is given up on
+        const young = !Number.isFinite(publishedAt) || Date.now() - publishedAt < SIGNATURE_MIN_AGE_MS;
+        return receives < SIGNATURE_RETRY_RECEIVES || young
           ? {outcome: 'retry', type, ...owner, failing: true}
           : {
               outcome: 'invalid',
@@ -483,6 +480,24 @@ export class DlqDrainService {
       poison:
         receives >= POISON_RECEIVES && Number.isFinite(publishedAt) && Date.now() - publishedAt > POISON_MIN_AGE_MS,
     };
+  }
+
+  /**
+   * Whether the database, Redis and AWS answer right now: what a message that fails every time
+   * needs, so that it is the message, not them, that fails. No when any of them does not, or takes
+   * longer than a few seconds.
+   */
+  private static async infrastructureUp(): Promise<boolean> {
+    if (!redisReady()) {
+      return false;
+    }
+    try {
+      await withTimeout(Promise.all([prisma.$queryRaw`SELECT 1`, getAwsAccountId()]), INFRASTRUCTURE_CHECK_MS);
+      return true;
+    } catch (error) {
+      signale.warn('[DLQ] The database or AWS did not answer; keeping a message that keeps failing:', error);
+      return false;
+    }
   }
 
   /**
@@ -575,7 +590,7 @@ export class DlqDrainService {
     }
     await FailureAlertService.recordForAll(
       {
-        sourceKey: DLQ_INVALID_SOURCE,
+        sourceKey: DLQ_UNATTRIBUTED_SOURCE,
         label: 'AWS dead-letter queue',
         error: `Messages of the AWS dead-letter queue of SES events that belong to no project, in its latest drain. ${said}`,
       },

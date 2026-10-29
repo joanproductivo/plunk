@@ -16,10 +16,14 @@ export const alarmSource = (alarmName: string) => `aws:alarm:${alarmName}`;
 /** The source the queue's alarm notice is recorded under, whatever the alarm is called */
 export const DLQ_ALARM_SOURCE = alarmSource(DLQ_ALARM_NAME);
 
-/** The notices of the drain (FailureAlertService): what it took back for a project, what it dropped, no access */
+/** The notices of the drain (FailureAlertService): what it did for a project, for none, and no access */
 export const DLQ_SUMMARY_SOURCE = 'aws:dlq';
-export const DLQ_INVALID_SOURCE = 'aws:dlq-invalid';
+/** What belongs to no project, told in every one */
+export const DLQ_UNATTRIBUTED_SOURCE = 'aws:dlq-unattributed';
 export const DLQ_ACCESS_SOURCE = 'aws:dlq-access';
+
+/** What the webhook answers a message of another AWS account's topic, which the drain deletes at once */
+export const UNTRUSTED_TOPIC_MESSAGE = 'Untrusted SNS topic';
 
 /**
  * Set on the request the drain hands a message to the webhook with: the event is recorded as taken

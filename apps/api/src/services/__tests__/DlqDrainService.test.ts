@@ -199,7 +199,7 @@ describe('DlqDrainService', () => {
     expect(result).toMatchObject({invalid: 1, handled: 0});
     expect(sqs.deleteMessage).toHaveBeenCalledOnce();
     // Of no email: told in every project, without anything of any one
-    expect((await failure('aws:dlq-invalid'))?.lastError).toContain('its topic is of another AWS account');
+    expect((await failure('aws:dlq-unattributed'))?.lastError).toContain('its topic is of another AWS account');
   });
 
   it("keeps under SQS's 12 hours the wait of a message read many times", async () => {
@@ -226,8 +226,13 @@ describe('DlqDrainService', () => {
       expect(sqs.deleteMessage).not.toHaveBeenCalled();
     });
 
-    it('is given up on after four reads', async () => {
-      queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-sig-four'}}, {receives: 4})]);
+    it('is given up on after four reads over more than an hour', async () => {
+      queueHolds([
+        queued(
+          {eventType: 'Bounce', mail: {messageId: 'dlq-sig-four'}},
+          {receives: 4, publishedAt: new Date(Date.now() - 2 * HOUR)},
+        ),
+      ]);
 
       const result = await DlqDrainService.drain();
 
@@ -235,9 +240,21 @@ describe('DlqDrainService', () => {
       expect(sqs.deleteMessage).toHaveBeenCalledOnce();
     });
 
+    it('is kept after four reads when it is younger than an hour: reads given back in an outage count too', async () => {
+      queueHolds([queued({eventType: 'Bounce', mail: {messageId: 'dlq-sig-young'}}, {receives: 6})]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({retry: 1, invalid: 0});
+      expect(sqs.deleteMessage).not.toHaveBeenCalled();
+    });
+
     it('stops the drain after three in a row, giving the rest back undeleted', async () => {
       const batch = Array.from({length: 5}, () =>
-        queued({eventType: 'Bounce', mail: {messageId: randomUUID()}}, {receives: 4}),
+        queued(
+          {eventType: 'Bounce', mail: {messageId: randomUUID()}},
+          {receives: 4, publishedAt: new Date(Date.now() - 2 * HOUR)},
+        ),
       );
       queueHolds(batch);
 
@@ -264,23 +281,38 @@ describe('DlqDrainService', () => {
       );
     });
 
-    it('is given up on, and said so, when another message goes through in the same drain', async () => {
+    it('is given up on alone in the queue, with the database, Redis and AWS up', async () => {
+      const bad = poison();
+      queueHolds([bad]);
+
+      const result = await DlqDrainService.drain();
+
+      expect(result).toMatchObject({invalid: 1, retry: 0});
+      expect(sqs.deleteMessage).toHaveBeenCalledWith(expect.objectContaining({ReceiptHandle: bad.ReceiptHandle}));
+    });
+
+    it('is given up on, and said so, before the next message is handled', async () => {
       await sentEmail('dlq-good');
       const bad = poison();
-      queueHolds([bad, queued({eventType: 'Delivery', mail: {messageId: 'dlq-good'}, delivery: {}})]);
+      const good = queued({eventType: 'Delivery', mail: {messageId: 'dlq-good'}, delivery: {}});
+      queueHolds([bad, good]);
 
       const result = await DlqDrainService.drain();
 
       expect(result).toMatchObject({handled: 1, invalid: 1});
-      expect(sqs.deleteMessage).toHaveBeenCalledWith(expect.objectContaining({ReceiptHandle: bad.ReceiptHandle}));
-      expect((await failure('aws:dlq-invalid'))?.lastError).toContain(
+      // Settled before the next message, not at the end of the drain
+      expect(sqs.deleteMessage.mock.calls.map(([input]) => input.ReceiptHandle)).toEqual([
+        bad.ReceiptHandle,
+        good.ReceiptHandle,
+      ]);
+      expect((await failure('aws:dlq-unattributed'))?.lastError).toContain(
         'failed in each of its 8 reads over more than a day',
       );
     });
 
-    it('is kept when nothing else goes through: the failure may be the database or AWS', async () => {
-      const bad = poison();
-      queueHolds([bad]);
+    it('is kept while the database does not answer: the failure may be it', async () => {
+      vi.spyOn(appPrisma, '$queryRaw').mockRejectedValue(new Error('database down'));
+      queueHolds([poison()]);
 
       const result = await DlqDrainService.drain();
 
