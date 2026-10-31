@@ -80,9 +80,9 @@ describe('WorkflowExecutionService - failure alerts', () => {
     );
   });
 
-  it('records a webhook answered with a 5xx as the failure of its run, and stops it there (Plunk Lite)', async () => {
+  it('records a webhook answered with a 4xx as the failure of its run, and stops it there (Plunk Lite)', async () => {
     vi.spyOn(WorkflowExecutionService as never, 'safeFetch').mockResolvedValue(
-      new Response('down', {status: 503}) as never,
+      new Response('refused', {status: 401}) as never,
     );
     const workflow = await factories.createWorkflow({projectId, name: 'Notify the club'});
     const trigger = await prisma.workflowStep.findFirstOrThrow({
@@ -105,7 +105,7 @@ describe('WorkflowExecutionService - failure alerts', () => {
     });
 
     await expect(WorkflowExecutionService.processStepExecution(execution.id, trigger.id)).rejects.toThrow(
-      'Webhook responded with HTTP 503',
+      'Webhook responded with HTTP 401',
     );
 
     // The step after the webhook never runs
@@ -116,7 +116,7 @@ describe('WorkflowExecutionService - failure alerts', () => {
     const stepRun = await prisma.workflowStepExecution.findFirstOrThrow({
       where: {executionId: execution.id, stepId: webhook.id},
     });
-    expect(stepRun).toMatchObject({status: 'FAILED', error: 'Webhook responded with HTTP 503'});
+    expect(stepRun).toMatchObject({status: 'FAILED', error: 'Webhook responded with HTTP 401'});
     expect((await prisma.workflowExecution.findUniqueOrThrow({where: {id: execution.id}})).status).toBe(
       WorkflowExecutionStatus.FAILED,
     );

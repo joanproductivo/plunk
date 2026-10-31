@@ -28,6 +28,7 @@ import {
   TRACKING_TOGGLE_ENABLED,
   verifySignupsEnabled,
 } from './app/constants.js';
+import './utils/networkDefaults.js';
 import {ALLOWED_ORIGINS, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';

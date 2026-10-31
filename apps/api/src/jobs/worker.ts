@@ -10,6 +10,7 @@ import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {SHUTDOWN_TIMEOUT_MS} from '../app/constants.js';
+import '../utils/networkDefaults.js';
 
 import {createApiRequestCleanupWorker} from './api-request-cleanup-processor.js';
 import {buildBackgroundIndexes} from './background-index-builder.js';

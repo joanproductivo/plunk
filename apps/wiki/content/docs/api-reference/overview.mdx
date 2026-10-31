@@ -302,6 +302,7 @@ Each workflow consists of a **workflow** record, a graph of **steps**, **transit
 | GET    | `/workflows/:id/executions`                       | List executions, filterable by `status`.                                                 |
 | GET    | `/workflows/:id/executions/:executionId`          | Get a single execution.                                                                  |
 | DELETE | `/workflows/:id/executions/:executionId`          | Cancel a running or waiting execution.                                                   |
+| POST   | `/workflows/:id/executions/:executionId/retry`    | Retry a failed execution from the step it stopped on, with one attempt. Answers `202`. Only a `WEBHOOK`, `SEND_EMAIL` or `CONDITION` step, with the workflow on and the project enabled; anything else, a step since deleted included, is `409`. |
 | POST   | `/workflows/:id/executions/cancel-all`            | Cancel every active execution at once.                                                   |
 
 ### Events

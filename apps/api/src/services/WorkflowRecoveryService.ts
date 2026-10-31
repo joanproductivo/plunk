@@ -11,7 +11,7 @@ import {QueueService} from './QueueService.js';
 
 /**
  * How long a run may go without a write before it counts as interrupted, and how long after it was
- * due a delay's end or a wait's timeout counts as lost
+ * due a delay's end, a wait's timeout or a webhook's next attempt counts as lost
  */
 const STALE_MS = 30 * 60_000;
 /** Most runs failed in one sweep; the next sweep takes the rest */
@@ -40,7 +40,7 @@ const INTERRUPTED = {
 const STEP_DELETED = {error: 'A step was deleted while a contact was on its way to it', exitReason: 'Step deleted'};
 
 /** What a waiting run the sweep found needs */
-type WaitFix = 'delay-end' | 'timeout' | 'deleted' | 'stuck' | 'interrupted';
+type WaitFix = 'delay-end' | 'timeout' | 'webhook-retry' | 'deleted' | 'stuck' | 'interrupted';
 
 interface OverdueWait {
   id: string;
@@ -51,6 +51,7 @@ interface OverdueWait {
   currentStepId: string | null;
   stepType: string | null;
   stepExecutionId: string | null;
+  webhookAttempts: string | null;
   fix: WaitFix;
 }
 
@@ -144,10 +145,11 @@ export class WorkflowRecoveryService {
   }
 
   /**
-   * Waiting runs whose wait should have ended over 30 minutes ago. A delay's end or a wait's timeout
-   * is queued again (to run now); a run waiting on a deleted step, on a wait that never ended after
-   * a week of that, or on nothing that can end it, is failed with an alert. Safe against a job that
-   * is merely late: a queued job is left alone, and the jobs claim the run before moving it.
+   * Waiting runs whose wait should have ended over 30 minutes ago. A delay's end, a wait's timeout or
+   * a webhook's next attempt is queued again (to run now); a run waiting on a deleted step, on a wait
+   * that never ended after a week of that, or on nothing that can end it, is failed with an alert.
+   * Safe against a job that is merely late: a queued job is left alone, and the jobs claim the run
+   * before moving it.
    */
   public static async recoverWaits({overdueMs = STALE_MS, limit = LIMIT} = {}): Promise<number> {
     const now = Date.now();
@@ -161,6 +163,7 @@ export class WorkflowRecoveryService {
       FROM (
         SELECT e."id", e."workflowId", e."contactId", e."currentStepId", e."updatedAt",
           s."type"::text AS "stepType", se."id" AS "stepExecutionId",
+          se."output"->>'webhookAttempts' AS "webhookAttempts",
           CASE
             WHEN e."currentStepId" IS NULL THEN 'deleted'
             WHEN s."type" = 'DELAY' AND se."status" = 'COMPLETED' THEN
@@ -172,6 +175,11 @@ export class WorkflowRecoveryService {
               CASE
                 WHEN se."executeAfter" < ${utcTimestamp(stuck)} THEN 'stuck'
                 WHEN se."executeAfter" < ${utcTimestamp(overdue)} THEN 'timeout'
+              END
+            WHEN s."type" = 'WEBHOOK' AND se."status" = 'SCHEDULED' THEN
+              CASE
+                WHEN se."executeAfter" < ${utcTimestamp(stuck)} THEN 'stuck'
+                WHEN se."executeAfter" < ${utcTimestamp(overdue)} THEN 'webhook-retry'
               END
             ELSE 'interrupted'
           END AS "fix"
@@ -222,19 +230,40 @@ export class WorkflowRecoveryService {
       case 'delay-end':
       case 'timeout':
         return QueueService.ensureWorkflowWaitEnd(row.fix, row.id, row.currentStepId!, row.stepExecutionId!);
+      case 'webhook-retry':
+        return QueueService.ensureWebhookRetry(
+          row.id,
+          row.currentStepId!,
+          row.stepExecutionId!,
+          Number(row.webhookAttempts),
+        );
       case 'deleted':
         return this.failRun(run, {...STEP_DELETED, where: stillThere});
       case 'stuck': {
         // A job still to run is merely late (the worker was stopped for days): it ends the wait
-        const kind = row.stepType === 'DELAY' ? 'delay-end' : 'timeout';
-        if (await QueueService.isWorkflowWaitEndPending(kind, row.stepExecutionId!)) {
+        const isWebhook = row.stepType === 'WEBHOOK';
+        const pending = isWebhook
+          ? await QueueService.isWebhookRetryPending(row.stepExecutionId!, Number(row.webhookAttempts))
+          : await QueueService.isWorkflowWaitEndPending(
+              row.stepType === 'DELAY' ? 'delay-end' : 'timeout',
+              row.stepExecutionId!,
+            );
+        if (pending) {
           return false;
         }
-        return this.failRun(run, {
+        const failed = await this.failRun(run, {
           error: 'A wait has not ended a week after it was due',
           exitReason: 'Stuck: its wait never ended',
           where: stillThere,
         });
+        // A webhook's step fails with its run, keeping what went wrong with its last attempt
+        if (failed && isWebhook) {
+          await prisma.workflowStepExecution.updateMany({
+            where: {id: row.stepExecutionId!, status: StepExecutionStatus.SCHEDULED},
+            data: {status: StepExecutionStatus.FAILED, completedAt: new Date()},
+          });
+        }
+        return failed;
       }
       case 'interrupted': {
         const failed = await this.failRun(run, {...INTERRUPTED, where: {...stillThere, updatedAt: {lt: overdue}}});
@@ -248,9 +277,9 @@ export class WorkflowRecoveryService {
 
   /**
    * Fail the runs that have been RUNNING without a write for 30 minutes, with an alert. Every step
-   * writes its run (Prisma sets `updatedAt` on updateMany too), and the slowest one, a webhook, takes
-   * about a minute at most, so such a run is dead. They are failed, not resumed: resuming could
-   * repeat a webhook or a contact update, which are not idempotent.
+   * writes its run (Prisma sets `updatedAt` on updateMany too), and the slowest one, an attempt of a
+   * webhook, takes about a minute at most, so such a run is dead. They are failed, not resumed:
+   * resuming could repeat a webhook or a contact update, which are not idempotent.
    */
   public static async failInterrupted({staleMs = STALE_MS, limit = LIMIT} = {}): Promise<number> {
     const cutoff = new Date(Date.now() - staleMs);

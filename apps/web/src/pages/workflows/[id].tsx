@@ -3,7 +3,6 @@ import {
   Alert,
   AlertDescription,
   AlertTitle,
-  Badge,
   Button,
   Card,
   CardContent,
@@ -16,7 +15,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  EmptyState,
   Input,
   Label,
   Command,
@@ -26,19 +24,17 @@ import {
   IconSpinner,
   Switch,
 } from '@plunk/ui';
-import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from '@plunk/db';
+import type {Workflow, WorkflowStep, WorkflowTransition} from '@plunk/db';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {network} from '../../lib/network';
 import {
   AlertTriangle,
   ArrowLeft,
-  CircleStop,
   Info,
   Power,
   PowerOff,
   Settings,
   Trash2,
-  Users,
 } from 'lucide-react';
 import Link from 'next/link';
 import {useRouter} from 'next/router';
@@ -47,11 +43,11 @@ import {toast} from 'sonner';
 import useSWR from 'swr';
 import {NextSeo} from 'next-seo';
 import {WorkflowBuilder} from '../../components/WorkflowBuilder';
+import {WorkflowExecutionsTable, type PaginatedExecutions} from '../../components/WorkflowExecutionsTable';
 import {EditStepDialog} from '../../components/workflow-steps';
 import {hasUpdateContactAction} from '../../components/workflow-steps/shared';
 import {ReactFlowProvider} from '@xyflow/react';
 import {WorkflowSchemas} from '@plunk/shared';
-import dayjs from 'dayjs';
 
 interface WorkflowWithDetails extends Workflow {
   steps: (WorkflowStep & {
@@ -59,17 +55,6 @@ interface WorkflowWithDetails extends Workflow {
     outgoingTransitions: WorkflowTransition[];
     incomingTransitions: WorkflowTransition[];
   })[];
-}
-
-interface PaginatedExecutions {
-  executions: (WorkflowExecution & {
-    contact: {id: string; email: string};
-    currentStep?: {id: string; name: string; type: string} | null;
-  })[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
 }
 
 export default function WorkflowEditorPage() {
@@ -86,8 +71,6 @@ export default function WorkflowEditorPage() {
   type WorkflowDialog =
     | {type: 'none'}
     | {type: 'settings'}
-    | {type: 'cancelAll'; cancelling: boolean}
-    | {type: 'cancelOne'; executionId: string; cancelling: boolean}
     | {type: 'editStep'; step: WorkflowStep}
     | {type: 'delete'};
 
@@ -97,52 +80,19 @@ export default function WorkflowEditorPage() {
     revalidateOnFocus: false,
   });
 
-  const {data: executionsData} = useSWR<PaginatedExecutions>(
-    id && activeTab === 'executions' ? `/workflows/${id}/executions?page=1&pageSize=10` : null,
-    {revalidateOnFocus: false},
-  );
-
   // Always fetch a summary of active executions to show warnings (regardless of enabled status)
-  const {data: activeExecutionsData} = useSWR<PaginatedExecutions>(
+  const {data: activeExecutionsData, mutate: mutateRunning} = useSWR<PaginatedExecutions>(
     id ? `/workflows/${id}/executions?page=1&pageSize=1&status=RUNNING` : null,
     {revalidateOnFocus: false, refreshInterval: 10000},
   );
 
-  const {data: waitingExecutionsData} = useSWR<PaginatedExecutions>(
+  const {data: waitingExecutionsData, mutate: mutateWaiting} = useSWR<PaginatedExecutions>(
     id ? `/workflows/${id}/executions?page=1&pageSize=1&status=WAITING` : null,
     {revalidateOnFocus: false, refreshInterval: 10000},
   );
 
   // Check for active executions
   const activeExecutionsCount = (activeExecutionsData?.total || 0) + (waitingExecutionsData?.total || 0);
-
-  // Handler for cancelling a single execution
-  const handleCancelExecution = async (executionId: string) => {
-    setDialog({type: 'cancelOne', executionId, cancelling: true});
-    try {
-      await network.fetch('DELETE', `/workflows/${id}/executions/${executionId}`);
-      toast.success('Execution canceled');
-      setDialog({type: 'none'});
-      void mutate();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Couldn’t cancel the execution. Try again.');
-      setDialog({type: 'cancelOne', executionId, cancelling: false});
-    }
-  };
-
-  // Handler for cancelling all executions
-  const handleCancelAllExecutions = async () => {
-    setDialog(d => (d.type === 'cancelAll' ? {...d, cancelling: true} : d));
-    try {
-      const result = await network.fetch<{cancelled: number}>('POST', `/workflows/${id}/executions/cancel-all`);
-      toast.success(`Canceled ${result.cancelled} execution${result.cancelled === 1 ? '' : 's'}`);
-      setDialog({type: 'none'});
-      void mutate();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Couldn’t cancel those executions. Try again.');
-      setDialog(d => (d.type === 'cancelAll' ? {...d, cancelling: false} : d));
-    }
-  };
 
   // Validate workflow configuration
   const validateWorkflow = (workflow: WorkflowWithDetails): {valid: boolean; errors: string[]} => {
@@ -543,103 +493,15 @@ export default function WorkflowEditorPage() {
             </CardContent>
           </Card>
         ) : activeTab === 'executions' ? (
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>Workflow executions</CardTitle>
-                  <CardDescription>View and manage all executions of this workflow</CardDescription>
-                </div>
-                {activeExecutionsCount > 0 && (
-                  <Button variant="outline" onClick={() => setDialog({type: 'cancelAll', cancelling: false})}>
-                    Cancel All Active ({activeExecutionsCount})
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent>
-              {!executionsData?.executions.length ? (
-                <EmptyState
-                  icon={Users}
-                  title="No executions yet"
-                  description="This workflow hasn't been executed yet. Enable it to start processing contacts."
-                />
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead className="bg-neutral-50 border-b border-neutral-200">
-                      <tr>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Contact
-                        </th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Status
-                        </th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Current step
-                        </th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Started
-                        </th>
-                        <th className="px-6 py-3 text-right text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-neutral-200">
-                      {executionsData.executions.map(execution => (
-                        <tr key={execution.id} className="hover:bg-neutral-50 transition-colors">
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-neutral-900">
-                            {execution.contact.email}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <Badge
-                              variant={
-                                execution.status === 'COMPLETED'
-                                  ? 'success'
-                                  : execution.status === 'FAILED'
-                                    ? 'destructive'
-                                    : execution.status === 'WAITING'
-                                      ? 'warning'
-                                      : execution.status === 'RUNNING'
-                                        ? 'default'
-                                        : 'neutral'
-                              }
-                            >
-                              {execution.status}
-                            </Badge>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-500">
-                            {execution.currentStep?.name ?? '-'}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-neutral-500">
-                            <div className="group relative inline-block cursor-help">
-                              {dayjs(execution.startedAt).fromNow()}
-                              <div className="hidden group-hover:block absolute z-10 w-48 p-2 bg-neutral-900 text-white text-xs rounded shadow-md bottom-full left-1/2 transform -translate-x-1/2 mb-1 whitespace-nowrap">
-                                {dayjs(execution.startedAt).format('DD MMMM YYYY, hh:mm')}
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            {(execution.status === 'RUNNING' || execution.status === 'WAITING') && (
-                              <Button
-                                variant="destructiveGhost"
-                                size="sm"
-                                onClick={() => setDialog({type: 'cancelOne', executionId: execution.id, cancelling: false})}
-                                disabled={dialog.type === 'cancelOne' && dialog.cancelling}
-                              >
-                                Cancel
-                              </Button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <WorkflowExecutionsTable
+            workflowId={id as string}
+            activeExecutionsCount={activeExecutionsCount}
+            onChange={() => {
+              void mutate();
+              void mutateRunning();
+              void mutateWaiting();
+            }}
+          />
         ) : null}
       </div>
 
@@ -661,56 +523,6 @@ export default function WorkflowEditorPage() {
               onSuccess={() => mutate()}
             />
           )}
-
-          {/* Cancel Single Execution Confirmation */}
-          <ConfirmDialog
-            open={dialog.type === 'cancelOne'}
-            onOpenChange={open => !open && setDialog({type: 'none'})}
-            onConfirm={() => {
-              if (dialog.type === 'cancelOne') {
-                return handleCancelExecution(dialog.executionId);
-              }
-            }}
-            title="Cancel this execution?"
-            icon={CircleStop}
-            description={
-              dialog.type === 'cancelOne' && executionsData?.executions ? (
-                <>
-                  Stops this workflow for{' '}
-                  <strong>
-                    {executionsData.executions.find(e => e.id === dialog.executionId)?.contact.email || 'this contact'}
-                  </strong>
-                  . They won&apos;t receive any remaining emails or actions from it. This can&apos;t be undone.
-                </>
-              ) : (
-                "The contact won't receive any remaining emails or actions from this workflow. This can't be undone."
-              )
-            }
-            confirmText="Cancel execution"
-            cancelText="Keep running"
-            variant="destructive"
-            status={dialog.type === 'cancelOne' && dialog.cancelling ? 'loading' : 'idle'}
-          />
-
-          {/* Cancel All Executions Confirmation */}
-          <ConfirmDialog
-            open={dialog.type === 'cancelAll'}
-            onOpenChange={open => !open && setDialog({type: 'none'})}
-            onConfirm={handleCancelAllExecutions}
-            title="Cancel every active execution?"
-            icon={CircleStop}
-            description={
-              <>
-                Stops this workflow for all <strong>{activeExecutionsCount}</strong> contact
-                {activeExecutionsCount !== 1 ? 's' : ''} currently in it. They won&apos;t receive any remaining emails
-                or actions. This can&apos;t be undone.
-              </>
-            }
-            confirmText={`Cancel ${activeExecutionsCount} execution${activeExecutionsCount !== 1 ? 's' : ''}`}
-            cancelText="Keep running"
-            variant="destructive"
-            status={dialog.type === 'cancelAll' && dialog.cancelling ? 'loading' : 'idle'}
-          />
 
           {/* Delete Workflow Confirmation */}
           <ConfirmDialog

@@ -1,17 +1,19 @@
 import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from '@plunk/db';
-import {Prisma, WorkflowExecutionStatus} from '@plunk/db';
+import {Prisma, StepExecutionStatus, WorkflowExecutionStatus} from '@plunk/db';
 import type {AvailableField, PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
+import {canRetryStepType} from '@plunk/shared';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
-import {LONG_TRANSACTION} from '../utils/database.js';
+import {LONG_TRANSACTION, POOL_WAIT_TRANSACTION} from '../utils/database.js';
 import type {ListSort} from '../utils/listSort.js';
 
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {QueueService} from './QueueService.js';
 import {WebhookSigningSecrets} from './WebhookSigningSecrets.js';
 import {WorkflowEmailLinks} from './WorkflowEmailLinks.js';
 import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
@@ -1251,6 +1253,13 @@ export class WorkflowService {
               type: true,
             },
           },
+          // Plunk Lite: what the panel says went wrong: a failed step, or a webhook's last attempt
+          stepExecutions: {
+            where: {error: {not: null}},
+            orderBy: {createdAt: 'desc'},
+            take: 1,
+            select: {error: true, status: true, executeAfter: true},
+          },
         },
       }),
       prisma.workflowExecution.count({where}),
@@ -1329,6 +1338,86 @@ export class WorkflowService {
         exitReason: 'Cancelled by user',
       },
     });
+  }
+
+  /**
+   * Plunk Lite: retry a failed execution from the step it stopped on. Its row is reused, so a webhook
+   * keeps its delivery ID, and a webhook gets one attempt: whoever pressed retry wants the answer
+   * now, not hours more of retries. `startedAt` stays: receivers order events by it. A workflow
+   * that is off may have been stopped by its brake, and a disabled project cancels the run anyway.
+   */
+  public static async retryExecution(
+    projectId: string,
+    workflowId: string,
+    executionId: string,
+  ): Promise<WorkflowExecution> {
+    const execution = await prisma.workflowExecution.findFirst({
+      where: {id: executionId, workflowId, workflow: {projectId}},
+      select: {
+        status: true,
+        currentStepId: true,
+        currentStep: {select: {type: true}},
+        workflow: {select: {enabled: true, project: {select: {disabled: true}}}},
+      },
+    });
+
+    if (!execution) {
+      throw new HttpException(404, 'Workflow execution not found');
+    }
+    if (execution.status !== WorkflowExecutionStatus.FAILED) {
+      throw new HttpException(409, 'Only a failed execution can be retried');
+    }
+    const {currentStepId, currentStep} = execution;
+    if (!currentStepId || !currentStep) {
+      throw new HttpException(409, 'The step this execution stopped on was deleted');
+    }
+    if (!canRetryStepType(currentStep.type)) {
+      throw new HttpException(409, `A ${currentStep.type} step can't be retried`);
+    }
+    if (!execution.workflow.enabled) {
+      throw new HttpException(409, 'Enable the workflow to retry its executions');
+    }
+    if (execution.workflow.project.disabled) {
+      throw new HttpException(409, 'This project is disabled');
+    }
+
+    const retried = await prisma.$transaction(async tx => {
+      const {count} = await tx.workflowExecution.updateMany({
+        where: {id: executionId, status: WorkflowExecutionStatus.FAILED, currentStepId},
+        data: {status: WorkflowExecutionStatus.RUNNING, completedAt: null, exitReason: null},
+      });
+      if (count === 0) {
+        throw new HttpException(409, 'Only a failed execution can be retried');
+      }
+
+      const manual = currentStep.type === 'WEBHOOK' ? {output: {webhookManual: true}} : {};
+      const stepExecution = await tx.workflowStepExecution.findFirst({
+        where: {executionId, stepId: currentStepId},
+        orderBy: {createdAt: 'desc'},
+        select: {id: true, status: true},
+      });
+      if (!stepExecution) {
+        await tx.workflowStepExecution.create({
+          data: {executionId, stepId: currentStepId, status: StepExecutionStatus.PENDING, ...manual},
+        });
+      } else if (stepExecution.status !== StepExecutionStatus.COMPLETED) {
+        // A completed step is carried on from by the engine, not run again
+        await tx.workflowStepExecution.update({
+          where: {id: stepExecution.id},
+          data: {status: StepExecutionStatus.PENDING, error: null, completedAt: null, executeAfter: null, ...manual},
+        });
+      }
+
+      return tx.workflowExecution.findUniqueOrThrow({where: {id: executionId}});
+    }, POOL_WAIT_TRANSACTION);
+
+    // A job the queue refuses leaves the run running, and the recovery sweep fails it with an alert
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueRetriedRun(executionId, currentStepId),
+      `the retry of execution ${executionId}`,
+    );
+
+    return retried;
   }
 
   /**
