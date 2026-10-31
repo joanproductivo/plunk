@@ -522,6 +522,28 @@ export class Workflows {
   }
 
   /**
+   * POST /workflows/:id/executions/:executionId/retry
+   * Plunk Lite: retry a failed execution from the step it stopped on. Accepted, not done: the worker
+   * runs it.
+   */
+  @Post(':id/executions/:executionId/retry')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async retryExecution(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const workflowId = req.params.id;
+    const executionId = req.params.executionId;
+
+    if (!workflowId || !executionId) {
+      return res.status(400).json({error: 'Workflow ID and Execution ID are required'});
+    }
+
+    const execution = await WorkflowService.retryExecution(auth.projectId!, workflowId, executionId);
+
+    return res.status(202).json(execution);
+  }
+
+  /**
    * POST /workflows/:id/executions/cancel-all
    * Cancel all active executions for a workflow
    */
