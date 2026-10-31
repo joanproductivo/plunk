@@ -96,6 +96,13 @@ async function isStillToRun(job: Job): Promise<boolean> {
 /** The ID of the job that ends a delay, or a wait's timeout: one per step execution */
 const workflowJobId = (type: 'delay-end' | 'timeout', stepExecutionId: string) => `workflow-${type}-${stepExecutionId}`;
 
+/**
+ * The ID of the job of a webhook's next attempt: one per attempt, since each is queued from inside
+ * the job of the one before, and BullMQ ignores an add under the ID of a job still active
+ */
+const webhookRetryJobId = (stepExecutionId: string, attempt: number) =>
+  `workflow-webhook-retry-${stepExecutionId}-${attempt}`;
+
 // Plunk Lite: 8 attempts over about 4 minutes, like emails, so a delay's end or a wait's timeout
 // that comes due while the database restarts is not lost. Both claim the run before moving it, so a
 // retry never moves it twice.
@@ -516,6 +523,57 @@ export class QueueService {
   ): Promise<boolean> {
     const job = await workflowQueue.getJob(workflowJobId(type, stepExecutionId));
     return job ? isStillToRun(job) : false;
+  }
+
+  /**
+   * Plunk Lite: queue the next attempt of a webhook that failed for a reason that may pass
+   */
+  public static async queueWebhookRetry(
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+    attempt: number,
+    delayMs: number,
+  ): Promise<Job<WorkflowStepJobData>> {
+    return workflowQueue.add(
+      'webhook-retry',
+      {executionId, stepId, stepExecutionId, type: 'webhook-retry'},
+      {delay: delayMs, jobId: webhookRetryJobId(stepExecutionId, attempt)},
+    );
+  }
+
+  /**
+   * Plunk Lite: make sure the job of a webhook's next attempt is queued, to run now: for a run the
+   * recovery sweep finds still waiting well after it was due. Like ensureWorkflowWaitEnd.
+   */
+  public static async ensureWebhookRetry(
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+    attempt: number,
+  ): Promise<boolean> {
+    const jobId = webhookRetryJobId(stepExecutionId, attempt);
+    if (!(await this.clearFinishedJob(workflowQueue, jobId))) {
+      return false;
+    }
+    await workflowQueue.add('webhook-retry', {executionId, stepId, stepExecutionId, type: 'webhook-retry'}, {jobId});
+    return true;
+  }
+
+  /**
+   * Plunk Lite: whether the job of a webhook's next attempt is still to run (or running)
+   */
+  public static async isWebhookRetryPending(stepExecutionId: string, attempt: number): Promise<boolean> {
+    const job = await workflowQueue.getJob(webhookRetryJobId(stepExecutionId, attempt));
+    return job ? isStillToRun(job) : false;
+  }
+
+  /**
+   * Plunk Lite: carry on a failed run someone chose to retry, from the step it is on. It was claimed
+   * as running first, so a retry of this job finds it finished and does nothing.
+   */
+  public static async queueRetriedRun(executionId: string, stepId: string): Promise<Job<WorkflowStepJobData>> {
+    return workflowQueue.add('resume-step', {executionId, stepId, type: 'resume-step'});
   }
 
   /**

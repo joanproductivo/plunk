@@ -221,6 +221,77 @@ describe('WorkflowRecoveryService.recoverWaits', () => {
     );
   });
 
+  /** A run waiting on a webhook's next attempt, due `dueMinutesAgo` minutes ago (negative: still to come) */
+  async function webhookRetry(dueMinutesAgo: number) {
+    const workflow = await factories.createWorkflow({projectId, allowReentry: true});
+    const step = await factories.createWorkflowStep({
+      workflowId: workflow.id,
+      type: WorkflowStepType.WEBHOOK,
+      config: {url: 'https://example.com/hook', method: 'POST'},
+    });
+    const execution = await prisma.workflowExecution.create({
+      data: {workflowId: workflow.id, contactId, status: WorkflowExecutionStatus.WAITING, currentStepId: step.id},
+    });
+    const stepExecution = await prisma.workflowStepExecution.create({
+      data: {
+        executionId: execution.id,
+        stepId: step.id,
+        status: StepExecutionStatus.SCHEDULED,
+        executeAfter: new Date(Date.now() - dueMinutesAgo * 60_000),
+        output: {webhookAttempts: 5},
+        error: 'Webhook responded with HTTP 503',
+      },
+    });
+    // Written when it started waiting, which was before it was due
+    await prisma.$executeRaw`UPDATE "workflow_executions" SET "updatedAt" = ${new Date(Date.now() - Math.max(dueMinutesAgo + 360, 60) * 60_000)} WHERE "id" = ${execution.id}`;
+    return {stepId: step.id, executionId: execution.id, stepExecutionId: stepExecution.id};
+  }
+
+  describe('a webhook waiting for its next attempt', () => {
+    it('leaves a wait of hours that is not due, instead of failing it as interrupted', async () => {
+      const run = await webhookRetry(-120);
+      const ensure = vi.spyOn(QueueService, 'ensureWebhookRetry').mockResolvedValue(true);
+
+      expect(await WorkflowRecoveryService.recoverWaits()).toBe(0);
+
+      expect(ensure).not.toHaveBeenCalled();
+      expect((await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}})).status).toBe(
+        WorkflowExecutionStatus.WAITING,
+      );
+      ensure.mockRestore();
+    });
+
+    it('queues again a lost attempt that was due over 30 minutes ago', async () => {
+      const run = await webhookRetry(31);
+      const ensure = vi.spyOn(QueueService, 'ensureWebhookRetry').mockResolvedValue(true);
+
+      expect(await WorkflowRecoveryService.recoverWaits()).toBe(1);
+
+      expect(ensure).toHaveBeenCalledWith(run.executionId, run.stepId, run.stepExecutionId, 5);
+      ensure.mockRestore();
+    });
+
+    it('fails a run and its step a week overdue, unless the job is still queued', async () => {
+      const run = await webhookRetry(8 * 24 * 60);
+      const pending = vi.spyOn(QueueService, 'isWebhookRetryPending').mockResolvedValue(true);
+
+      expect(await WorkflowRecoveryService.recoverWaits()).toBe(0);
+
+      pending.mockResolvedValue(false);
+      expect(await WorkflowRecoveryService.recoverWaits()).toBe(1);
+
+      expect(pending).toHaveBeenCalledWith(run.stepExecutionId, 5);
+      expect((await prisma.workflowExecution.findUniqueOrThrow({where: {id: run.executionId}})).status).toBe(
+        WorkflowExecutionStatus.FAILED,
+      );
+      expect(await prisma.workflowStepExecution.findUniqueOrThrow({where: {id: run.stepExecutionId}})).toMatchObject({
+        status: StepExecutionStatus.FAILED,
+        error: 'Webhook responded with HTTP 503',
+      });
+      pending.mockRestore();
+    });
+  });
+
   it('leaves a run that waits half set up for less than 30 minutes', async () => {
     const recent = await waitingOn(WorkflowStepType.WAIT_FOR_EVENT, {status: StepExecutionStatus.RUNNING}, 10);
 

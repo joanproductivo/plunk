@@ -27,6 +27,16 @@ export function createWorkflowWorker() {
       } else if (type === 'delay-end') {
         // End a DELAY: move on to the step after it, or complete the execution
         await WorkflowExecutionService.processDelayEnd(executionId, stepId);
+      } else if (type === 'webhook-retry') {
+        // The next attempt of a webhook that failed for a reason that may pass
+        if (!stepExecutionId) {
+          throw new Error('stepExecutionId is required for webhook-retry jobs');
+        }
+
+        await WorkflowExecutionService.processWebhookRetry(executionId, stepId, stepExecutionId);
+      } else if (type === 'resume-step') {
+        // A failed run someone chose to retry, already claimed as running
+        await WorkflowExecutionService.processStepExecution(executionId, stepId);
       } else {
         // A step queued for after a delay, by jobs from before delays ended through delay-end:
         // ended through the delay the run waits on, if it still does

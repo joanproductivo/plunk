@@ -17,6 +17,7 @@ import net from 'node:net';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {errorMessage} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 import {DASHBOARD_URI} from '../app/constants.js';
 import {POOL_WAIT_TRANSACTION} from '../utils/database.js';
@@ -28,6 +29,14 @@ import {EmailService} from './EmailService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SuppressionService} from './SuppressionService.js';
+import {
+  isTransientStatus,
+  toDeliveryError,
+  WEBHOOK_DELIVERY_HEADER,
+  WEBHOOK_RETRY_DELAYS_MS,
+  WEBHOOK_TIMEOUT_MS,
+  WebhookTransientError,
+} from './WebhookDelivery.js';
 import {WebhookSigningSecrets} from './WebhookSigningSecrets.js';
 import {WorkflowRecoveryService} from './WorkflowRecoveryService.js';
 
@@ -35,7 +44,7 @@ import {WorkflowRecoveryService} from './WorkflowRecoveryService.js';
 // had completed; the step it came from has handled it, so those pass it up untouched.
 const handledFailures = new WeakSet<object>();
 
-/** Plunk Lite: rolls back the claim of a wait whose run no longer waits */
+/** Plunk Lite: rolls back the claim of a wait whose run no longer waits, or of a retry whose run moved on */
 class WaitNotClaimed extends Error {}
 
 /** Plunk Lite: most of a webhook step's response that is read and stored */
@@ -212,6 +221,11 @@ export class WorkflowExecutionService {
       // Execute the step based on its type
       signale.info(`[WORKFLOW] Executing step ${stepId} of type ${step.type}`);
       const result = await this.executeStep(step, execution, stepExecution);
+      // Plunk Lite: a webhook that will try again waits for its own job, like a delay
+      if (result.retryScheduled === true) {
+        return;
+      }
+
       signale.info(`[WORKFLOW] Step ${stepId} executed successfully`);
 
       // Plunk Lite: a wait or a delay never moves on from here -- the event, its timeout or the
@@ -229,6 +243,10 @@ export class WorkflowExecutionService {
           status: StepExecutionStatus.COMPLETED,
           completedAt: new Date(),
           output: result ? toPrismaJson(result) : undefined,
+          // Plunk Lite: what an earlier attempt of a webhook left. COMPLETED with an error means
+          // moving on from the step failed (below)
+          error: null,
+          executeAfter: null,
         },
       });
       if (completed === 0) {
@@ -1124,7 +1142,14 @@ export class WorkflowExecutionService {
     let currentUrl = url;
 
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-      const parsed = new URL(currentUrl);
+      // Plunk Lite: a URL that cannot be parsed is reported without it: Node's error carries it whole,
+      // token included, and the logs print it
+      let parsed: URL;
+      try {
+        parsed = new URL(currentUrl);
+      } catch {
+        throw new Error('Invalid webhook URL');
+      }
 
       if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
         throw new Error(`Webhook URL scheme not allowed: ${parsed.protocol}`);
@@ -1137,27 +1162,41 @@ export class WorkflowExecutionService {
           : parsed.hostname;
 
       // An IP literal needs no resolution — validate it directly
-      const address = net.isIP(hostname) ? hostname : (await dns.lookup(hostname)).address;
+      let address: string;
+      try {
+        address = net.isIP(hostname) ? hostname : (await dns.lookup(hostname)).address;
+      } catch (error) {
+        throw toDeliveryError(error, hostname);
+      }
 
       if (WorkflowExecutionService.isPrivateIp(address)) {
         throw new Error(`Webhook URL resolves to a private/internal IP address: ${address}`);
       }
 
-      const response = await fetch(currentUrl, {
-        ...options,
-        redirect: 'manual',
-        signal: AbortSignal.timeout(10_000),
-      });
+      let response: Response;
+      try {
+        response = await fetch(currentUrl, {
+          ...options,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw toDeliveryError(error, hostname);
+      }
 
       if (response.status >= 300 && response.status < 400) {
         // Plunk Lite: the redirect's own body is never read; release it
-        await response.body?.cancel();
+        await response.body?.cancel().catch(() => undefined);
         const location = response.headers.get('location');
         if (!location) {
           throw new Error('Redirect with no Location header');
         }
         // Resolve relative redirects against the current URL
-        currentUrl = new URL(location, currentUrl).toString();
+        try {
+          currentUrl = new URL(location, currentUrl).toString();
+        } catch {
+          throw new Error(`Redirect with an invalid Location from ${hostname}`);
+        }
         continue;
       }
 
@@ -1179,12 +1218,12 @@ export class WorkflowExecutionService {
    *
    * Plunk Lite: a step with a signing secret (WebhookSigningSecrets) adds
    * an X-Plunk-Signature header, and a response that is not a 2xx fails
-   * the step.
+   * the step, at once or once its retries run out (WebhookDelivery).
    */
   private static async executeWebhook(
     step: WorkflowStep,
     execution: WorkflowExecutionWithRelations,
-    _stepExecution: WorkflowStepExecution,
+    stepExecution: WorkflowStepExecution,
     config: StepConfig,
   ): Promise<StepResult> {
     const {url, method, headers, body} = WorkflowStepConfigSchemas.webhook.parse(config);
@@ -1247,46 +1286,165 @@ export class WorkflowExecutionService {
     // the step can stand in for it. The signature header is reserved: fetch would join a copy of
     // it in another case with the real one rather than replace it.
     const secret = await WebhookSigningSecrets.forStep(step.id);
+    const reservedHeaders = [WEBHOOK_SIGNATURE_HEADER.toLowerCase(), WEBHOOK_DELIVERY_HEADER.toLowerCase()];
     const stepHeaders = Object.entries(renderedHeaders ?? {}).filter(
-      ([key]) => key.toLowerCase() !== WEBHOOK_SIGNATURE_HEADER.toLowerCase(),
+      ([key]) => !reservedHeaders.includes(key.toLowerCase()),
     );
 
-    // Make HTTP request
-    const response = await WorkflowExecutionService.safeFetch(renderedUrl, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...Object.fromEntries(stepHeaders),
-        ...(secret ? {[WEBHOOK_SIGNATURE_HEADER]: signWebhook(secret, bodyText ?? '')} : {}),
-      },
-      body: bodyText,
-    });
-
-    // Plunk Lite: at most 64 KB of the answer, which is stored with the step: a huge response
-    // filled the database and the worker's memory
-    const {text: responseData, truncated} = await readCapped(response, MAX_WEBHOOK_RESPONSE_BYTES);
-    let parsedResponse;
     try {
-      parsedResponse = truncated ? responseData : JSON.parse(responseData);
-    } catch {
-      parsedResponse = responseData;
+      // Make HTTP request
+      const response = await WorkflowExecutionService.safeFetch(renderedUrl, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...Object.fromEntries(stepHeaders),
+          // Plunk Lite: the step execution stays the same on every attempt, also one by hand. Not
+          // part of the signature, which covers `<t>.<body>` as receivers verify it today.
+          [WEBHOOK_DELIVERY_HEADER]: stepExecution.id,
+          ...(secret ? {[WEBHOOK_SIGNATURE_HEADER]: signWebhook(secret, bodyText ?? '')} : {}),
+        },
+        body: bodyText,
+      });
+
+      // Plunk Lite: an answer that is not a 2xx fails the step -- and with it the run, which alerts --
+      // as a network error already did, at once or once its retries run out; it used to complete as
+      // if the receiver had taken it. Its status decides, and not its body, which is not read: it is
+      // the receiver's to word and may say more than an alert should.
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        const message = `Webhook responded with HTTP ${response.status}`;
+        throw isTransientStatus(response.status) ? new WebhookTransientError(message) : new Error(message);
+      }
+
+      // Plunk Lite: at most 64 KB of the answer, which is stored with the step: a huge response
+      // filled the database and the worker's memory
+      let responseData: string;
+      let truncated: boolean;
+      try {
+        ({text: responseData, truncated} = await readCapped(response, MAX_WEBHOOK_RESPONSE_BYTES));
+      } catch (error) {
+        throw toDeliveryError(error, new URL(response.url || renderedUrl).hostname);
+      }
+      let parsedResponse;
+      try {
+        parsedResponse = truncated ? responseData : JSON.parse(responseData);
+      } catch {
+        parsedResponse = responseData;
+      }
+
+      return {
+        url: renderedUrl,
+        method,
+        statusCode: response.status,
+        success: response.ok,
+        response: parsedResponse,
+        ...(truncated ? {truncated: true} : {}),
+      };
+    } catch (error) {
+      if (
+        error instanceof WebhookTransientError &&
+        (await this.scheduleWebhookRetry(step, execution, stepExecution, error))
+      ) {
+        return {retryScheduled: true};
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Plunk Lite: set up the next attempt of a webhook that failed for a reason that may pass: the run
+   * and its step wait together, as for an event, until the job ends the wait. False when no attempt
+   * is left, the attempt was by hand (whoever pressed retry wants the answer now), or the run is no
+   * longer running; the step then fails as usual. If the server stops before the job is queued, or
+   * Redis loses it, the recovery sweep queues it.
+   */
+  private static async scheduleWebhookRetry(
+    step: WorkflowStep,
+    execution: WorkflowExecutionWithRelations,
+    stepExecution: WorkflowStepExecution,
+    error: WebhookTransientError,
+  ): Promise<boolean> {
+    const {webhookAttempts, webhookManual} = this.storedResult(stepExecution.output);
+    const attempt = typeof webhookAttempts === 'number' ? webhookAttempts : 0;
+    const delayMs = WEBHOOK_RETRY_DELAYS_MS[attempt];
+    if (webhookManual === true || delayMs === undefined) {
+      return false;
     }
 
-    // Plunk Lite: an answer that is not a 2xx fails the step -- and with it the run, which alerts --
-    // as a network error already did; it used to complete as if the receiver had taken it. Not its
-    // body, which is the receiver's to word and may say more than an alert should.
-    if (!response.ok) {
-      throw new Error(`Webhook responded with HTTP ${response.status}`);
+    try {
+      await prisma.$transaction(async tx => {
+        const run = await tx.workflowExecution.updateMany({
+          where: {id: execution.id, status: WorkflowExecutionStatus.RUNNING, currentStepId: step.id},
+          data: {status: WorkflowExecutionStatus.WAITING},
+        });
+        // Only this very attempt: a copy of it that completed the step has moved the run on
+        const scheduled = await tx.workflowStepExecution.updateMany({
+          where: {id: stepExecution.id, status: StepExecutionStatus.RUNNING},
+          data: {
+            status: StepExecutionStatus.SCHEDULED,
+            executeAfter: new Date(Date.now() + delayMs),
+            error: error.message,
+            output: {webhookAttempts: attempt + 1},
+          },
+        });
+        if (run.count === 0 || scheduled.count === 0) {
+          throw new WaitNotClaimed();
+        }
+      }, POOL_WAIT_TRANSACTION);
+    } catch (scheduleError) {
+      // The step fails with what went wrong with the request, not with this
+      if (!(scheduleError instanceof WaitNotClaimed)) {
+        signale.error(`[WORKFLOW] Could not schedule a retry of step ${step.id}: ${errorMessage(scheduleError)}`);
+      }
+      return false;
     }
 
-    return {
-      url: renderedUrl,
-      method,
-      statusCode: response.status,
-      success: response.ok,
-      response: parsedResponse,
-      ...(truncated ? {truncated: true} : {}),
-    };
+    signale.warn(
+      `[WORKFLOW] Step ${step.id} of execution ${execution.id} tries again in ${delayMs} ms: ${error.message}`,
+    );
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueWebhookRetry(execution.id, step.id, stepExecution.id, attempt + 1, delayMs),
+      `the retry of step execution ${stepExecution.id}`,
+    );
+    return true;
+  }
+
+  /**
+   * Plunk Lite: run the next attempt of a webhook that is due. The run and its step are claimed
+   * together, as an event claims a wait; a copy of this job, or a run cancelled meanwhile, claims
+   * nothing. A late copy of an earlier attempt's job cannot skip the wait, which is not due yet.
+   * Called by BullMQ worker when the webhook-retry job executes
+   */
+  public static async processWebhookRetry(executionId: string, stepId: string, stepExecutionId: string): Promise<void> {
+    let claimed: boolean;
+    try {
+      claimed = await prisma.$transaction(async tx => {
+        const step = await tx.workflowStepExecution.updateMany({
+          where: {id: stepExecutionId, status: StepExecutionStatus.SCHEDULED, executeAfter: {lte: new Date()}},
+          data: {status: StepExecutionStatus.RUNNING},
+        });
+        if (step.count === 0) {
+          return false;
+        }
+        const run = await tx.workflowExecution.updateMany({
+          where: {id: executionId, status: WorkflowExecutionStatus.WAITING, currentStepId: stepId},
+          data: {status: WorkflowExecutionStatus.RUNNING},
+        });
+        if (run.count === 0) {
+          throw new WaitNotClaimed();
+        }
+        return true;
+      }, POOL_WAIT_TRANSACTION);
+    } catch (error) {
+      if (!(error instanceof WaitNotClaimed)) {
+        throw error;
+      }
+      return;
+    }
+
+    if (claimed) {
+      await this.processStepExecution(executionId, stepId);
+    }
   }
 
   /**
