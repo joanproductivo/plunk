@@ -1,0 +1,290 @@
+import {randomUUID} from 'node:crypto';
+
+import type {Request, Response} from 'express';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+
+import {CampaignStatus, EmailSourceType, EmailStatus, Role} from '@plunk/db';
+
+import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {redis} from '../../database/redis';
+import {HttpException} from '../../exceptions/index';
+import {ContactService} from '../../services/ContactService';
+import {Keys} from '../../services/keys';
+import {ProjectService} from '../../services/ProjectService';
+import {ReputationPolicy} from '../../services/ReputationPolicy';
+import {Users} from '../Users';
+
+/** Calls the handler as Express would, as in Alerts.test.ts */
+async function reactivate(userId: string, projectId: string) {
+  let status = 200;
+  let json: unknown;
+  let error: unknown;
+
+  await new Promise<void>(resolve => {
+    const res = {
+      locals: {auth: {type: 'jwt', userId}},
+      status(code: number) {
+        status = code;
+        return this;
+      },
+      json(value: unknown) {
+        json = value;
+        resolve();
+        return this;
+      },
+    } as unknown as Response;
+    void new Users().reactivateProject({params: {id: projectId}} as unknown as Request, res, (thrown?: unknown) => {
+      error = thrown;
+      resolve();
+    });
+  });
+
+  return {status, json, error};
+}
+
+/**
+ * Plunk Lite: an owner or admin reactivates a project disabled for its sending reputation from the
+ * dashboard, instead of with SQL.
+ */
+describe('POST /users/@me/projects/:id/reactivate', () => {
+  const prisma = getPrismaClient();
+  let userId: string;
+  let userEmail: string;
+  let projectId: string;
+  const graceKey = () => `plunk-lite:reactivated:${projectId}`;
+
+  beforeEach(async () => {
+    await redis.flushdb();
+    const {user, project} = await factories.createUserWithProject();
+    userId = user.id;
+    userEmail = user.email;
+    projectId = project.id;
+    await prisma.project.update({where: {id: projectId}, data: {disabled: true, disabledReason: 'EMAIL_REPUTATION'}});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function project() {
+    return prisma.project.findUniqueOrThrow({where: {id: projectId}});
+  }
+
+  it('reactivates it, drops it from the caches and returns the scheduled campaigns the disable cancelled to the drafts', async () => {
+    const contact = await factories.createContact({projectId});
+    const scheduled = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+    const halfSent = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+    // Cancelled by hand before the disable
+    const byHand = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+    await ReputationPolicy.noteDisableCancelled(projectId, [scheduled.id, halfSent.id]);
+    await prisma.email.create({
+      data: {
+        projectId,
+        contactId: contact.id,
+        campaignId: halfSent.id,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hi@example.com',
+        sourceType: EmailSourceType.CAMPAIGN,
+        status: EmailStatus.SENT,
+        sentAt: new Date(),
+        messageId: randomUUID(),
+      },
+    });
+    const cached = await ProjectService.id(projectId);
+    await ProjectService.secret(cached!.secret);
+    await prisma.plunkLiteFailure.create({
+      data: {projectId, sourceKey: 'project', label: 'Project disabled', lastError: '7-day bounce rate'},
+    });
+
+    const {status, json} = await reactivate(userId, projectId);
+
+    expect(status).toBe(200);
+    expect(json).toEqual({draftedCampaigns: 1});
+    expect(await project()).toMatchObject({disabled: false, disabledReason: null});
+    expect(await redis.exists(Keys.Project.id(projectId), Keys.Project.secret(cached!.secret))).toBe(0);
+    expect(await redis.ttl(graceKey())).toBeGreaterThan(7 * 86400 - 60);
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: scheduled.id}})).status).toBe(CampaignStatus.DRAFT);
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: halfSent.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: byHand.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect(await redis.exists(`plunk-lite:disable-cancelled:${projectId}`)).toBe(0);
+
+    const failures = await prisma.plunkLiteFailure.findMany({where: {projectId}});
+    const disabled = failures.find(failure => failure.sourceKey === 'project')!;
+    expect(disabled.reviewedAt).toEqual(disabled.lastAt);
+    expect(failures.find(failure => failure.sourceKey === 'project:reactivated')?.lastError).toContain(
+      `Reactivated by ${userEmail}. For 7 days only the emails sent from now on count`,
+    );
+  });
+
+  it('returns no campaign to the drafts when it does not know which ones the disable cancelled', async () => {
+    const cancelled = await factories.createCampaign({projectId, status: CampaignStatus.CANCELLED});
+
+    const {json} = await reactivate(userId, projectId);
+
+    expect(json).toEqual({draftedCampaigns: 0});
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: cancelled.id}})).status).toBe(
+      CampaignStatus.CANCELLED,
+    );
+  });
+
+  it('is only for owners and admins', async () => {
+    const member = await factories.createUser();
+    await prisma.membership.create({data: {userId: member.id, projectId, role: Role.MEMBER}});
+
+    const {error} = await reactivate(member.id, projectId);
+
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).code).toBe(403);
+    expect((await project()).disabled).toBe(true);
+  });
+
+  it.each([
+    ['disabled for another reason', {disabled: true, disabledReason: 'PHISHING_DETECTED' as const}],
+    ['not disabled', {disabled: false, disabledReason: null}],
+  ])('answers 409 for a project %s, and leaves it as it is', async (_case, data) => {
+    await prisma.project.update({where: {id: projectId}, data});
+
+    const {error} = await reactivate(userId, projectId);
+
+    expect((error as HttpException).code).toBe(409);
+    expect(await project()).toMatchObject(data);
+    expect(await redis.exists(graceKey())).toBe(0);
+  });
+
+  it('leaves the project disabled when its grace period cannot be stored', async () => {
+    // Only the grace period's key: a cache write that fails is not fatal (wrapRedis)
+    const set = redis.set.bind(redis);
+    vi.spyOn(redis, 'set').mockImplementation(((key: string, ...rest: unknown[]) =>
+      key === graceKey()
+        ? Promise.reject(new Error('Redis down'))
+        : (set as (...args: unknown[]) => Promise<unknown>)(key, ...rest)) as typeof redis.set);
+
+    const {error} = await reactivate(userId, projectId);
+
+    expect((error as Error).message).toBe('Redis down');
+    expect((await project()).disabled).toBe(true);
+  });
+
+  describe('the grace period', () => {
+    /** 300 emails sent, 30 of them bounced (10%, past disabling), created at `createdAt` */
+    async function bounced(createdAt: Date, {total = 300, bounces = 30} = {}) {
+      const contact = await factories.createContact({projectId});
+      await prisma.email.createMany({
+        data: Array.from({length: total}, (_, i) => ({
+          projectId,
+          contactId: contact.id,
+          subject: 'Hi',
+          body: '<p>Hi</p>',
+          from: 'hi@example.com',
+          sourceType: EmailSourceType.TRANSACTIONAL,
+          status: EmailStatus.SENT,
+          sentAt: createdAt,
+          createdAt,
+          bouncedAt: i < bounces ? createdAt : null,
+        })),
+      });
+      return contact;
+    }
+
+    it('keeps the bounces from before the reactivation from disabling the project again', async () => {
+      await bounced(new Date(Date.now() - 86_400_000));
+      await reactivate(userId, projectId);
+
+      expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+
+      await bounced(new Date(Date.now() + 1000));
+      const verdict = await ReputationPolicy.disableByMetric(projectId);
+      expect(verdict.bounce).toBe(true);
+      expect(verdict.violations[0]).toMatch(/^Since reactivation, bounce rate \(10\.00%, 30 of 300 emails\)/);
+    });
+
+    describe('and the deleted emails, counted by the minute they were created in', () => {
+      /** The clock, at a time of one same day */
+      const at = (time: string) => vi.setSystemTime(new Date(`2026-10-20T${time}Z`));
+
+      beforeEach(() => {
+        vi.useFakeTimers({toFake: ['Date']});
+      });
+
+      it('does not count the bounces of before the reactivation whose contacts are deleted after it, in its hour', async () => {
+        // The bounces that disabled the project, at 10:05; reactivated at 10:40, and their
+        // contacts deleted at 10:45
+        at('10:05:00');
+        const contact = await bounced(new Date());
+        at('10:40:00');
+        await reactivate(userId, projectId);
+        at('10:45:00');
+        await ContactService.bulkDelete(projectId, [contact.id]);
+
+        at('10:46:00');
+        await bounced(new Date(), {total: 10, bounces: 1});
+
+        expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+        // The 7 days still count them
+        await redis.del(graceKey());
+        expect((await ReputationPolicy.disableByMetric(projectId)).sevenDay).toMatchObject({total: 310, bounces: 31});
+      });
+
+      it('does not count again the bounces deleted in the minute of the reactivation, before it', async () => {
+        // Disabled for them, their contacts deleted, then reactivated, all in the same minute
+        at('10:40:05');
+        const contact = await bounced(new Date());
+        at('10:40:10');
+        await ContactService.bulkDelete(projectId, [contact.id]);
+        at('10:40:20');
+        await reactivate(userId, projectId);
+
+        at('10:40:30');
+        await bounced(new Date(), {total: 10, bounces: 1});
+
+        expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(false);
+      });
+
+      it('counts the bounces of emails sent after the reactivation, even when their contacts are deleted in its minute', async () => {
+        at('10:40:00');
+        await reactivate(userId, projectId);
+        at('10:40:10');
+        const contact = await bounced(new Date());
+        at('10:40:20');
+        await ContactService.bulkDelete(projectId, [contact.id]);
+
+        const verdict = await ReputationPolicy.disableByMetric(projectId);
+        expect(verdict.sevenDay).toMatchObject({total: 300, bounces: 30});
+        expect(verdict.bounce).toBe(true);
+      });
+
+      it.each([
+        ['the date alone, as it was first stored', () => new Date(Date.now() - 1000).toISOString()],
+        [
+          'what the deleted counts held for its hour, as they were kept before',
+          () =>
+            JSON.stringify({
+              reactivatedAt: new Date(Date.now() - 1000),
+              deletedInHour: {sent: 300, bounced: 30, complained: 0},
+            }),
+        ],
+      ])(
+        'counts the whole minute of the reactivation when the grace period does not say what it held: %s',
+        async (_case, stored) => {
+          at('10:40:05');
+          const contact = await bounced(new Date());
+          await ContactService.bulkDelete(projectId, [contact.id]);
+          at('10:40:20');
+          await reactivate(userId, projectId);
+          await redis.set(graceKey(), stored(), 'EX', 3600);
+
+          expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(true);
+        },
+      );
+    });
+
+    it('counts the whole 7 days again once it is lost', async () => {
+      await bounced(new Date(Date.now() - 86_400_000));
+      await reactivate(userId, projectId);
+      await redis.del(graceKey());
+
+      expect((await ReputationPolicy.disableByMetric(projectId)).bounce).toBe(true);
+    });
+  });
+});

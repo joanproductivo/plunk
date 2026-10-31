@@ -15,6 +15,8 @@ export interface ContactInfo {
   /** The sender's project name, printed inside the page copy ("emails from {projectName}"). */
   projectName: string;
   language: string;
+  /** Plunk Lite: a subscribe answered with a confirmation email to click first (double opt-in) */
+  pendingConfirmation?: boolean;
 }
 
 /**

@@ -59,23 +59,22 @@ export const MAIL_FROM_SUBDOMAIN = validateEnv('MAIL_FROM_SUBDOMAIN', '').trim()
 // Email Processing Rate Limit (optional override)
 // If not set, will automatically fetch from AWS SES account quota
 // Set this to override AWS quota (useful for setting lower limits or testing)
-export const EMAIL_RATE_LIMIT_PER_SECOND = process.env.EMAIL_RATE_LIMIT_PER_SECOND
-  ? Number(process.env.EMAIL_RATE_LIMIT_PER_SECOND)
-  : undefined;
+export const EMAIL_RATE_LIMIT_PER_SECOND = parsePositiveInt('EMAIL_RATE_LIMIT_PER_SECOND');
+
+// How long the api and the worker get to finish in-flight requests and jobs when they are
+// stopped. Below pm2's `kill_timeout` (30s, docker-entrypoint-nginx.sh), so a shutdown that
+// hangs ends in the process's own exit with a log line rather than a silent SIGKILL.
+export const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 // Email Worker Concurrency (optional override)
 // If not set, concurrency is derived from the effective rate limit so a higher
 // SES quota actually translates into higher throughput. Set this to pin a fixed
 // value (useful when Prisma pool size or memory is the binding constraint).
-export const EMAIL_WORKER_CONCURRENCY = process.env.EMAIL_WORKER_CONCURRENCY
-  ? Number(process.env.EMAIL_WORKER_CONCURRENCY)
-  : undefined;
+export const EMAIL_WORKER_CONCURRENCY = parsePositiveInt('EMAIL_WORKER_CONCURRENCY');
 
 // Upper bound for auto-derived concurrency. Raise this if you have a large SES
 // quota AND have sized the Prisma connection pool accordingly.
-export const EMAIL_WORKER_MAX_CONCURRENCY = process.env.EMAIL_WORKER_MAX_CONCURRENCY
-  ? Number(process.env.EMAIL_WORKER_MAX_CONCURRENCY)
-  : 50;
+export const EMAIL_WORKER_MAX_CONCURRENCY = parsePositiveInt('EMAIL_WORKER_MAX_CONCURRENCY') ?? 50;
 
 // Storage
 export const REDIS_URL = validateEnv('REDIS_URL');
@@ -108,6 +107,9 @@ export const SES_CONFIGURATION_SET_NO_TRACKING = validateEnv(
 );
 // Check if no-tracking configuration set was explicitly provided (not using default)
 export const TRACKING_TOGGLE_ENABLED = process.env.SES_CONFIGURATION_SET_NO_TRACKING !== undefined;
+// Leave out opens SES marks as likely made by software, such as Gmail fetching the tracking
+// pixel on delivery (default: true). Any other value counts every open SES reports
+export const IGNORE_AUTOMATIC_OPENS = validateEnv('IGNORE_AUTOMATIC_OPENS', 'true') === 'true';
 
 // SMTP Server Configuration (optional)
 // SMTP server can run with or without a domain (runs without TLS in dev mode)
@@ -127,6 +129,62 @@ export const PLUNK_ENABLED = PLUNK_API_KEY !== '' && PLUNK_FROM_ADDRESS !== '';
 // Controls whether projects are automatically disabled when bounce/complaint rate thresholds are exceeded
 // Useful for self-hosters who want to manage project status manually
 export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') === 'true';
+
+/**
+ * A percentage from the environment, strictly between 0 and 100. Anything else is warned about at
+ * startup and gives the default, rather than a threshold that never or always trips (Plunk Lite).
+ */
+export function parsePercent(key: keyof NodeJS.ProcessEnv, defaultValue: string): number {
+  const raw = validateEnv(key, defaultValue);
+  // A decimal comma ("0,4") is how the value is written in many locales
+  const value = Number(raw.trim().replace(',', '.'));
+  if (!Number.isFinite(value) || value <= 0 || value >= 100) {
+    // Every process imports these constants, so throwing here would keep the API and the worker
+    // from starting at all; the default is the safe threshold
+    console.warn(`${key} must be a percentage between 0 and 100 (exclusive), got "${raw}": using ${defaultValue}`);
+    return Number(defaultValue);
+  }
+  return value;
+}
+
+/**
+ * Plunk Lite: a whole number above 0 from the environment, or undefined when it is not set. Anything
+ * else ("0", "-3", "1.5", "abc") is warned about at startup and treated as not set, so the worker
+ * falls back to its own value instead of a rate or a concurrency of NaN, with which it would not
+ * start. No throw: every process imports these constants.
+ */
+export function parsePositiveInt(key: keyof NodeJS.ProcessEnv): number | undefined {
+  const raw = process.env[key]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.warn(`${key} must be a whole number above 0, got "${raw}": ignoring it`);
+    return undefined;
+  }
+  return value;
+}
+
+// Plunk Lite: the 7-day bounce and complaint rates (%) that disable a project, with
+// AUTO_PROJECT_DISABLE. Above Plunk's critical alerts (5% and 0.1%) and below the rates at which
+// AWS pauses the whole SES account (10% and 0.5%).
+export const PLUNK_LITE_DISABLE_BOUNCE_PERCENT = parsePercent('PLUNK_LITE_DISABLE_BOUNCE_PERCENT', '8');
+export const PLUNK_LITE_DISABLE_COMPLAINT_PERCENT = parsePercent('PLUNK_LITE_DISABLE_COMPLAINT_PERCENT', '0.4');
+
+/** Plunk Lite: whether a switch that is on by default is set to off, false, 0 or no, in any case */
+function isSwitchedOff(key: keyof NodeJS.ProcessEnv): boolean {
+  return ['off', 'false', '0', 'no'].includes((process.env[key] ?? '').trim().toLowerCase());
+}
+
+// Plunk Lite: whether /v1/track takes the public key (default: on). A form that calls it from the
+// browser exposes the key; with 'off' (or false, 0, no) the public key gets 403, and the form's
+// server calls /v1/track with the secret key instead, which it always takes.
+export const PLUNK_LITE_PUBLIC_TRACK = !isSwitchedOff('PLUNK_LITE_PUBLIC_TRACK');
+
+// Plunk Lite: a new contact from /v1/track, /v1/send or POST /contacts needs an address whose domain
+// takes email and is not disposable (default: true). Read on each use, so the suite can switch it.
+export const verifySignupsEnabled = () => !isSwitchedOff('PLUNK_LITE_VERIFY_SIGNUPS');
 
 // Self-hosting Configuration (optional)
 // Controls whether new user signups are allowed (default: false)
@@ -179,6 +237,9 @@ export const EMAIL_VERIFICATION_RATE_WINDOW = 3600; // 1 hour in seconds
 // Authenticated password change: bounds guesses at the current password
 export const PASSWORD_CHANGE_RATE_LIMIT = 5; // Max 5 attempts per window
 export const PASSWORD_CHANGE_RATE_WINDOW = 900; // 15 minutes in seconds
+// Password login: bounds guesses at an account's password
+export const LOGIN_RATE_LIMIT = 10; // Max 10 attempts per window
+export const LOGIN_RATE_WINDOW = 900; // 15 minutes in seconds
 
 // Phishing Detection (optional)
 // OpenRouter API integration for content safety checks

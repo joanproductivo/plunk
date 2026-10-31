@@ -2,6 +2,7 @@ import * as z from 'zod';
 
 import type {PlunkClient} from '../client.js';
 
+import {suppressionNote} from './contacts.js';
 import {jsonResult, register, runTool, type ToolContext} from './shared.js';
 
 export function registerEventTools(ctx: ToolContext, client: PlunkClient): void {
@@ -19,6 +20,17 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
         'records it — any email that follows comes from a workflow triggered by the event.',
         '',
         '**Returns:** The recorded event and the contact it was attached to.',
+        '',
+        'A new contact whose domain does not exist, takes no email, is disposable or is a slip of a large',
+        "provider's (gmial.com) is refused with INVALID_EMAIL and the likely correction, and the event is not recorded.",
+        '',
+        "If the address is on the project's suppression list (it bounced permanently or reported spam),",
+        'the event is still recorded but the contact stays unsubscribed, and no email reaches it — not',
+        'even from the workflows the event starts. Only the Plunk dashboard can lift a suppression.',
+        '',
+        "With the project's double opt-in on (Plunk Lite), a sign-up (a new contact, or `subscribed: true`)",
+        'does not subscribe the contact: it gets a confirmation email and stays "Pending confirmation" until it',
+        'clicks the link; `pendingConfirmation` in the result says so. Workflows on `contact.subscribed` start then.',
         '',
         '**When to use:**',
         '- The user wants to trigger a workflow for a specific person',
@@ -42,10 +54,10 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
     },
     async ({event, email, subscribed, data}) =>
       runTool(async () => {
-        // `/v1/track` takes an email and upserts the contact, but it is the one
-        // endpoint that requires the public key. With only a secret key we have
-        // to reproduce it: upsert the contact to get an ID, then track against
-        // that ID via the secret-key event endpoint.
+        // `/v1/track` takes an email and upserts the contact. With the public key
+        // it is one call; with only the secret key the contact is upserted first
+        // (which also says whether it is suppressed) and the event tracked
+        // against its ID.
         if (client.hasPublicKey) {
           const result = await client.request({
             method: 'POST',
@@ -57,7 +69,7 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
           return jsonResult(`Tracked "${event}" for ${email}.`, result);
         }
 
-        const contact = await client.request<{id: string}>({
+        const contact = await client.request<{id: string; _meta?: unknown}>({
           method: 'POST',
           path: '/contacts',
           body: {email, subscribed: subscribed ?? true, data},
@@ -69,7 +81,7 @@ export function registerEventTools(ctx: ToolContext, client: PlunkClient): void 
           body: {name: event, contactId: contact.id, data},
         });
 
-        return jsonResult(`Tracked "${event}" for ${email}.`, result);
+        return jsonResult(`Tracked "${event}" for ${email}.${suppressionNote(contact)}`, result);
       }),
   );
 }

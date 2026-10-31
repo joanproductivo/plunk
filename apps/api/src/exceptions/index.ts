@@ -20,6 +20,11 @@ export enum ErrorCode {
   CAMPAIGN_NOT_FOUND = 'CAMPAIGN_NOT_FOUND',
   WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND',
   CONFLICT = 'CONFLICT',
+  ADDRESS_SUPPRESSED = 'ADDRESS_SUPPRESSED',
+  // Plunk Lite: a sign-up through /v1/send with a marketing template, while the double opt-in is on
+  OPT_IN_NEEDS_TRANSACTIONAL = 'OPT_IN_NEEDS_TRANSACTIONAL',
+  // Plunk Lite: the public subscribe page, for a contact that never signed up nor received an email
+  CONFIRMATION_NEEDS_EMAIL = 'CONFIRMATION_NEEDS_EMAIL',
   IDEMPOTENCY_KEY_REUSED = 'IDEMPOTENCY_KEY_REUSED',
 
   // Validation & Input Errors (400, 422)
@@ -165,4 +170,26 @@ export class BadRequest extends HttpException {
   public constructor(message: string, errorCode = ErrorCode.BAD_REQUEST, details?: Record<string, unknown>) {
     super(400, message, errorCode, details);
   }
+}
+
+/**
+ * Plunk Lite: the status, code and message an error answers with, for reporting one item of a
+ * request that went on with the rest. Codes as the global handler gives them, except that a client
+ * error without a code says so (a 429 without one is the billing limit) rather than INTERNAL_SERVER_ERROR.
+ */
+export function describeError(error: unknown): {status: number; code: string; message: string} {
+  if (error instanceof HttpException) {
+    const fallback =
+      error.code >= 500
+        ? ErrorCode.INTERNAL_SERVER_ERROR
+        : error.code === 429
+          ? ErrorCode.BILLING_LIMIT_EXCEEDED
+          : ErrorCode.BAD_REQUEST;
+    return {status: error.code, code: error.errorCode ?? fallback, message: error.message};
+  }
+  return {
+    status: 500,
+    code: ErrorCode.INTERNAL_SERVER_ERROR,
+    message: 'An unexpected error occurred; the email may have been queued, so check before sending it again',
+  };
 }

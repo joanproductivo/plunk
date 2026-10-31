@@ -1,23 +1,32 @@
-import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
+import crypto from 'crypto';
+
+import {CampaignStatus, EmailSourceType, EmailStatus, WorkflowExecutionStatus} from '@plunk/db';
 import {type Job, Queue} from 'bullmq';
 import type {RedisOptions} from 'ioredis';
 import signale from 'signale';
 import type {
   ApiRequestCleanupJobData,
   BulkContactActionJobData,
-  BulkContactActionSelector,
   CampaignBatchJobData,
   CampaignStatsSweepJobData,
   CardVerificationJobData,
   CardVerificationSweepJobData,
   ContactImportJobData,
+  ContactSubscriptionEventsJobData,
+  DlqDrainJobData,
   DomainVerificationJobData,
   CampaignCancelCleanupJobData,
   EmailBodyCleanupJobData,
+  EmailRecoverySweepJobData,
+  EventTrackingJobData,
   IdempotencyKeyCleanupJobData,
+  MembershipEventsJobData,
   MeterEventJobData,
+  PlunkLiteChecksJobData,
   ScheduledCampaignJobData,
+  SecurityCheckJobData,
   SegmentCountJobData,
+  SegmentMembershipEventsJobData,
   SendEmailJobData,
   SnoozeSweepJobData,
   WorkflowStepJobData,
@@ -25,7 +34,12 @@ import type {
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
+import {errorMessage, redis} from '../database/redis.js';
 import {parseRedisUrl} from '../utils/redis.js';
+import {withTimeout} from '../utils/withTimeout.js';
+
+/** How long a change that is already written waits for a queue before carrying on without it */
+const QUEUE_WAIT_MS = 3000;
 
 /**
  * Queue Configuration
@@ -45,7 +59,10 @@ const redisConnection: RedisOptions = {
 export const emailQueue = new Queue<SendEmailJobData>('email', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Exponential from 2s: the retries span about four minutes, so an email outlasts a
+    // database or SES hiccup instead of being marked failed (or, once SES has it, left
+    // unrecorded) a few seconds in
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 2000,
@@ -58,7 +75,9 @@ export const emailQueue = new Queue<SendEmailJobData>('email', {
 export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    // Exponential from 5s: about ten minutes of retries, so a database outage does not end
+    // the batch chain and leave the campaign half sent. A batch is safe to run again.
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 5000,
@@ -68,10 +87,22 @@ export const campaignQueue = new Queue<CampaignBatchJobData>('campaign', {
   },
 });
 
+/** Whether a job is still to run, or running: not finished, nor in no list */
+async function isStillToRun(job: Job): Promise<boolean> {
+  const state = await job.getState();
+  return state !== 'completed' && state !== 'failed' && state !== 'unknown';
+}
+
+/** The ID of the job that ends a delay, or a wait's timeout: one per step execution */
+const workflowJobId = (type: 'delay-end' | 'timeout', stepExecutionId: string) => `workflow-${type}-${stepExecutionId}`;
+
+// Plunk Lite: 8 attempts over about 4 minutes, like emails, so a delay's end or a wait's timeout
+// that comes due while the database restarts is not lost. Both claim the run before moving it, so a
+// retry never moves it twice.
 export const workflowQueue = new Queue<WorkflowStepJobData>('workflow', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
+    attempts: 8,
     backoff: {
       type: 'exponential',
       delay: 2000,
@@ -102,8 +133,9 @@ export const importQueue = new Queue<ContactImportJobData>('import', {
       type: 'exponential',
       delay: 5000,
     },
-    removeOnComplete: 50, // Keep last 50 completed imports
-    removeOnFail: 100, // Keep last 100 failed imports
+    // Plunk Lite: fewer and for less time -- each kept its whole CSV, up to about 7 MB, in Redis
+    removeOnComplete: {age: 24 * 3600, count: 20},
+    removeOnFail: {age: 7 * 24 * 3600, count: 50},
   },
 });
 
@@ -259,6 +291,24 @@ export const cardVerificationSweepQueue = new Queue<CardVerificationSweepJobData
 });
 
 /**
+ * Recovers emails nothing will move on its own: PENDING with no job, or SENDING after the run
+ * that claimed them stopped. Retries are safe: every change is conditional on the state the
+ * sweep found.
+ */
+export const emailRecoverySweepQueue = new Queue<EmailRecoverySweepJobData>('email-recovery-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+/**
  * Resubscribes contacts whose snooze window has ended. Retries are cheap and safe: the sweep
  * only ever acts on contacts that are still due, so a repeat run after a failure does nothing
  * to the ones it already woke.
@@ -275,6 +325,76 @@ export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
     removeOnFail: 50,
   },
 });
+
+/**
+ * Segment entry/exit events fired outside the request that changed the membership (static, or
+ * Plunk Lite: a dynamic segment recomputed from the dashboard), and (Plunk Lite) the subscription
+ * events of bulk subscription changes.
+ * Retries are safe: the worker records how far it got and resumes from there.
+ */
+export const segmentMembershipEventsQueue = new Queue<MembershipEventsJobData>('segment-membership-events', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    // Plunk Lite: 10 attempts over about 40 minutes, so a job stopped by the database being out
+    // (it fails then, and resumes from its progress) outlasts a restart or an outage
+    attempts: 10,
+    backoff: {
+      type: 'exponential',
+      delay: 5000,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 500,
+  },
+});
+
+/**
+ * SES events tracked outside the webhook request that received them, with the unsubscribe a bounce
+ * or complaint causes. One attempt: tracking an event starts and resumes workflows, and a run
+ * repeated after it got part of the way could send their emails twice. A failed job stays in the
+ * queue, where it can be seen.
+ */
+export const eventTrackingQueue = new Queue<EventTrackingJobData>('event-tracking', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 1,
+    // Kept up to a day (or the last 20,000), so a copy of the same notification that SNS
+    // delivers again -- within minutes, normally -- finds its job and is not tracked twice
+    removeOnComplete: {age: 86_400, count: 20_000},
+    removeOnFail: 5000,
+  },
+});
+
+/**
+ * Plunk Lite's own checks: the sending reputation after a bounce or complaint, once per project
+ * for a burst of them, whether SES events reach the webhook, Redis memory, and the workflow runs
+ * nothing would move on any more (left RUNNING by a restart, or WAITING past the end of their
+ * wait). Each job says how it is retried.
+ */
+export const plunkLiteChecksQueue = new Queue<PlunkLiteChecksJobData>('plunk-lite-checks', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    removeOnComplete: 100,
+    removeOnFail: 500,
+  },
+});
+
+/**
+ * Plunk Lite: the drain of the dead-letter queue of SES events, one at a time. Kept apart from the
+ * checks, so a long drain holds none of their slots.
+ */
+export const plunkLiteDlqQueue = new Queue<DlqDrainJobData>('plunk-lite-dlq', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    removeOnComplete: 20,
+    removeOnFail: 100,
+  },
+});
+
+/** How long asking for a drain of the dead-letter queue may wait for Redis */
+const DLQ_QUEUE_TIMEOUT_MS = 3000;
+
+/** How long a reputation check waits for the rest of a burst of bounces and complaints */
+const SECURITY_CHECK_DELAY_MS = 10_000;
 
 function emailPriorityFor(sourceType: EmailSourceType): number {
   switch (sourceType) {
@@ -322,24 +442,28 @@ export class QueueService {
    */
   public static async queueCampaignBatch(data: CampaignBatchJobData): Promise<Job<CampaignBatchJobData>> {
     return campaignQueue.add('process-batch', data, {
-      jobId: `campaign-${data.campaignId}-batch-${data.batchNumber}`,
+      // The generation keeps a later send of the same campaign from colliding with the
+      // batch jobs of an earlier one, which BullMQ still holds and would silently keep
+      jobId: `campaign-${data.campaignId}-${data.generation}-batch-${data.batchNumber}`,
     });
   }
 
   /**
-   * Add workflow step to queue for execution
+   * Queue the end of a DELAY step: when the delay runs out, the execution moves on to the step
+   * connected after it then, or completes if there is none
    */
-  public static async queueWorkflowStep(
+  public static async queueWorkflowDelayEnd(
     executionId: string,
     stepId: string,
-    delay?: number,
+    stepExecutionId: string,
+    delayMs: number,
   ): Promise<Job<WorkflowStepJobData>> {
     return workflowQueue.add(
-      'process-step',
-      {executionId, stepId, type: 'process-step'},
+      'delay-end',
+      {executionId, stepId, stepExecutionId, type: 'delay-end'},
       {
-        delay,
-        jobId: `workflow-${executionId}-${stepId}`,
+        delay: delayMs,
+        jobId: workflowJobId('delay-end', stepExecutionId),
       },
     );
   }
@@ -358,16 +482,47 @@ export class QueueService {
       {executionId, stepId, stepExecutionId, type: 'timeout'},
       {
         delay: timeoutMs,
-        jobId: `workflow-timeout-${stepExecutionId}`,
+        jobId: workflowJobId('timeout', stepExecutionId),
       },
     );
+  }
+
+  /**
+   * Plunk Lite: make sure the job that ends a delay or a wait's timeout is queued, to run now: for a
+   * run the recovery sweep finds still waiting well after it was due. A job that is still to run is
+   * left as it is; one that finished or failed is replaced. Safe to repeat: the job claims the run
+   * before moving it. Returns whether a job was queued.
+   */
+  public static async ensureWorkflowWaitEnd(
+    type: 'delay-end' | 'timeout',
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const jobId = workflowJobId(type, stepExecutionId);
+    if (!(await this.clearFinishedJob(workflowQueue, jobId))) {
+      return false;
+    }
+    await workflowQueue.add(type, {executionId, stepId, stepExecutionId, type}, {jobId});
+    return true;
+  }
+
+  /**
+   * Plunk Lite: whether the job that ends a delay or a wait's timeout is still to run (or running)
+   */
+  public static async isWorkflowWaitEndPending(
+    type: 'delay-end' | 'timeout',
+    stepExecutionId: string,
+  ): Promise<boolean> {
+    const job = await workflowQueue.getJob(workflowJobId(type, stepExecutionId));
+    return job ? isStillToRun(job) : false;
   }
 
   /**
    * Cancel a queued timeout job
    */
   public static async cancelWorkflowTimeout(stepExecutionId: string): Promise<void> {
-    const jobId = `workflow-timeout-${stepExecutionId}`;
+    const jobId = workflowJobId('timeout', stepExecutionId);
     const job = await workflowQueue.getJob(jobId);
 
     if (job) {
@@ -381,13 +536,29 @@ export class QueueService {
    */
   public static async scheduleCampaign(campaignId: string, scheduledFor: Date): Promise<Job<ScheduledCampaignJobData>> {
     const delay = scheduledFor.getTime() - Date.now();
+    const jobId = `scheduled-campaign-${campaignId}`;
+
+    // Any job already under this id -- the campaign's earlier schedule, still waiting, or one that
+    // finished or could not start -- would make BullMQ ignore the new one: the campaign would go
+    // out at the old time, or never. Only a job already running is left alone.
+    const previous = await scheduledQueue.getJob(jobId);
+    let replaced = !previous;
+    if (previous && (await previous.getState()) !== 'active') {
+      // It can start between the check and the removal, which then fails as locked
+      replaced = await previous.remove().then(
+        () => true,
+        () => false,
+      );
+    }
 
     return scheduledQueue.add(
       'send-scheduled-campaign',
       {campaignId},
       {
         delay: Math.max(0, delay),
-        jobId: `scheduled-campaign-${campaignId}`,
+        // A job of the earlier schedule still running keeps the id; this one gets its own, and the
+        // running one skips the campaign once it reads the new time
+        jobId: replaced ? jobId : `${jobId}-${scheduledFor.getTime()}`,
       },
     );
   }
@@ -407,19 +578,31 @@ export class QueueService {
   /**
    * Queue the cleanup that returns a cancelled campaign to draft.
    *
-   * The job id is derived from the campaign so that re-running `cancel` on a campaign
-   * whose cleanup died mid-way -- the repair path -- re-uses the existing job instead
-   * of starting a second one racing it over the same rows.
+   * The job id is derived from the campaign so that re-running `cancel` while its
+   * cleanup is still pending or running re-uses that job instead of starting a second
+   * one racing it over the same rows.
+   *
+   * A finished job keeps the id for as long as BullMQ retains it, and an add under it
+   * is dropped: the cleanup of a campaign cancelled again after it was sent again, or
+   * of one whose cleanup ran out of attempts (the repair path), would never run, and
+   * the campaign would stay CANCELLED for good. So a completed or failed job goes
+   * first. A job that finishes between the check and the add still drops it; cancel
+   * again once it has.
    */
   public static async queueCampaignCancelCleanup(
     campaignId: string,
     projectId: string,
     cancelledAt: Date,
   ): Promise<void> {
+    const jobId = `campaign-cancel-cleanup-${campaignId}`;
+    // False while the cleanup is still to run, which then does the work, or when a finished one
+    // would not go, which clearFinishedJob logs
+    await this.clearFinishedJob(campaignCancelCleanupQueue, jobId);
+
     await campaignCancelCleanupQueue.add(
       'cleanup',
       {campaignId, projectId, cancelledAt: cancelledAt.toISOString()},
-      {jobId: `campaign-cancel-cleanup-${campaignId}`},
+      {jobId},
     );
   }
 
@@ -468,7 +651,8 @@ export class QueueService {
       state,
       progress,
       result: returnValue,
-      data: job.data,
+      // Plunk Lite: not the job's data, which holds the whole CSV, sent on every poll of the dashboard
+      filename: job.data.filename,
       failedReason,
     };
   }
@@ -508,18 +692,10 @@ export class QueueService {
   /**
    * Queue bulk contact action job
    */
-  public static async queueBulkContactAction(
-    projectId: string,
-    selector: BulkContactActionSelector,
-    operation: 'subscribe' | 'unsubscribe' | 'delete',
-  ): Promise<Job<BulkContactActionJobData>> {
-    return bulkContactQueue.add(
-      'bulk-contact-action',
-      {projectId, operation, selector},
-      {
-        jobId: `bulk-${operation}-${projectId}-${Date.now()}`,
-      },
-    );
+  public static async queueBulkContactAction(data: BulkContactActionJobData): Promise<Job<BulkContactActionJobData>> {
+    return bulkContactQueue.add('bulk-contact-action', data, {
+      jobId: `bulk-${data.operation}-${data.projectId}-${Date.now()}`,
+    });
   }
 
   /**
@@ -569,6 +745,184 @@ export class QueueService {
   }
 
   /**
+   * Queue the entry/exit events of a segment membership change. The job ID is set here so
+   * a command the Redis client resends after a dropped connection cannot add the job twice.
+   */
+  public static async queueSegmentMembershipEvents(
+    data: SegmentMembershipEventsJobData,
+  ): Promise<Job<MembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add(
+      'track-segment-membership-events',
+      {...data, type: 'segment-membership'},
+      {
+        jobId: `segment-events-${crypto.randomUUID()}`,
+      },
+    );
+  }
+
+  /**
+   * Plunk Lite: queue the contact.subscribed / contact.unsubscribed events of a bulk subscription
+   * change, in the same ordered queue, so they run with progress and retries instead of in a loop
+   * nobody waits for
+   */
+  public static async queueContactSubscriptionEvents(
+    data: Omit<ContactSubscriptionEventsJobData, 'type'>,
+  ): Promise<Job<MembershipEventsJobData>> {
+    return segmentMembershipEventsQueue.add(
+      'track-contact-subscription-events',
+      {type: 'contact-subscription', ...data},
+      {jobId: `contact-events-${crypto.randomUUID()}`},
+    );
+  }
+
+  /**
+   * Remove the job with this ID if it has finished (or sits in no list), so adding one with the same
+   * ID queues it again: BullMQ ignores an add whose ID is still taken. Returns whether the ID is free
+   * -- false while a job that is still to run, or running, holds it, or one that would not go. A
+   * concurrent caller can have replaced it with a job that is now running, and removing that one
+   * fails as locked: the running job does the work.
+   */
+  private static async clearFinishedJob(queue: Queue, jobId: string): Promise<boolean> {
+    const previous = await queue.getJob(jobId);
+    if (!previous) {
+      return true;
+    }
+    if (await isStillToRun(previous)) {
+      return false;
+    }
+    try {
+      await previous.remove();
+      return true;
+    } catch (error) {
+      // Free only if it went anyway; otherwise an add with its ID would do nothing
+      const free = !(await queue.getJob(jobId));
+      if (!free) {
+        signale.warn(`[QUEUE] Could not clear job ${jobId} to queue it again: ${errorMessage(error)}`);
+      }
+      return free;
+    }
+  }
+
+  /**
+   * Queue the job of a change that is already written, without letting the queue fail the caller
+   * or hold it up: a retried request would write the change again. With Redis down `add` waits
+   * instead of failing; it still completes once Redis is back, but the caller carries on after
+   * QUEUE_WAIT_MS. A job the queue refuses is logged and lost.
+   */
+  public static async queueWithoutWaiting(add: Promise<unknown>, what: string): Promise<void> {
+    const settled = add.then(
+      () => true,
+      error => {
+        // Only the message: ioredis attaches the command and its arguments (contact IDs) to errors
+        signale.error(`[QUEUE] Failed to queue ${what}: ${errorMessage(error)}`);
+        return true;
+      },
+    );
+
+    let timer: NodeJS.Timeout | undefined;
+    const done = await Promise.race([
+      settled,
+      new Promise<false>(resolve => {
+        timer = setTimeout(() => resolve(false), QUEUE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    if (!done) {
+      signale.warn(`[QUEUE] Queueing ${what} is taking long; not waiting for it`);
+    }
+  }
+
+  /**
+   * Queue an SES event to be tracked by the worker. The job ID is the SNS message's, so copies of
+   * one notification, which SNS delivers at least once, track the event once. Plunk Lite: the
+   * unsubscribe a bounce of no stored email causes is queued with no job ID, once per contact it took
+   * off the list.
+   */
+  public static async queueEventTracking(
+    data: EventTrackingJobData,
+    snsMessageId: string | undefined,
+  ): Promise<Job<EventTrackingJobData>> {
+    return eventTrackingQueue.add('track-event', data, {
+      jobId: snsMessageId ? `sns-${snsMessageId}` : undefined,
+    });
+  }
+
+  /**
+   * Queue the reputation check of a project, unless one is already waiting: the bounces and
+   * complaints of a burst are judged together, ten seconds after the first. One that arrives while
+   * the check runs queues another after it, so none is judged on rates read before it. Retried
+   * while the database cannot answer, since a check that cannot read the rates has not found the
+   * project healthy.
+   *
+   * The deduplication key only goes when its job ends. If it outlives the job (removed by hand, or
+   * evicted: Redis must keep `noeviction`), every check would be deduplicated into a job that never
+   * runs, so a key whose job is gone or finished is removed and the check queued again, once. If a
+   * check queued meanwhile does the same, two run, which judges the project twice and changes nothing.
+   */
+  public static async queueSecurityCheck(data: SecurityCheckJobData): Promise<Job> {
+    return this.addOnce(
+      plunkLiteChecksQueue,
+      'security-check',
+      data,
+      {delay: SECURITY_CHECK_DELAY_MS, attempts: 5, backoff: {type: 'exponential', delay: 5000}},
+      `security-check-${data.projectId}`,
+      `The reputation check of project ${data.projectId}`,
+    );
+  }
+
+  /**
+   * Plunk Lite: drain the dead-letter queue of SES events. One at a time: asked for while one runs,
+   * it runs again after it; while one waits, that one is enough. Bounded: BullMQ waits for Redis for
+   * as long as it is down, and the webhook and the checks that ask for it must go on.
+   */
+  public static async queueDlqDrain(): Promise<Job> {
+    return withTimeout(this.addDlqDrain(), DLQ_QUEUE_TIMEOUT_MS);
+  }
+
+  private static async addDlqDrain(): Promise<Job> {
+    return this.addOnce(
+      plunkLiteDlqQueue,
+      'dlq-drain',
+      {},
+      {attempts: 1},
+      'dlq-drain',
+      'The drain of the dead-letter queue',
+    );
+  }
+
+  /**
+   * Adds a job no more than once at a time under `deduplicationId`: one asked for while another runs
+   * is kept and added when it ends. A key that outlived its job (left by a job that ended without
+   * releasing it) is removed and the job added again.
+   */
+  private static async addOnce<T>(
+    queue: Queue<T>,
+    name: string,
+    data: T,
+    opts: Parameters<Queue<T>['add']>[2],
+    deduplicationId: string,
+    what: string,
+  ): Promise<Job> {
+    const add = () =>
+      // @ts-expect-error BullMQ types the name and data of a queue's jobs tighter than a generic can say
+      queue.add(name, data, {
+        ...opts,
+        // BullMQ ignores a ttl with keepLastIfActive; a job id would stop the one queued behind a run
+        deduplication: {id: deduplicationId, keepLastIfActive: true},
+      }) as Promise<Job>;
+
+    const job = await add();
+    const state = await job.getState();
+    if (state !== 'completed' && state !== 'failed' && state !== 'unknown') {
+      return job;
+    }
+    signale.warn(`[QUEUE] ${what} was held by job ${job.id}, ${state}: queueing it again`);
+    await queue.removeDeduplicationKey(deduplicationId);
+    return add();
+  }
+
+  /**
    * Get queue statistics
    */
   public static async getStats() {
@@ -584,6 +938,8 @@ export class QueueService {
       idempotencyKeyCleanupCounts,
       bulkContactCounts,
       meterCounts,
+      segmentMembershipEventsCounts,
+      eventTrackingCounts,
     ] = await Promise.all([
       emailQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       campaignQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
@@ -596,6 +952,8 @@ export class QueueService {
       idempotencyKeyCleanupQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       bulkContactQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       meterQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      segmentMembershipEventsQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      eventTrackingQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
     ]);
 
     return {
@@ -610,11 +968,62 @@ export class QueueService {
       idempotencyKeyCleanup: idempotencyKeyCleanupCounts,
       bulkContact: bulkContactCounts,
       meter: meterCounts,
+      segmentMembershipEvents: segmentMembershipEventsCounts,
+      eventTracking: eventTrackingCounts,
     };
   }
 
   /**
-   * Pause all queues (for maintenance)
+   * Plunk Lite: give a job that failed for good another round of its attempts, counting the rounds
+   * in its data. BullMQ keeps the attempts already made, and the times the job stalled, for the
+   * job's whole life, so both are reset for the round.
+   */
+  public static async retryForAnotherRound<T extends {sweepRetries?: number}>(job: Job<T>): Promise<void> {
+    await job.updateData({...job.data, sweepRetries: (job.data.sweepRetries ?? 0) + 1});
+    await redis.hdel(`${job.queueQualifiedName}:${job.id}`, 'stc');
+    await job.retry('failed', {resetAttemptsMade: true});
+  }
+
+  /**
+   * Plunk Lite: remove the jobs still to run in `queue` that `pick` chooses, read a page at a time,
+   * every page before anything is removed. The worker still takes jobs meanwhile, which can shift a
+   * page so that one is read twice (its second removal fails and is skipped) or never: the job left
+   * behind is one the caller has already made pointless, and finds so when it runs. A job that has
+   * started meanwhile cannot be removed either. Only the ids picked are kept, and they are removed
+   * a page at a time, all of a page at once. Returns how many were removed.
+   */
+  private static async removeQueuedJobs<T>(
+    queue: Queue<T>,
+    pick: (jobs: Job<T>[]) => Promise<Job<T>[]>,
+  ): Promise<number> {
+    const PAGE = 1000;
+    const picked: string[] = [];
+    for (let start = 0; ; start += PAGE) {
+      // The range is per state, so a page holds up to one range of each
+      const jobs = (await queue.getJobs(['waiting', 'prioritized', 'delayed'], start, start + PAGE - 1)).filter(
+        job => job,
+      );
+      if (jobs.length === 0) {
+        break;
+      }
+      picked.push(...(await pick(jobs)).map(job => job.id!));
+    }
+
+    let removed = 0;
+    for (let start = 0; start < picked.length; start += PAGE) {
+      const codes = await Promise.all(
+        // A job started since it was read is not removed: it finds the project disabled, or the
+        // campaign cancelled
+        picked.slice(start, start + PAGE).map(id => queue.remove(id).catch(() => 0)),
+      );
+      removed += codes.filter(code => code === 1).length;
+    }
+    return removed;
+  }
+
+  /**
+   * Pause all queues (for maintenance). Plunk Lite: the email queue's pause lasts at most until the
+   * recovery sweep's probe resumes it, 5 minutes later (SesSendGate.resumeSendingIfDue)
    */
   public static async pauseAll(): Promise<void> {
     await Promise.all([
@@ -680,66 +1089,78 @@ export class QueueService {
   /**
    * Cancel all pending jobs for a specific project
    * This should be called when a project is disabled
+   *
+   * Plunk Lite: `onScheduledCancelled` gets the scheduled campaigns it cancels, as soon as they are,
+   * for a reactivation to return them to the drafts. It must not throw.
    */
-  public static async cancelAllProjectJobs(projectId: string): Promise<void> {
+  public static async cancelAllProjectJobs(
+    projectId: string,
+    onScheduledCancelled?: (campaignIds: string[]) => Promise<void>,
+  ): Promise<void> {
     signale.info(`[QUEUE] Cancelling all pending jobs for project ${projectId}`);
 
-    // Cancel all scheduled campaigns for this project
-    const scheduledCampaigns = await scheduledQueue.getJobs(['waiting', 'delayed']);
-    for (const job of scheduledCampaigns) {
-      // We need to check if the campaign belongs to this project
-      // by looking up the campaign in the database
-      const campaign = await prisma.campaign.findUnique({
-        where: {id: job.data.campaignId},
-        select: {projectId: true},
-      });
+    // Cancel all scheduled campaigns for this project. A disable is final for what was planned:
+    // re-enabling the project must not send them, so the campaign itself is cancelled, not only its job
+    // Only the ones this cancels, and no campaign cancelled before
+    const scheduledCampaigns = await prisma.campaign.updateManyAndReturn({
+      where: {projectId, status: CampaignStatus.SCHEDULED},
+      data: {status: CampaignStatus.CANCELLED},
+      select: {id: true},
+    });
 
-      if (campaign?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed scheduled campaign job ${job.id}`);
+    if (scheduledCampaigns.length > 0) {
+      await onScheduledCancelled?.(scheduledCampaigns.map(campaign => campaign.id));
+      for (const campaign of scheduledCampaigns) {
+        await this.cancelScheduledCampaign(campaign.id);
       }
+
+      signale.info(`[QUEUE] Cancelled ${scheduledCampaigns.length} scheduled campaigns for project ${projectId}`);
     }
 
-    // Cancel all pending emails for this project
-    const pendingEmails = await emailQueue.getJobs(['waiting', 'delayed']);
-    for (const job of pendingEmails) {
-      const email = await prisma.email.findUnique({
-        where: {id: job.data.emailId},
-        select: {projectId: true},
+    // Cancel all pending emails and campaign batches for this project. Plunk Lite: also the
+    // `prioritized` ones -- every email job has a priority, so they were all missed -- a page at a
+    // time, and on their own: Redis failing here must not keep the cancel below from running
+    try {
+      const emails = await this.removeQueuedJobs(emailQueue, async jobs => {
+        const ofProject = await prisma.email.findMany({
+          where: {projectId, id: {in: jobs.map(job => job.data.emailId)}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(email => email.id));
+        return jobs.filter(job => ids.has(job.data.emailId));
       });
-
-      if (email?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed email job ${job.id}`);
-      }
+      const batches = await this.removeQueuedJobs(campaignQueue, async jobs => {
+        const ofProject = await prisma.campaign.findMany({
+          where: {projectId, id: {in: [...new Set(jobs.map(job => job.data.campaignId))]}},
+          select: {id: true},
+        });
+        const ids = new Set(ofProject.map(campaign => campaign.id));
+        return jobs.filter(job => ids.has(job.data.campaignId));
+      });
+      signale.info(
+        `[QUEUE] Removed ${emails} email job(s) and ${batches} campaign batch job(s) of project ${projectId}`,
+      );
+    } catch (error) {
+      signale.error(`[QUEUE] Could not remove the queued jobs of project ${projectId}: ${errorMessage(error)}`);
     }
 
-    // Cancel all pending campaign batches for this project
-    const campaignBatches = await campaignQueue.getJobs(['waiting', 'delayed']);
-    for (const job of campaignBatches) {
-      const campaign = await prisma.campaign.findUnique({
-        where: {id: job.data.campaignId},
-        select: {projectId: true},
-      });
+    // Cancel every workflow execution still in progress. Removing their queued jobs alone left them
+    // WAITING forever, and re-enabling the project must not resume them either. Jobs still queued for
+    // them stay in Redis and do nothing when they fire, since the engine never moves a cancelled execution on.
+    const cancelledExecutions = await prisma.workflowExecution.updateMany({
+      where: {
+        workflow: {projectId},
+        status: {in: [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.WAITING]},
+      },
+      data: {
+        status: WorkflowExecutionStatus.CANCELLED,
+        completedAt: new Date(),
+        exitReason: 'Project disabled',
+      },
+    });
 
-      if (campaign?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed campaign batch job ${job.id}`);
-      }
-    }
-
-    // Cancel all pending workflow steps for this project
-    const workflowSteps = await workflowQueue.getJobs(['waiting', 'delayed']);
-    for (const job of workflowSteps) {
-      const execution = await prisma.workflowExecution.findUnique({
-        where: {id: job.data.executionId},
-        select: {workflow: {select: {projectId: true}}},
-      });
-
-      if (execution?.workflow.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed workflow step job ${job.id}`);
-      }
+    if (cancelledExecutions.count > 0) {
+      signale.info(`[QUEUE] Cancelled ${cancelledExecutions.count} workflow executions for project ${projectId}`);
     }
 
     // Mark every still-PENDING email for this project as FAILED. We just stripped
@@ -793,6 +1214,10 @@ export class QueueService {
       apiRequestCleanupQueue.close(),
       bulkContactQueue.close(),
       meterQueue.close(),
+      segmentMembershipEventsQueue.close(),
+      eventTrackingQueue.close(),
+      plunkLiteChecksQueue.close(),
+      plunkLiteDlqQueue.close(),
     ]);
   }
 }

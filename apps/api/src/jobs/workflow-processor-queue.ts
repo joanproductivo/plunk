@@ -7,6 +7,7 @@ import type {WorkflowStepJobData} from '@plunk/types';
 import {type Job, Worker} from 'bullmq';
 import signale from 'signale';
 
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {workflowQueue} from '../services/QueueService.js';
 import {WorkflowExecutionService} from '../services/WorkflowExecutionService.js';
 
@@ -23,9 +24,13 @@ export function createWorkflowWorker() {
         }
 
         await WorkflowExecutionService.processTimeout(executionId, stepId, stepExecutionId);
+      } else if (type === 'delay-end') {
+        // End a DELAY: move on to the step after it, or complete the execution
+        await WorkflowExecutionService.processDelayEnd(executionId, stepId);
       } else {
-        // Handle regular step execution
-        await WorkflowExecutionService.processStepExecution(executionId, stepId);
+        // A step queued for after a delay, by jobs from before delays ended through delay-end:
+        // ended through the delay the run waits on, if it still does
+        await WorkflowExecutionService.resumeLegacyStep(executionId);
       }
     },
     {
@@ -40,6 +45,9 @@ export function createWorkflowWorker() {
 
   worker.on('failed', (job, err) => {
     signale.error(`[WORKFLOW-PROCESSOR] Job ${job?.id} failed:`, err.message);
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      void FailureAlertService.recordWorkflowJob(job.data.executionId, err.message);
+    }
   });
 
   worker.on('error', err => {

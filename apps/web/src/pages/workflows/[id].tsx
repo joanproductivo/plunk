@@ -48,6 +48,7 @@ import useSWR from 'swr';
 import {NextSeo} from 'next-seo';
 import {WorkflowBuilder} from '../../components/WorkflowBuilder';
 import {EditStepDialog} from '../../components/workflow-steps';
+import {hasUpdateContactAction} from '../../components/workflow-steps/shared';
 import {ReactFlowProvider} from '@xyflow/react';
 import {WorkflowSchemas} from '@plunk/shared';
 import dayjs from 'dayjs';
@@ -74,7 +75,13 @@ interface PaginatedExecutions {
 export default function WorkflowEditorPage() {
   const router = useRouter();
   const {id} = router.query;
-  const [activeTab, setActiveTab] = useState<'builder' | 'executions'>('builder');
+  // In the URL, so a link (a failure alert's) can open the executions
+  const activeTab: 'builder' | 'executions' = router.query.tab === 'executions' ? 'executions' : 'builder';
+  const setActiveTab = (tab: 'builder' | 'executions') => {
+    if (router.isReady) {
+      void router.push({pathname: router.pathname, query: {...router.query, tab}}, undefined, {shallow: true});
+    }
+  };
 
   type WorkflowDialog =
     | {type: 'none'}
@@ -207,18 +214,11 @@ export default function WorkflowEditorPage() {
           }
           break;
 
-        case 'UPDATE_CONTACT': {
-          const hasUpdates =
-            config.updates && typeof config.updates === 'object' && Object.keys(config.updates).length > 0;
-          const hasSubscriptionAction =
-            typeof config.subscriptionAction === 'string' &&
-            config.subscriptionAction !== 'none' &&
-            config.subscriptionAction !== '';
-          if (!hasUpdates && !hasSubscriptionAction) {
-            errors.push(`"${step.name}" step is missing contact updates or a subscription action`);
+        case 'UPDATE_CONTACT':
+          if (!hasUpdateContactAction(config)) {
+            errors.push(`"${step.name}" step is missing contact updates, a subscription action or a segment`);
           }
           break;
-        }
       }
     });
 
@@ -824,7 +824,7 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
                 onBlur={() => {
                   setTimeout(() => setEventPopoverOpen(false), 150);
                 }}
-                placeholder="e.g., contact.created, email.opened"
+                placeholder="e.g., user.signup, email.open"
                 required
                 autoComplete="off"
               />

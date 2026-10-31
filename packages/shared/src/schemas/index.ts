@@ -1,12 +1,76 @@
 import {CampaignAudienceType, TemplateType, TrackingMode, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
-import type {FilterCondition, FilterGroup} from '@plunk/types';
-import {SNOOZE_DURATIONS} from '@plunk/types';
+import type {FilterCondition, FilterGroup, OptInTexts} from '@plunk/types';
+import {CONTACT_SUBSCRIPTION_STATUSES, SNOOZE_DURATIONS} from '@plunk/types';
 import {z} from 'zod';
+
+import {
+  REQUEST_SEGMENTS_MAX,
+  SEGMENT_MEMBERS_MAX,
+  SEGMENTS_BULK_MAX,
+  WORKFLOW_SEGMENT_CHANGES_MAX,
+} from '../segments.js';
+import type {ProjectBrand} from '../template/brand.js';
+import type {ProjectFooters} from '../template/unsubscribeFooter.js';
 
 const literalSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.date()]);
 type Literal = z.infer<typeof literalSchema>;
 type Json = Literal | {[key: string]: Json} | Json[];
 const jsonSchema: z.ZodType<Json> = z.lazy(() => z.union([literalSchema, z.array(jsonSchema), z.record(jsonSchema)]));
+
+/** Plunk Lite: largest `data` that /v1/track and /v1/send take, serialized as JSON */
+export const TRACK_DATA_MAX_BYTES = 32 * 1024;
+/** Plunk Lite: deepest nesting of that `data`; `{value, persistent: false}` already takes one level */
+export const TRACK_DATA_MAX_DEPTH = 6;
+/** Plunk Lite: longest event name */
+export const EVENT_NAME_MAX = 100;
+/** Plunk Lite: most recipients in one /v1/send */
+export const SEND_MAX_RECIPIENTS = 50;
+
+// A surrogate without its pair. No lookbehind and not String#isWellFormed: the dashboard loads this
+// package too, and older Safari and Firefox have neither.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+
+/** Plunk Lite: whether Postgres can store a text: no \u0000 and no lone surrogate */
+const storableText = (text: string) => !text.includes('\u0000') && !LONE_SURROGATE.test(text);
+
+/** Plunk Lite: a /v1/send recipient's name, saved in the contact's data, so one Postgres can store */
+const recipientName = z.string().refine(text => storableText(text), 'Name contains invalid characters');
+
+/**
+ * Plunk Lite: a JSON value whose depth and size are checked before `jsonSchema` walks it. That
+ * walk is recursive, so a payload nested thousands of levels deep would overflow the stack and
+ * answer 500; this checks it iteratively and turns it away as a validation error instead.
+ */
+export function boundedJson(maxBytes: number, maxDepth: number) {
+  return z
+    .unknown()
+    .superRefine((value, ctx) => {
+      const stack: [unknown, number][] = [[value, 0]];
+      for (let item = stack.pop(); item; item = stack.pop()) {
+        const [node, depth] = item;
+        // Postgres cannot store \u0000 or half a surrogate pair: a 422 here rather than a 500 on writing it
+        if (typeof node === 'string' && !storableText(node)) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
+          return;
+        }
+        if (node === null || typeof node !== 'object') continue;
+        if (Object.keys(node).some(key => !storableText(key))) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: 'data contains an invalid character'});
+          return;
+        }
+        if (depth >= maxDepth) {
+          ctx.addIssue({code: z.ZodIssueCode.custom, message: `data is nested deeper than ${maxDepth} levels`});
+          return;
+        }
+        for (const child of Object.values(node)) stack.push([child, depth + 1]);
+      }
+      // TextEncoder rather than Buffer: the dashboard loads this package too
+      if (new TextEncoder().encode(JSON.stringify(value)).length > maxBytes) {
+        ctx.addIssue({code: z.ZodIssueCode.custom, message: `data must be at most ${maxBytes / 1024} KB`});
+      }
+    })
+    .pipe(jsonSchema);
+}
 
 const uuid = z.string().uuid();
 const email = z.string().email();
@@ -43,7 +107,9 @@ export const UtilitySchemas = {
 
 export const AuthenticationSchemas = {
   login: z.object({
-    email,
+    // The longest a deliverable address can be (RFC 5321): the login is public, and an address
+    // of any length was taken as is
+    email: email.max(254),
     password: z.string().min(6),
   }),
   signup: z.object({
@@ -54,7 +120,8 @@ export const AuthenticationSchemas = {
     token: z.string().length(64, 'Invalid verification token'),
   }),
   requestPasswordReset: z.object({
-    email,
+    // Public, like the login: no longer than a deliverable address
+    email: email.max(254),
   }),
   resetPassword: z.object({
     token: z.string().length(64, 'Invalid reset token'),
@@ -98,28 +165,34 @@ export const ProjectSchemas = {
   }),
 } as const;
 
+const bulkAction = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('ids'),
+    contactIds: z.array(uuid).min(1).max(1000),
+  }),
+  z.object({
+    mode: z.literal('query'),
+    filter: z
+      .object({
+        search: z.string().max(255).optional(),
+        status: z.enum(CONTACT_SUBSCRIPTION_STATUSES).optional(),
+        subscribed: z.boolean().optional(),
+        segmentId: uuid.optional(),
+      })
+      .default({}),
+    excludeIds: z.array(uuid).max(10000).optional(),
+  }),
+]);
+
 export const ContactSchemas = {
   create: z.object({
     email,
     subscribed: z.boolean().default(true),
     data: jsonSchema.optional(),
   }),
-  bulkAction: z.discriminatedUnion('mode', [
-    z.object({
-      mode: z.literal('ids'),
-      contactIds: z.array(uuid).min(1).max(1000),
-    }),
-    z.object({
-      mode: z.literal('query'),
-      filter: z
-        .object({
-          search: z.string().max(255).optional(),
-          subscribed: z.boolean().optional(),
-        })
-        .default({}),
-      excludeIds: z.array(uuid).max(10000).optional(),
-    }),
-  ]),
+  bulkAction,
+  /** Body of the bulk add-to / remove-from segment routes: a selector plus the static segment. */
+  bulkSegmentAction: bulkAction.and(z.object({targetSegmentId: uuid})),
   lookup: z.object({
     emails: z.array(z.string().email()).min(1).max(500),
   }),
@@ -192,10 +265,17 @@ export const SegmentSchemas = {
     condition: filterConditionSchema.optional(),
     trackMembership: z.boolean().optional(),
   }),
+  // Same shape as `TemplateSchemas.bulkUpdate`; SegmentService.bulkUpdate deletes all or none.
+  bulkUpdate: z.object({
+    ids: z.array(uuid).min(1).max(SEGMENTS_BULK_MAX),
+    delete: z.boolean().optional(),
+  }),
   members: z.object({
-    emails: z.array(z.string().email()).min(1).max(500),
+    // No format check: contacts are matched by their stored email, and imports accept addresses
+    // a strict validator would reject
+    emails: z.array(z.string().trim().min(1).max(320)).min(1).max(SEGMENT_MEMBERS_MAX),
+    // Plunk Lite: contacts created here are never subscribed -- adding to a segment is not a sign-up
     createMissing: z.boolean().optional(),
-    subscribed: z.boolean().optional(),
   }),
 };
 
@@ -257,6 +337,14 @@ export const WorkflowSchemas = {
     config: jsonSchema,
     templateId: uuid.optional(),
     autoConnect: z.boolean().optional(),
+  }),
+  /** Plunk Lite: a webhook step's signing secret -- 32 to 256 printable ASCII characters, no spaces */
+  signingSecret: z.object({
+    secret: z
+      .string()
+      .min(32)
+      .max(256)
+      .regex(/^[\x21-\x7E]+$/, 'Only printable ASCII characters, without spaces'),
   }),
   updateStep: z.object({
     name: z.string().min(1).max(100).optional(),
@@ -341,8 +429,11 @@ export const WorkflowStepConfigSchemas = {
       },
     ),
   waitForEvent: z.object({
+    // "execution": count only emails this execution sent, for the events canScopeWaitToExecution accepts
+    scope: z.enum(['contact', 'execution']).optional(),
     eventName: z.string().min(1),
-    timeout: z.number().positive().max(31536000, 'Timeout cannot exceed 365 days (31,536,000 seconds)').optional(),
+    // 0 or omitted waits with no time limit
+    timeout: z.number().nonnegative().max(31536000, 'Timeout cannot exceed 365 days (31,536,000 seconds)').optional(),
   }),
   condition: z.union([
     // Legacy binary condition (if/else)
@@ -400,12 +491,23 @@ export const WorkflowStepConfigSchemas = {
     .object({
       updates: z.record(z.any()).optional(),
       subscriptionAction: z.enum(['none', 'subscribe', 'unsubscribe']).optional(),
+      /** Static segments to add the contact to and remove it from, by id */
+      segments: z
+        .object({
+          add: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+          remove: z.array(uuid).max(WORKFLOW_SEGMENT_CHANGES_MAX).default([]),
+        })
+        .refine(value => !value.add.some(id => value.remove.includes(id)), {
+          message: 'A segment cannot be both added and removed',
+        })
+        .optional(),
     })
     .refine(
       value =>
         (value.updates && Object.keys(value.updates).length > 0) ||
-        (value.subscriptionAction && value.subscriptionAction !== 'none'),
-      {message: 'Provide at least one field to update or a subscription action'},
+        (value.subscriptionAction && value.subscriptionAction !== 'none') ||
+        (value.segments && value.segments.add.length + value.segments.remove.length > 0),
+      {message: 'Provide at least one field to update, a subscription action or a segment change'},
     ),
 };
 
@@ -482,12 +584,23 @@ export const CampaignSchemas = {
   }),
 } as const;
 
+/** Plunk Lite: the static segments a /v1 request adds its contacts to, by id; none when empty */
+const requestSegments = z.array(uuid).max(REQUEST_SEGMENTS_MAX).optional();
+
 export const ActionSchemas = {
   track: z.object({
-    event: z.string().min(1),
+    event: z
+      .string()
+      .min(1)
+      .max(EVENT_NAME_MAX)
+      // No control characters: line breaks would split logs, and Postgres cannot store \u0000
+      .regex(/^[^\x00-\x1f\x7f]+$/, 'Event name contains invalid characters')
+      .refine(text => storableText(text), 'Event name contains invalid characters'),
     email,
     subscribed: z.boolean().optional(),
-    data: jsonSchema.optional(),
+    data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+    /** Plunk Lite: static segments to add the contact to, by id (secret key only) */
+    segments: requestSegments,
   }),
   send: z
     .object({
@@ -495,19 +608,22 @@ export const ActionSchemas = {
         email, // Simple email string (backward compatible)
         z.object({
           // Object with name and email
-          name: z.string().optional(),
+          name: recipientName.optional(),
           email: email,
         }),
-        z.array(
-          z.union([
-            email, // Array of email strings
-            z.object({
-              // Array of objects with name and email
-              name: z.string().optional(),
-              email: email,
-            }),
-          ]),
-        ),
+        z
+          .array(
+            z.union([
+              email, // Array of email strings
+              z.object({
+                // Array of objects with name and email
+                name: recipientName.optional(),
+                email: email,
+              }),
+            ]),
+          )
+          .min(1)
+          .max(SEND_MAX_RECIPIENTS),
       ]),
       subject: z.string().min(1).max(998).regex(/^[^\r\n]*$/, 'Subject contains invalid characters').optional(),
       body: z.string().min(1).optional(),
@@ -544,7 +660,9 @@ export const ActionSchemas = {
           z.string().max(998).regex(/^[^\r\n]*$/, 'Header value contains invalid characters'),
         )
         .optional(),
-      data: jsonSchema.optional(),
+      data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+      /** Plunk Lite: static segments to add each recipient sent to to, by id */
+      segments: requestSegments,
       attachments: z
         .array(
           z.object({
@@ -596,6 +714,16 @@ export const ActionSchemas = {
   }),
 } as const;
 
+/** Plunk Lite: POST /events/track, with the same limits on the event as /v1/track */
+export const EventSchemas = {
+  track: z.object({
+    name: ActionSchemas.track.shape.event,
+    contactId: uuid,
+    emailId: uuid.optional(),
+    data: boundedJson(TRACK_DATA_MAX_BYTES, TRACK_DATA_MAX_DEPTH).optional(),
+  }),
+};
+
 export const BillingLimitSchemas = {
   update: z.object({
     workflows: z.coerce.number().int().positive().nullable(),
@@ -612,5 +740,76 @@ export const MembershipSchemas = {
   }),
   updateRole: z.object({
     role: z.enum(['ADMIN', 'MEMBER']),
+  }),
+} as const;
+
+/**
+ * A project's brand as sent to the API: any object, which the API then reads through
+ * toProjectBrand's allowlist, keeping only known fonts, colours and widths.
+ */
+export const BrandSchemas = {
+  update: z.custom<Partial<ProjectBrand>>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The brand must be an object',
+  ),
+} as const;
+
+/**
+ * A project's own unsubscribe footers as sent to the API: any object, which the API then checks
+ * with toProjectFooters, answering 400 with the reasons for anything it cannot keep.
+ */
+export const FooterSchemas = {
+  update: z.custom<ProjectFooters>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'The footers must be an object',
+  ),
+} as const;
+
+/** A project's double opt-in (Plunk Lite): the texts are checked by toOptInTexts, with their reasons */
+export const OptInSchemas = {
+  update: z.object({
+    enabled: z.boolean(),
+    fromEmail: z.string().max(320).nullable(),
+    fromName: z.string().max(100).nullable(),
+    texts: z.custom<OptInTexts>(
+      value => typeof value === 'object' && value !== null && !Array.isArray(value),
+      'The texts must be an object',
+    ),
+  }),
+  /** The link's token, sent by the confirmation page in the body rather than the path */
+  token: z.object({token: z.string().max(200)}),
+} as const;
+
+/** How many addresses a project's failure alerts can go to (Plunk Lite) */
+export const ALERT_RECIPIENTS_MAX = 10;
+
+/** How many failing sources the dashboard reads at once, and so can mark reviewed (Plunk Lite) */
+export const FAILURE_ALERTS_OPEN_MAX = 20;
+
+const NOTICE_KINDS = ['project', 'brake', 'security', 'domain', 'sns', 'ses', 'aws', 'redis'];
+
+/**
+ * Alert sources that report a condition rather than a failure, by the kind their key starts with:
+ * the project disabled, a campaign or workflow stopped for its bounces, sending reputation, domains,
+ * the SES event pipeline, the SES account itself (a sending quota, a pause), the AWS account's
+ * alarms and the installation's Redis running out of memory (Plunk Lite)
+ */
+export const isFailureNotice = (sourceKey: string) => NOTICE_KINDS.includes(sourceKey.split(':')[0]!);
+
+export const AlertSchemas = {
+  // An empty list turns the alert emails off; the dashboard banner stays.
+  settings: z.object({
+    recipients: z
+      .array(z.string().trim().toLowerCase().email())
+      .max(ALERT_RECIPIENTS_MAX, `At most ${ALERT_RECIPIENTS_MAX} addresses`),
+    fromEmail: z.string().trim().toLowerCase().email().optional(),
+    fromName: z.string().trim().max(100).optional(),
+  }),
+  // The failures the banner showed, each with the last failure it saw
+  review: z.object({
+    seen: z
+      .array(z.object({id: uuid, lastAt: z.string().datetime()}))
+      .min(1)
+      .max(FAILURE_ALERTS_OPEN_MAX),
   }),
 } as const;

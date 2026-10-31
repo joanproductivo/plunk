@@ -2,6 +2,9 @@ import {Alert, AlertDescription, AlertTitle, Card, CardContent, CardDescription,
 import {AlertCircle, AlertTriangle, CheckCircle, Shield} from 'lucide-react';
 import type {ProjectSecurityMetrics, SecurityLevel} from '@plunk/types';
 
+import {useActiveProject} from '../lib/contexts/ActiveProjectProvider';
+import {canReactivate, ReactivateProjectButton} from './ReactivateProjectButton';
+
 interface SecuritySettingsProps {
   metrics: ProjectSecurityMetrics;
   isLoading: boolean;
@@ -20,6 +23,9 @@ function getOverallLevel(status: ProjectSecurityMetrics['status']): SecurityLeve
 }
 
 export function SecuritySettings({metrics, isLoading}: SecuritySettingsProps) {
+  const {activeProject} = useActiveProject();
+  const reactivatable = canReactivate(activeProject);
+
   if (isLoading) {
     return (
       <Card>
@@ -63,7 +69,17 @@ export function SecuritySettings({metrics, isLoading}: SecuritySettingsProps) {
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>Project disabled</AlertTitle>
               <AlertDescription>
-                This project has been disabled. Please contact support for more details.
+                {reactivatable ? (
+                  <div className="space-y-3">
+                    <p>
+                      This project was disabled for its bounce or complaint rate. The addresses that bounced or
+                      complained are already suppressed: check where they came from, then reactivate it.
+                    </p>
+                    <ReactivateProjectButton />
+                  </div>
+                ) : (
+                  'This project has been disabled. Please contact support for more details.'
+                )}
               </AlertDescription>
             </Alert>
           )}

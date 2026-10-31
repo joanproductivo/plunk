@@ -12,7 +12,7 @@ import * as z from 'zod';
 import type {PlunkClient} from '../client.js';
 
 import {resolveContact} from './contacts.js';
-import {errorResult, jsonResult, register, requireConfirmation, runTool, type ToolContext} from './shared.js';
+import {errorResult, jsonResult, pageHint, register, requireConfirmation, runTool, type ToolContext} from './shared.js';
 import {
   branchProblem,
   buildStepConfig,
@@ -21,6 +21,7 @@ import {
   defaultStepName,
   DELAY_UNITS,
   findStep,
+  MAX_SEGMENT_CHANGES,
   reviewWorkflow,
   slotTransition,
   type StepParams,
@@ -35,7 +36,7 @@ import {
   type WorkflowTransition,
 } from './workflow-graph.js';
 
-/** `GET /workflows` is page-based, unlike the cursor-paginated contact/campaign lists. */
+/** `GET /workflows` is page-based, unlike the cursor-paginated contact list. */
 interface WorkflowList {
   data: unknown[];
   total: number;
@@ -60,10 +61,6 @@ interface Execution {
 }
 
 const EXECUTION_STATUSES = ['RUNNING', 'WAITING', 'COMPLETED', 'EXITED', 'FAILED', 'CANCELLED'] as const;
-
-function pageHint(page: number, totalPages: number): string {
-  return page < totalPages ? `\n\nMore results exist. For the next page, pass page=${page + 1}.` : '';
-}
 
 async function getWorkflow(client: PlunkClient, id: string): Promise<Workflow> {
   return client.request<Workflow>({path: `/workflows/${encodeURIComponent(id)}`});
@@ -115,8 +112,11 @@ const stepConfigShape = {
     .min(1)
     .optional()
     .describe(
-      'CONDITION: what to test — contact.email, contact.subscribed, data.<field> (contact data) or ' +
-        'event.<field> (data of the event that started the workflow). See plunk_list_workflow_fields.',
+      'CONDITION: what to test — contact.email, contact.subscribed, data.<field> (contact data), ' +
+        'event.<field> (data of the event that started the workflow) or segment.<segmentId> (true when the ' +
+        'contact is in that segment as the step runs; compare with equals / notEquals and a boolean true or ' +
+        'false, not "true"). ' +
+        'See plunk_list_workflow_fields.',
     ),
   operator: z
     .enum(CONDITION_OPERATORS)
@@ -145,7 +145,21 @@ const stepConfigShape = {
   subscriptionAction: z
     .enum(SUBSCRIPTION_ACTIONS)
     .optional()
-    .describe('UPDATE_CONTACT: also subscribe or unsubscribe the contact.'),
+    .describe(
+      'UPDATE_CONTACT: also subscribe or unsubscribe the contact. `subscribe` leaves an address on the suppression list unsubscribed, and the step goes on.',
+    ),
+  segments: z
+    .object({
+      add: z.array(z.string().uuid()).max(MAX_SEGMENT_CHANGES).optional(),
+      remove: z.array(z.string().uuid()).max(MAX_SEGMENT_CHANGES).optional(),
+    })
+    .optional()
+    .describe(
+      'UPDATE_CONTACT: static segment IDs (UUIDs from plunk_list_segments) to add the contact to and remove it ' +
+        'from. Removals run first. Adding someone already in a segment counts as a new entry, firing its entry ' +
+        'event again when it tracks membership. A deleted or dynamic segment is skipped when the step runs. ' +
+        'When editing, a list you leave out keeps its current IDs; pass [] to clear it.',
+    ),
   url: z.string().optional().describe('WEBHOOK: URL to call. Template variables like {{email}} are rendered.'),
   method: z.enum(WEBHOOK_METHODS).optional().describe('WEBHOOK: HTTP method (default POST).'),
   headers: z.record(z.string(), z.string()).optional().describe('WEBHOOK: request headers.'),
@@ -510,8 +524,9 @@ export function registerWorkflowTools(ctx: ToolContext, client: PlunkClient): vo
         '**Purpose:** List the fields a CONDITION step can test: contact fields, custom contact data, and',
         'the data keys seen on an event.',
         '',
-        '**Returns:** `typedFields[]` with `field`, `type` and `category`. Contact data appears as',
-        '`contact.data.<key>`, which conditions accept as-is; event keys appear as `event.<key>`.',
+        '**Returns:** `typedFields[]` with `field`, `type`, `category` and, for segments, `label`. Contact data appears as',
+        '`contact.data.<key>`, which conditions accept as-is; event keys appear as `event.<key>`; each',
+        'segment appears as `segment.<id>` (boolean) with its name in `label`.',
         'Of the built-in contact fields only `contact.email` and `contact.subscribed` can be tested.',
         '',
         '**Key trigger phrases:** "what can I branch on", "which fields can the condition use"',
@@ -821,7 +836,8 @@ export function registerWorkflowTools(ctx: ToolContext, client: PlunkClient): vo
         '  on the same path whether the event arrives or the timeout passes.',
         '- `CONDITION` — `field` + `operator` (+ `value`) for yes/no, or `field` + `branches` for',
         '  several outcomes. Connect what follows with `after` = the condition and `branch`.',
-        '- `UPDATE_CONTACT` — `updates` (data fields to set) and/or `subscriptionAction`.',
+        '- `UPDATE_CONTACT` — `updates` (data fields to set), `subscriptionAction` and/or `segments`',
+        '  (`add` / `remove` lists of static segment IDs).',
         '- `WEBHOOK` — `url`, optional `method`, `headers`, `body`.',
         '- `EXIT` — ends the run, optional `reason`. Nothing can follow it.',
         '',
@@ -1410,8 +1426,9 @@ export function registerWorkflowTools(ctx: ToolContext, client: PlunkClient): vo
         '**Purpose:** Stop runs in progress: one execution, or every running and waiting execution of',
         'the workflow. Only RUNNING and WAITING executions can be cancelled.',
         '',
-        '**Caveat:** a run parked on a WAIT_FOR_EVENT step can still resume when that event arrives or',
-        'its timeout passes, so check it with `plunk_get_workflow_execution` afterwards.',
+        '**Caveat:** on self-hosted servers running an older Plunk version, a run parked on a',
+        'WAIT_FOR_EVENT step can still resume when that event arrives or its timeout passes, so check it',
+        'with `plunk_get_workflow_execution` afterwards.',
         '',
         '**NOT for:** Stopping new contacts from entering — disable the workflow for that.',
         '',

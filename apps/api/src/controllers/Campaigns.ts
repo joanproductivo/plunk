@@ -81,8 +81,10 @@ export class Campaigns {
     // Opt-in only: anything other than the literal 'true' lists active campaigns, so a
     // malformed value can never accidentally hide a project's whole campaign list.
     const archived = req.query.archived === 'true';
-    const page = parseInt(req.query.page as string) || 1;
-    const pageSize = parseInt(req.query.pageSize as string) || 20;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    // Plunk Lite: page from 1 and pageSize between 1 and 100; the dashboard asks for 10 or 20, the
+    // MCP for up to 100
+    const pageSize = Math.max(1, Math.min(parseInt(req.query.pageSize as string) || 20, 100));
     const sort = parseListSort(req.query.sort, req.query.dir, {field: 'createdAt', direction: 'desc'});
 
     // Validate status if provided
@@ -343,6 +345,24 @@ export class Campaigns {
         : campaign.status === CampaignStatus.DRAFT
           ? 'Campaign stopped before any email was sent and returned to draft'
           : 'Campaign cancelled successfully',
+    });
+  }
+
+  /**
+   * Plunk Lite: how many unsubscribed contacts a send would reach now, which only a TRANSACTIONAL
+   * campaign does (0 otherwise)
+   * GET /campaigns/:id/audience
+   */
+  @Get(':id/audience')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  private async audience(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    return res.json({
+      success: true,
+      data: await CampaignService.getSendAudience(auth.projectId, id!),
     });
   }
 

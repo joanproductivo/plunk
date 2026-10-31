@@ -74,7 +74,7 @@ describe('tool registration', () => {
     expect(names).toContain('plunk_send_email');
     expect(names).toContain('plunk_send_campaign');
     expect(names).toContain('plunk_delete_contact');
-    expect(tools).toHaveLength(42);
+    expect(tools).toHaveLength(44);
 
     await close();
   });
@@ -150,6 +150,22 @@ describe('read-only mode', () => {
   });
 });
 
+/**
+ * A segment API: GET /segments/:id answers the segment, and every write is recorded with its
+ * body and answered with `answer`.
+ */
+function segmentApi(answer: unknown, {trackMembership = false} = {}) {
+  const writes: Array<{url: string; method?: string; body?: unknown}> = [];
+  mockApi((url, init) => {
+    if (!init?.method || init.method === 'GET') {
+      return json({id: url.split('/').pop(), name: 'Workshop', type: 'STATIC', trackMembership});
+    }
+    writes.push({url, method: init.method, body: init.body ? JSON.parse(String(init.body)) : undefined});
+    return json(answer);
+  });
+  return writes;
+}
+
 describe('tool behaviour', () => {
   it('lists contacts and reports the total', async () => {
     mockApi(() => json({data: [{id: '1', email: 'ada@example.com'}], cursor: null, hasMore: false, total: 1}));
@@ -175,6 +191,150 @@ describe('tool behaviour', () => {
 
     await close();
   });
+
+  it('lists segments from the bare array GET /segments returns', async () => {
+    const calls: string[] = [];
+
+    mockApi((url) => {
+      calls.push(url);
+      return json([{id: 'seg-1', name: 'VIP', type: 'DYNAMIC', memberCount: 12}]);
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_list_segments', arguments: {}});
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('Found 1 segment(s).');
+    expect(JSON.stringify(result.content)).toContain('VIP');
+    // The endpoint is not paginated, so no limit/cursor should be sent.
+    expect(calls).toEqual(['https://api.example.com/segments']);
+
+    await close();
+  });
+
+  it('adds contacts to a static segment by email, creating none unless asked', async () => {
+    const calls = segmentApi({added: 2, created: 0, notFound: ['nobody@example.com']});
+
+    const {client, close} = await connect(baseConfig);
+    const segmentId = '11111111-1111-4111-8111-111111111111';
+
+    const result = await client.callTool({
+      name: 'plunk_add_to_segment',
+      arguments: {segmentId, emails: ['a@example.com', 'b@example.com', 'nobody@example.com']},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain(
+      'Added 2 contact(s); created 0. 1 email(s) have no contact; pass createMissing: true to create them.',
+    );
+    expect(calls).toEqual([
+      {
+        url: `https://api.example.com/segments/${segmentId}/members`,
+        method: 'POST',
+        body: {emails: ['a@example.com', 'b@example.com', 'nobody@example.com'], createMissing: false},
+      },
+    ]);
+
+    await close();
+  });
+
+  it('removes contacts from a static segment by email', async () => {
+    const calls = segmentApi({removed: 1});
+
+    const {client, close} = await connect(baseConfig);
+    const segmentId = '11111111-1111-4111-8111-111111111111';
+
+    const result = await client.callTool({
+      name: 'plunk_remove_from_segment',
+      arguments: {segmentId, emails: ['a@example.com']},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('Removed 1 contact(s) from the segment.');
+    expect(calls).toEqual([
+      {
+        url: `https://api.example.com/segments/${segmentId}/members`,
+        method: 'DELETE',
+        body: {emails: ['a@example.com']},
+      },
+    ]);
+
+    await close();
+  });
+
+  it('creates missing contacts, which the API leaves unsubscribed', async () => {
+    const writes = segmentApi({added: 1, created: 1, notFound: []});
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_add_to_segment',
+      arguments: {
+        segmentId: '11111111-1111-4111-8111-111111111111',
+        emails: ['new@example.com'],
+        createMissing: true,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(writes.map(w => w.body)).toEqual([{emails: ['new@example.com'], createMissing: true}]);
+
+    await close();
+  });
+
+  it.each(['plunk_add_to_segment', 'plunk_remove_from_segment'])(
+    '%s changes nothing in a segment that tracks membership until the user confirms',
+    async name => {
+      const writes = segmentApi({added: 1, created: 0, notFound: [], removed: 1}, {trackMembership: true});
+      const {client, close} = await connect(baseConfig);
+
+      await client
+        .callTool({name, arguments: {segmentId: '11111111-1111-4111-8111-111111111111', emails: ['a@example.com']}})
+        .catch(() => undefined);
+
+      expect(writes).toEqual([]);
+
+      await close();
+    },
+  );
+
+  it('changes a tracked segment without asking when confirmation is waived', async () => {
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const writes = segmentApi({added: 1, created: 0, notFound: []}, {trackMembership: true});
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_add_to_segment',
+      arguments: {segmentId: '11111111-1111-4111-8111-111111111111', emails: ['a@example.com']},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(writes).toHaveLength(1);
+
+    delete process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS;
+    await close();
+  });
+
+  it.each(['plunk_add_to_segment', 'plunk_remove_from_segment'])(
+    '%s rejects a segment name in place of its ID before calling the API',
+    async name => {
+      const calls: string[] = [];
+      mockApi(url => {
+        calls.push(url);
+        return json({});
+      });
+
+      const {client, close} = await connect(baseConfig);
+
+      const result = await client.callTool({name, arguments: {segmentId: 'workshop', emails: ['a@example.com']}});
+
+      expect(result.isError).toBe(true);
+      expect(calls).toEqual([]);
+
+      await close();
+    },
+  );
 
   it('turns an API failure into a readable tool error rather than throwing', async () => {
     mockApi(() => json({error: {code: 'NOT_FOUND', message: 'Contact not found'}}, 404));
@@ -202,6 +362,38 @@ describe('tool behaviour', () => {
     expect(result.isError).toBe(true);
     expect(spy.mock.calls.filter(([u]) => String(u).includes('api.example.com'))).toHaveLength(0);
 
+    await close();
+  });
+
+  it('says which recipients of a partial send were not sent', async () => {
+    mockApi(() =>
+      json(
+        {
+          success: true,
+          data: {
+            emails: [{contact: {id: 'c1', email: 'ada@example.com'}, email: 'e1'}],
+            failed: [{email: 'bob@typo.test', code: 'INVALID_EMAIL', message: 'Domain does not exist'}],
+            timestamp: '2026-10-27T20:00:00.000Z',
+          },
+        },
+        207,
+      ),
+    );
+
+    process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS = 'true';
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_send_email',
+      arguments: {to: ['ada@example.com', 'bob@typo.test'], subject: 's', body: 'b'},
+    });
+
+    expect(result.isError).toBeFalsy();
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Sent to 1 of 2 recipient(s)');
+    expect(text).toContain('bob@typo.test (INVALID_EMAIL: Domain does not exist)');
+
+    delete process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS;
     await close();
   });
 
@@ -241,8 +433,108 @@ describe('tool behaviour', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    // /v1/track needs a public key, so the secret-key path must go the long way.
+    // Without a public key the event is tracked against the contact it upserts first.
     expect(calls).toEqual(['https://api.example.com/contacts', 'https://api.example.com/events/track']);
+
+    await close();
+  });
+
+  it('says why a created contact stayed unsubscribed when its address is suppressed', async () => {
+    mockApi(() =>
+      json({
+        id: 'contact-1',
+        email: 'ada@example.com',
+        subscribed: false,
+        _meta: {isNew: true, isUpdate: false, suppressed: {reason: 'BOUNCE', createdAt: '2026-10-20T08:00:00.000Z'}},
+      }),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_create_contact', arguments: {email: 'ada@example.com'}});
+
+    expect(result.isError).toBeFalsy();
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('stays unsubscribed');
+    expect(text).toContain('bounced permanently on 2026-10-20');
+
+    await close();
+  });
+
+  it('adds no suppression note to a contact that was subscribed', async () => {
+    mockApi(() =>
+      json({id: 'contact-1', email: 'ada@example.com', subscribed: true, _meta: {isNew: true, isUpdate: false}}),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_create_contact', arguments: {email: 'ada@example.com'}});
+
+    expect(JSON.stringify(result.content)).not.toContain('suppression');
+
+    await close();
+  });
+
+  it('notes a suppressed contact when tracking an event through the upsert', async () => {
+    mockApi((url) =>
+      url.endsWith('/contacts')
+        ? json({id: 'contact-1', _meta: {suppressed: {reason: 'COMPLAINT', createdAt: '2026-10-21T08:00:00.000Z'}}})
+        : json({ok: true}),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_track_event',
+      arguments: {event: 'user.signup', email: 'ada@example.com'},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('reported an email as spam on 2026-10-21');
+
+    await close();
+  });
+
+  it('surfaces ADDRESS_SUPPRESSED when subscribing a suppressed address', async () => {
+    mockApi(() =>
+      json(
+        {
+          error: {
+            code: 'ADDRESS_SUPPRESSED',
+            message: 'ada@example.com cannot be subscribed: it bounced on 2026-10-20.',
+            statusCode: 409,
+          },
+        },
+        409,
+      ),
+    );
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_subscribe_contact', arguments: {id: 'contact-1'}});
+
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('409 ADDRESS_SUPPRESSED');
+    expect(text).toContain('cannot be subscribed');
+
+    await close();
+  });
+
+  it('tells the model how suppressed addresses behave in the tools that can meet one', async () => {
+    const {client, close} = await connect(baseConfig);
+
+    const {tools} = await client.listTools();
+    const description = (name: string) => tools.find((tool) => tool.name === name)?.description ?? '';
+
+    for (const name of ['plunk_subscribe_contact', 'plunk_update_contact']) {
+      expect(description(name)).toContain('ADDRESS_SUPPRESSED');
+      expect(description(name)).toContain('Do not retry');
+    }
+    expect(description('plunk_create_contact')).toContain('_meta.suppressed');
+    expect(description('plunk_get_contact')).toContain('`suppression`');
+    expect(description('plunk_send_email')).toContain('suppression list');
+    expect(description('plunk_track_event')).toContain('suppression list');
 
     await close();
   });
@@ -357,6 +649,46 @@ describe('single-campaign envelope', () => {
 
     // The model must see the campaign, not a {success, data} wrapper around it.
     expect(result.structuredContent).toMatchObject({id: 'camp-1', name: 'Win-back', status: 'DRAFT'});
+
+    await close();
+  });
+});
+
+describe('page-based lists', () => {
+  // GET /campaigns and GET /templates take page/pageSize, unlike the cursor-paginated contact list.
+  it.each([
+    ['plunk_list_campaigns', '/campaigns', 'campaign'],
+    ['plunk_list_templates', '/templates', 'template'],
+  ])('%s pages by page/pageSize and points to the next page', async (tool, path, noun) => {
+    const calls: URL[] = [];
+
+    mockApi((url) => {
+      const target = new URL(url);
+      calls.push(target);
+      const page = Number(target.searchParams.get('page'));
+      const pageSize = Number(target.searchParams.get('pageSize'));
+      return json({data: [{id: `item-${page}`}], total: 12, page, pageSize, totalPages: Math.ceil(12 / pageSize)});
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const first = await client.callTool({name: tool, arguments: {limit: 5}});
+    const middle = await client.callTool({name: tool, arguments: {limit: 5, page: 2}});
+    const last = await client.callTool({name: tool, arguments: {limit: 5, page: 3}});
+
+    expect(calls.map((c) => c.pathname)).toEqual([path, path, path]);
+    expect(calls.map((c) => Object.fromEntries(c.searchParams))).toEqual([
+      {page: '1', pageSize: '5'},
+      {page: '2', pageSize: '5'},
+      {page: '3', pageSize: '5'},
+    ]);
+    expect(JSON.stringify(first.content)).toContain('pass page=2');
+    expect(middle.isError).toBeFalsy();
+    expect(JSON.stringify(middle.content)).toContain(`Found 12 ${noun}(s); showing 1.`);
+    expect(JSON.stringify(middle.content)).toContain('pass page=3');
+    expect(last.isError).toBeFalsy();
+    expect(JSON.stringify(last.content)).toContain(`Found 12 ${noun}(s); showing 1.`);
+    expect(JSON.stringify(last.content)).not.toContain('More results exist');
 
     await close();
   });

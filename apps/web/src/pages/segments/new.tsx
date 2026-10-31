@@ -4,6 +4,7 @@ import {DashboardLayout} from '../../components/DashboardLayout';
 import {SegmentFilterBuilder} from '../../components/SegmentFilterBuilder';
 import {ContactPicker} from '../../components/ContactPicker';
 import {network} from '../../lib/network';
+import {addSegmentMembers} from '../../lib/segmentMembers';
 import {ArrowLeft, Save} from 'lucide-react';
 import Link from 'next/link';
 import {useRouter} from 'next/router';
@@ -20,7 +21,9 @@ export default function NewSegmentPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [segmentType, setSegmentType] = useState<SegmentType>('DYNAMIC');
-  const [trackMembership, setTrackMembership] = useState(false);
+  // null until the user ticks or unticks it: static segments track membership by default.
+  const [trackMembershipChoice, setTrackMembershipChoice] = useState<boolean | null>(null);
+  const trackMembership = trackMembershipChoice ?? segmentType === 'STATIC';
   const [condition, setCondition] = useState<FilterCondition>({
     logic: 'AND',
     groups: [
@@ -48,11 +51,7 @@ export default function NewSegmentPage() {
       // For static segments with pre-selected contacts, add them now
       if (segmentType === 'STATIC' && selectedContacts.length > 0) {
         try {
-          const result = await network.fetch<{added: number; created: number; notFound: string[]}, typeof SegmentSchemas.members>(
-            'POST',
-            `/segments/${segment.id}/members`,
-            {emails: selectedContacts, createMissing: true},
-          );
+          const result = await addSegmentMembers(segment.id, selectedContacts, {createMissing: true});
           const msg = result.created > 0
             ? `Segment created with ${result.added} contact${result.added !== 1 ? 's' : ''} (${result.created} new)`
             : `Segment created with ${result.added} contact${result.added !== 1 ? 's' : ''}`;
@@ -159,7 +158,7 @@ export default function NewSegmentPage() {
                     id="trackMembership"
                     type="checkbox"
                     checked={trackMembership}
-                    onChange={e => setTrackMembership(e.target.checked)}
+                    onChange={e => setTrackMembershipChoice(e.target.checked)}
                     className="mt-1 h-4 w-4 text-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border-neutral-300 rounded"
                   />
                   <div className="flex-1">
@@ -197,7 +196,7 @@ export default function NewSegmentPage() {
                   <ContactPicker
                     selected={selectedContacts}
                     onChange={setSelectedContacts}
-                    onAdd={async (emails, _subscribed) => setSelectedContacts(prev => [...new Set([...prev, ...emails])])}
+                    onAdd={async emails => setSelectedContacts(prev => [...new Set([...prev, ...emails])])}
                     placeholder="Search and select contacts…"
                   />
                 </CardContent>

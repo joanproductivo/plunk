@@ -11,6 +11,7 @@ import {
   Switch,
 } from '@plunk/ui';
 import type {Contact} from '@plunk/db';
+import {contactStatus, type ContactSuppression, type OptInRequestInfo} from '@plunk/types';
 import {AnimatePresence, motion} from 'framer-motion';
 import {ArrowLeft, Check, Copy, Database, ExternalLink, Save, Settings, Trash2} from 'lucide-react';
 import Link from 'next/link';
@@ -20,17 +21,30 @@ import {useEffect, useState} from 'react';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {KeyValueEditor} from '../../components/KeyValueEditor';
 import {ActivityFeed} from '../../components/ActivityFeed';
+import {ContactSegmentsCard} from '../../components/contacts/ContactSegmentsCard';
 import {network} from '../../lib/network';
-import {contactStatus, formatSnoozedUntil} from '../../lib/contactStatus';
+import {formatSnoozedUntil} from '../../lib/contactStatus';
 import {toast} from 'sonner';
-import useSWR from 'swr';
+import useSWR, {useSWRConfig} from 'swr';
 import {ContactSchemas} from '@plunk/shared';
 import dayjs from 'dayjs';
 
 export default function ContactDetailPage() {
   const router = useRouter();
   const {id} = router.query;
-  const {data: contact, mutate, isLoading} = useSWR<Contact>(id ? `/contacts/${id}` : null);
+  const {
+    data: contact,
+    mutate,
+    isLoading,
+  } = useSWR<
+    Contact & {
+      suppression?: ContactSuppression<string> | null;
+      // Plunk Lite: its sign-up confirmation request (double opt-in), confirmed or not
+      optIn?: OptInRequestInfo<string> | null;
+      pendingConfirmation?: boolean;
+    }
+  >(id ? `/contacts/${id}` : null);
+  const {mutate: mutateKey} = useSWRConfig();
 
   const [email, setEmail] = useState('');
   const [subscribed, setSubscribed] = useState(true);
@@ -60,10 +74,27 @@ export default function ContactDetailPage() {
       >('PATCH', `/contacts/${id}`, {email, subscribed, data: customData});
       toast.success('Contact updated');
       void mutate();
+      // Its data and subscription decide which dynamic segments it matches
+      void mutateKey(`/contacts/${id}/segments`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const [isLifting, setIsLifting] = useState(false);
+
+  const handleLiftSuppression = async () => {
+    setIsLifting(true);
+    try {
+      await network.fetch('DELETE', `/contacts/${id}/suppression`);
+      toast.success('Suppression removed. The contact can be subscribed again.');
+      void mutate();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Couldn’t remove the suppression. Try again.');
+    } finally {
+      setIsLifting(false);
     }
   };
 
@@ -145,14 +176,18 @@ export default function ContactDetailPage() {
                         ? 'bg-green-100 text-green-800'
                         : status === 'snoozed'
                           ? 'bg-neutral-100 text-neutral-700'
-                          : 'bg-red-100 text-red-800'
+                          : status === 'pending'
+                            ? 'bg-amber-100 text-amber-900'
+                            : 'bg-red-100 text-red-800'
                     }`}
                   >
                     {status === 'snoozed'
                       ? `Snoozed until ${formatSnoozedUntil(contact.snoozedUntil)}`
                       : status === 'subscribed'
                         ? 'Subscribed'
-                        : 'Unsubscribed'}
+                        : status === 'pending'
+                          ? 'Pending confirmation'
+                          : 'Unsubscribed'}
                   </span>
                 </p>
               </div>
@@ -197,11 +232,69 @@ export default function ContactDetailPage() {
                                 // this reverses itself, and that turning the switch on here is
                                 // what ends it early.
                                 `Snoozed — resumes automatically on ${formatSnoozedUntil(contact.snoozedUntil)}`
-                              : 'Will not receive emails'}
+                              : status === 'pending'
+                                ? 'Waiting for the contact to confirm its sign-up'
+                                : 'Will not receive emails'}
                         </p>
                       </div>
                       <Switch id="subscribed" checked={subscribed} onCheckedChange={setSubscribed} />
                     </div>
+
+                    {contact?.suppression && (
+                      // Without it, the switch above would just fail on save with no way out
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <p className="font-medium">
+                          Suppressed after a {contact.suppression.reason === 'COMPLAINT' ? 'spam complaint' : 'bounce'}{' '}
+                          on {dayjs(contact.suppression.createdAt).format('D MMM YYYY')}
+                        </p>
+                        <p className="mt-1 text-xs text-amber-800">
+                          Nothing is sent to this address, and it can’t be subscribed until the suppression is removed.
+                          SES may still block it on its own account suppression list.
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                          disabled={isLifting}
+                          onClick={() => void handleLiftSuppression()}
+                        >
+                          {isLifting && <IconSpinner className="h-4 w-4" />}
+                          Remove suppression
+                        </Button>
+                      </div>
+                    )}
+
+                    {contact?.optIn &&
+                      (status === 'pending' || (contact.optIn.confirmedAt && !contact.optIn.withdrawnAt)) && (
+                        // Plunk Lite: a sign-up through the double opt-in, waiting for its link or confirmed
+                        <div
+                          className={`rounded-lg border px-4 py-3 text-sm ${
+                            contact.optIn.confirmedAt
+                              ? 'border-neutral-200 bg-neutral-50 text-neutral-700'
+                              : 'border-amber-200 bg-amber-50 text-amber-900'
+                          }`}
+                        >
+                          {contact.optIn.confirmedAt ? (
+                            <p>
+                              Confirmed its sign-up on {dayjs(contact.optIn.confirmedAt).format('D MMM YYYY, HH:mm')}
+                            </p>
+                          ) : (
+                            <>
+                              <p className="font-medium">
+                                Waiting for confirmation since {dayjs(contact.optIn.createdAt).format('D MMM YYYY')}
+                              </p>
+                              <p className="mt-1 text-xs text-amber-800">
+                                {contact.optIn.lastSentAt
+                                  ? `Last confirmation email sent on ${dayjs(contact.optIn.lastSentAt).format('D MMM YYYY, HH:mm')}. `
+                                  : 'No confirmation email went out for the last sign-up. '}
+                                It is subscribed when it clicks the link in that email; switching it on above subscribes
+                                it now.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      )}
 
                     <div>
                       {contact && (
@@ -301,6 +394,8 @@ export default function ContactDetailPage() {
                   </div>
                 </CardContent>
               </Card>
+
+              <ContactSegmentsCard contactId={contact.id} email={contact.email} />
 
               {/* Public Links Card */}
               <Card>

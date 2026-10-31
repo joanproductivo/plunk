@@ -47,6 +47,15 @@ export interface EmailBodyCleanupJobData {
 }
 
 /**
+ * Job data for recovering emails left PENDING without a job or stuck in SENDING
+ * Used by: emailRecoverySweepQueue worker
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface EmailRecoverySweepJobData {
+  // Empty - sweeps the oldest stuck emails of every project
+}
+
+/**
  * Job data for resubscribing contacts whose snooze has run out
  * Used by: snoozeSweepQueue worker
  */
@@ -54,3 +63,64 @@ export interface EmailBodyCleanupJobData {
 export interface SnoozeSweepJobData {
   // Empty - sweeps every contact whose snoozedUntil has passed
 }
+
+/**
+ * Job data for the reputation check after a bounce or complaint (Plunk Lite). One job per project
+ * is pending at a time; the events that arrive while it waits are collected in Redis, and this is
+ * the one that queued it.
+ * Used by: plunkLiteChecksQueue worker, job `security-check`
+ */
+export interface SecurityCheckJobData {
+  projectId: string;
+  trigger: 'bounce' | 'complaint';
+  /** The campaign or workflow the email came from, `campaign:<id>` or `workflow:<id>` */
+  source?: string;
+}
+
+/**
+ * Job data for the check that SES events reach the webhook (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `sns-health`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface SnsHealthJobData {
+  // Empty - checks the recent emails of every project, and the dead-letter queue of SES events
+}
+
+/**
+ * Job data for the check of how full Redis is (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `redis-memory`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface RedisMemoryJobData {
+  // Empty - reads Redis's own INFO
+}
+
+/**
+ * Job data for the sweep of workflow runs nothing would move on any more: left RUNNING by a
+ * restart, or WAITING past the end of their wait (Plunk Lite)
+ * Used by: plunkLiteChecksQueue worker, job `workflow-recovery`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface WorkflowRecoveryJobData {
+  // Empty - looks at the RUNNING and WAITING runs of every project
+}
+
+/**
+ * Job data for draining the dead-letter queue of SES events: what SNS could not deliver to the
+ * webhook, taken back and handled by it (Plunk Lite)
+ * Used by: plunkLiteDlqQueue worker, job `dlq-drain`
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface DlqDrainJobData {
+  // Empty - reads the queue of the installation's AWS account
+}
+
+/**
+ * Job data of Plunk Lite's own checks
+ * Used by: plunkLiteChecksQueue worker
+ */
+export type PlunkLiteChecksJobData =
+  | SecurityCheckJobData
+  | SnsHealthJobData
+  | RedisMemoryJobData
+  | WorkflowRecoveryJobData;

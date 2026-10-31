@@ -1,8 +1,18 @@
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
+import {SegmentSchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
+import type {ZodError} from 'zod';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
+import {contactWriteRateLimit} from '../middleware/rateLimit.js';
 import {SegmentService} from '../services/SegmentService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+
+/** The first validation problem of a members payload, with where it is (e.g. "emails.3: …") */
+function membersPayloadError(error: ZodError): string {
+  const issue = error.errors[0];
+  if (!issue) return 'Invalid members payload';
+  return issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message;
+}
 
 @Controller('segments')
 export class Segments {
@@ -146,26 +156,47 @@ export class Segments {
   }
 
   /**
+   * POST /segments/bulk-update
+   * Apply a bulk operation to several segments. Only `{ids, delete: true}` exists: it deletes
+   * every segment or, if any is missing or still in use, none (see SegmentService.bulkUpdate).
+   */
+  @Post('bulk-update')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async bulkUpdate(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    // Zod errors go to the global handler, which answers in the standard error envelope.
+    const data = SegmentSchemas.bulkUpdate.parse(req.body);
+
+    const result = await SegmentService.bulkUpdate(auth.projectId!, data);
+
+    return res.status(200).json(result);
+  }
+
+  /**
    * POST /segments/:id/members
-   * Add contacts to a static segment by email
+   * Add contacts to a static segment by email. Plunk Lite: `createMissing` creates the missing ones
+   * unsubscribed; joining a segment never subscribes anyone.
    */
   @Post(':id/members')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
   @CatchAsync
   public async addMembers(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
     const segmentId = req.params.id;
-    const {emails, createMissing, subscribed} = req.body as {emails: string[]; createMissing?: boolean; subscribed?: boolean};
 
     if (!segmentId) {
       return res.status(400).json({error: 'Segment ID is required'});
     }
 
-    if (!Array.isArray(emails) || emails.length === 0) {
-      return res.status(400).json({error: 'emails must be a non-empty array'});
+    const parsed = SegmentSchemas.members.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({error: membersPayloadError(parsed.error)});
     }
 
-    const result = await SegmentService.addContacts(auth.projectId!, segmentId, emails, createMissing ?? false, subscribed ?? true);
+    const {emails, createMissing} = parsed.data;
+    const result = await SegmentService.addContacts(auth.projectId!, segmentId, emails, createMissing ?? false);
 
     return res.status(200).json(result);
   }
@@ -175,22 +206,22 @@ export class Segments {
    * Remove contacts from a static segment by email
    */
   @Delete(':id/members')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
   @CatchAsync
   public async removeMembers(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
     const segmentId = req.params.id;
-    const {emails} = req.body;
 
     if (!segmentId) {
       return res.status(400).json({error: 'Segment ID is required'});
     }
 
-    if (!Array.isArray(emails) || emails.length === 0) {
-      return res.status(400).json({error: 'emails must be a non-empty array'});
+    const parsed = SegmentSchemas.members.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({error: membersPayloadError(parsed.error)});
     }
 
-    const result = await SegmentService.removeContacts(auth.projectId!, segmentId, emails);
+    const result = await SegmentService.removeContacts(auth.projectId!, segmentId, parsed.data.emails);
 
     return res.status(200).json(result);
   }
@@ -210,7 +241,9 @@ export class Segments {
       return res.status(400).json({error: 'Segment ID is required'});
     }
 
-    const result = await SegmentService.computeMembership(auth.projectId!, segmentId);
+    // Plunk Lite: the request writes the membership and queues its events, without running their
+    // workflows while the dashboard waits
+    const result = await SegmentService.computeMembership(auth.projectId!, segmentId, {events: 'background'});
 
     return res.status(200).json(result);
   }

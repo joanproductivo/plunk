@@ -51,6 +51,8 @@ describe('CampaignService - listRecipients', () => {
     expect(result.hasMore).toBe(false);
   });
 
+  // Each list holds what its own column marks. Plunk Lite: a bounce that unsubscribes the contact
+  // through the webhook marks both columns (Webhooks.unsubscribed.test.ts)
   it('keeps the three lists apart', async () => {
     await sendTo('bounced@plunk.test', {status: 'BOUNCED', bouncedAt: new Date()});
     await sendTo('complained@plunk.test', {status: 'COMPLAINED', complainedAt: new Date()});

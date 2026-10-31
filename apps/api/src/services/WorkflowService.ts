@@ -1,16 +1,21 @@
 import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from '@plunk/db';
 import {Prisma, WorkflowExecutionStatus} from '@plunk/db';
-import type {PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
+import type {AvailableField, PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION} from '../utils/database.js';
 import type {ListSort} from '../utils/listSort.js';
 
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
+import {WebhookSigningSecrets} from './WebhookSigningSecrets.js';
+import {WorkflowEmailLinks} from './WorkflowEmailLinks.js';
+import {WorkflowEnabledAt} from './WorkflowEnabledAt.js';
+import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
 export class WorkflowService {
@@ -276,6 +281,11 @@ export class WorkflowService {
       return updatedWorkflow;
     });
 
+    // Plunk Lite: a workflow enabled again has its brake count from now on
+    if (data.enabled === true && !workflow.enabled) {
+      await WorkflowEnabledAt.note(workflowId);
+    }
+
     // Invalidate workflow cache if enabled status changed or workflow is enabled
     if (data.enabled !== undefined || updated.enabled) {
       await EventService.invalidateWorkflowCache(projectId);
@@ -326,9 +336,11 @@ export class WorkflowService {
       );
     }
 
-    await prisma.workflow.delete({
-      where: {id: workflowId},
-    });
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachWorkflows(tx, projectId, [workflowId]);
+      await WebhookSigningSecrets.forgetWorkflows(tx, projectId, [workflowId]);
+      await tx.workflow.delete({where: {id: workflowId}});
+    }, LONG_TRANSACTION);
 
     // Invalidate workflow cache if workflow was enabled
     if (workflow.enabled) {
@@ -357,7 +369,8 @@ export class WorkflowService {
    * - 409 if any selected workflow has active (RUNNING / WAITING) executions.
    *
    * Deleting a workflow cascades its steps, transitions and executions exactly
-   * as the single `delete()` does (Prisma relations). After the transaction
+   * as the single `delete()` does (Prisma relations), and keeps their emails
+   * the same way (WorkflowEmailLinks). After the transaction
    * commits, the enabled-workflow cache is invalidated once if any deleted
    * workflow was enabled, matching the single-delete side effect.
    */
@@ -407,12 +420,14 @@ export class WorkflowService {
           );
         }
 
+        await WorkflowEmailLinks.detachWorkflows(tx, projectId, uniqueIds);
+        await WebhookSigningSecrets.forgetWorkflows(tx, projectId, uniqueIds);
         const result = await tx.workflow.deleteMany({
           where: {id: {in: uniqueIds}, projectId},
         });
 
         return {deleted: result.count, hadEnabled: owned.some(w => w.enabled)};
-      });
+      }, LONG_TRANSACTION);
 
       // Invalidate workflow cache if any deleted workflow was enabled.
       if (hadEnabled) {
@@ -755,12 +770,16 @@ export class WorkflowService {
     }
 
     // Delete all affected steps (Prisma will cascade delete the transitions)
-    await prisma.workflowStep.deleteMany({
-      where: {
-        id: {in: Array.from(stepsToDelete)},
-        workflowId, // Safety check to ensure we only delete steps from this workflow
-      },
-    });
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachSteps(tx, Array.from(stepsToDelete));
+      await WebhookSigningSecrets.forgetSteps(tx, Array.from(stepsToDelete));
+      await tx.workflowStep.deleteMany({
+        where: {
+          id: {in: Array.from(stepsToDelete)},
+          workflowId, // Safety check to ensure we only delete steps from this workflow
+        },
+      });
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -820,7 +839,11 @@ export class WorkflowService {
     }
 
     // Delete the step — cascades and removes its own transitions
-    await prisma.workflowStep.delete({where: {id: stepId}});
+    await prisma.$transaction(async tx => {
+      await WorkflowEmailLinks.detachSteps(tx, [stepId]);
+      await WebhookSigningSecrets.forgetSteps(tx, [stepId]);
+      await tx.workflowStep.delete({where: {id: stepId}});
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -1159,37 +1182,6 @@ export class WorkflowService {
       throw new HttpException(404, 'Contact not found');
     }
 
-    // Check re-entry rules
-    if (!workflow.allowReentry) {
-      // If re-entry is not allowed, check if contact has ANY execution (regardless of status)
-      const existingExecution = await prisma.workflowExecution.findFirst({
-        where: {
-          workflowId,
-          contactId,
-        },
-      });
-
-      if (existingExecution) {
-        throw new HttpException(
-          409,
-          `Workflow does not allow re-entry. Contact already has execution (${existingExecution.status})`,
-        );
-      }
-    } else {
-      // If re-entry is allowed, only check if there's a currently RUNNING execution
-      const runningExecution = await prisma.workflowExecution.findFirst({
-        where: {
-          workflowId,
-          contactId,
-          status: WorkflowExecutionStatus.RUNNING,
-        },
-      });
-
-      if (runningExecution) {
-        throw new HttpException(409, 'Workflow is already running for this contact');
-      }
-    }
-
     // Find the trigger step
     const triggerStep = workflow.steps.find(step => step.type === 'TRIGGER');
 
@@ -1197,16 +1189,18 @@ export class WorkflowService {
       throw new HttpException(400, 'Workflow has no trigger step');
     }
 
-    // Create workflow execution
-    const execution = await prisma.workflowExecution.create({
-      data: {
-        workflowId,
-        contactId,
-        status: WorkflowExecutionStatus.RUNNING,
-        currentStepId: triggerStep.id,
-        context: context ?? Prisma.JsonNull,
-      },
-    });
+    const entry = await WorkflowEntryService.enter(workflow, contactId, triggerStep.id, context ?? Prisma.JsonNull);
+
+    if (!entry.entered) {
+      throw new HttpException(
+        409,
+        entry.refusal.reason === 'already-entered'
+          ? `Workflow does not allow re-entry. Contact already has execution (${entry.refusal.status})`
+          : 'Workflow is already running for this contact',
+      );
+    }
+
+    const {execution} = entry;
 
     // Start executing the workflow asynchronously
     // Don't await - let it run in background
@@ -1385,8 +1379,18 @@ export class WorkflowService {
       category: 'Event Data',
     }));
 
+    // Segments: whether the contact is in each one when the condition runs. Listed after the
+    // other fields, by name, since their `segment.<id>` field reads as noise.
+    const segments = await prisma.segment.findMany({where: {projectId}, select: {id: true, name: true}});
+    const segmentFields: AvailableField[] = segments
+      .map(segment => ({field: `segment.${segment.id}`, type: 'boolean', category: 'Segments', label: segment.name}))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
     // Combine all fields
-    const allFields = [...contactFields, ...eventFields].sort((a, b) => a.field.localeCompare(b.field));
+    const allFields: AvailableField[] = [
+      ...[...contactFields, ...eventFields].sort((a, b) => a.field.localeCompare(b.field)),
+      ...segmentFields,
+    ];
 
     // Also return legacy format for backwards compatibility
     const fieldNames = allFields.map(f => f.field);

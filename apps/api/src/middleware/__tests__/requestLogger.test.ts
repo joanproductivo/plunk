@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {NextFunction, Request, Response} from 'express';
+import {prisma as appPrisma} from '../../database/prisma.js';
 import {databaseRequestLogger} from '../requestLogger.js';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
@@ -376,6 +377,104 @@ describe('Request Logger Middleware', () => {
       await new Promise(resolve => setTimeout(resolve, 100));
 
       // The logging should have failed but not affected the response
+    });
+  });
+
+  describe('Rows not worth writing, and writes under load (Plunk Lite)', () => {
+    /** Respond with a status and say whether a row was written */
+    let json: Response['json'];
+    beforeEach(() => {
+      json = res.json!;
+    });
+
+    async function logged(path: string, statusCode: number, auth?: object): Promise<boolean> {
+      // A response of its own each time, as Express gives every request
+      res.json = json;
+      req.originalUrl = path;
+      res.locals = {requestId: crypto.randomUUID(), ...(auth ? {auth} : {})};
+      res.statusCode = statusCode;
+      databaseRequestLogger(req as Request, res as Response, next);
+      await res.json!({});
+      await waitForNoLog();
+      return (await prisma.apiRequest.count({where: {id: res.locals.requestId as string}})) === 1;
+    }
+
+    it('skips SNS notifications that were handled, but not the ones refused', async () => {
+      expect(await logged('/webhooks/sns', 200)).toBe(false);
+      expect(await logged('/webhooks/sns', 403)).toBe(true);
+    });
+
+    it('skips the 401s of made-up keys on the public API, but not failed logins', async () => {
+      expect(await logged('/v1/send', 401)).toBe(false);
+      expect(await logged('/v1/track', 403)).toBe(false);
+      expect(await logged('/auth/login', 401)).toBe(true);
+      expect(await logged('/v1/send', 200, {type: 'apiKey', projectId})).toBe(true);
+    });
+
+    it('writes at most 4 rows at once and drops the rest', async () => {
+      const pending: (() => void)[] = [];
+      const create = vi
+        .spyOn(appPrisma.apiRequest, 'create')
+        .mockImplementation(() => new Promise(resolve => pending.push(() => resolve({} as never))) as never);
+
+      for (let i = 0; i < 10; i++) {
+        res.json = json;
+        res.locals = {requestId: crypto.randomUUID()};
+        databaseRequestLogger(req as Request, res as Response, next);
+        await res.json!({});
+      }
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(4));
+      // Settle them, so the next tests write again
+      pending.forEach(settle => settle());
+      await new Promise(resolve => setTimeout(resolve, 20));
+      create.mockRestore();
+
+      expect(await logged('/v1/send', 200)).toBe(true);
+    });
+
+    it('logs a request whose id a client sent again, under an id of its own', async () => {
+      const id = crypto.randomUUID();
+      for (let i = 0; i < 2; i++) {
+        res.json = json;
+        res.locals = {requestId: id};
+        databaseRequestLogger(req as Request, res as Response, next);
+        await res.json!({});
+        await waitForNoLog();
+      }
+
+      expect(await prisma.apiRequest.findUnique({where: {id}})).not.toBeNull();
+      expect(await prisma.apiRequest.count({where: {path: '/v1/send', id: {not: id}}})).toBe(1);
+    });
+
+    it('writes sign-ins within their own reserve of 4 past the cap, and drops the 9th write at once', async () => {
+      const pending: (() => void)[] = [];
+      // Every write stays in flight until the end, sign-ins included
+      const create = vi
+        .spyOn(appPrisma.apiRequest, 'create')
+        .mockImplementation((() => new Promise(resolve => pending.push(() => resolve({} as never)))) as never);
+      const respond = (path: string) => {
+        res.json = json;
+        req.originalUrl = path;
+        res.statusCode = 200;
+        res.locals = {requestId: crypto.randomUUID()};
+        databaseRequestLogger(req as Request, res as Response, next);
+        return res.json!({});
+      };
+
+      for (let i = 0; i < 4; i++) await respond('/v1/send');
+      // At the cap: an ordinary request is dropped, sign-ins are not
+      await respond('/v1/send');
+      for (let i = 0; i < 5; i++) await respond('/auth/login');
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(8));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const paths = create.mock.calls.map(([args]) => (args as {data: {path: string}}).data.path);
+      pending.forEach(settle => settle());
+      await new Promise(resolve => setTimeout(resolve, 20));
+      create.mockRestore();
+
+      // 4 ordinary writes and 4 sign-ins; the 5th ordinary request and the 9th write were dropped
+      expect(paths.filter(path => path === '/v1/send')).toHaveLength(4);
+      expect(paths.filter(path => path === '/auth/login')).toHaveLength(4);
     });
   });
 

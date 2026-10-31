@@ -4,6 +4,31 @@ import {EmailSourceType} from '@plunk/db';
 import {API_URI} from '../app/constants.js';
 
 /**
+ * Internal header on an email that a workflow step sends to a custom recipient instead of the
+ * contact. The email is still recorded under the contact; the email processor addresses it to this
+ * header's value and strips the header before sending.
+ */
+export const RECIPIENT_OVERRIDE_HEADER = 'X-Plunk-Recipient-Override';
+
+/**
+ * The address an email goes to: the custom recipient of a workflow email when its headers carry
+ * one, the contact's address otherwise. The send path addresses the email with it, and the SES
+ * webhook uses it to tell whether a bounce is the contact's.
+ */
+export function recipientAddress(headers: unknown, contactEmail: string): string {
+  const override =
+    headers && typeof headers === 'object' && !Array.isArray(headers)
+      ? (headers as Record<string, unknown>)[RECIPIENT_OVERRIDE_HEADER]
+      : undefined;
+  return typeof override === 'string' && override ? override : contactEmail;
+}
+
+/** Whether an email went to a workflow's custom recipient rather than to its contact */
+export function hasRecipientOverride(headers: unknown): boolean {
+  return recipientAddress(headers, '') !== '';
+}
+
+/**
  * Classification of an outbound email, derived by the caller from the email's
  * source type and template/campaign type. This is the single axis that decides
  * which standards-based headers a message carries:
@@ -68,9 +93,9 @@ export function bodyHasListManagementLink(html: string, contactId: string): bool
  * contact before recording it, and the contact id in the path still governs the
  * change — so a stripped or rewritten value costs attribution and nothing else.
  *
- * Only callers that hold a persisted email row can supply an id. Links rendered
- * before the email exists (campaign and workflow bodies, `POST /send`) pass
- * nothing and stay unattributed.
+ * Only callers that know the email's id can supply one. Links rendered before
+ * the email exists (workflow bodies, `POST /send`) pass nothing and stay
+ * unattributed; a campaign's (Plunk Lite) carry the id its batch gives the email.
  */
 export function withSourceEmail(url: string, sourceEmailId?: string): string {
   if (!sourceEmailId) {
@@ -199,6 +224,10 @@ const LIST_UNSUBSCRIBE_PAIR = ['list-unsubscribe', 'list-unsubscribe-post'];
  * inherit Plunk's `List-Unsubscribe-Post`, making us assert one-click support for
  * a URL that never claimed it — mailbox providers would then POST to an endpoint
  * that may do nothing, and silently report the unsubscribe as done.
+ *
+ * Caller headers naming SES's own (`X-SES-…`) are dropped (Plunk Lite): SES reads them as
+ * instructions, so one could send the email under another configuration set -- which decides
+ * where its bounces and complaints are published -- or with message tags that the webhook trusts.
  */
 function mergeHeaders(
   defaults: Record<string, string>,
@@ -220,7 +249,9 @@ function mergeHeaders(
     byLowerName.set(lowerName, {name, value});
   }
   for (const [name, value] of Object.entries(custom)) {
-    byLowerName.set(name.toLowerCase(), {name, value});
+    if (!name.toLowerCase().startsWith('x-ses-')) {
+      byLowerName.set(name.toLowerCase(), {name, value});
+    }
   }
 
   const merged: Record<string, string> = {};

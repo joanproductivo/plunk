@@ -20,11 +20,15 @@ import {isAuthenticated, requireEmailVerified} from '../middleware/auth.js';
 import {AuthService} from '../services/AuthService.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
 import {VERIFICATION_AMOUNT} from '../services/CardVerificationService.js';
+import {DeletedEmailCounts} from '../services/DeletedEmailCounts.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
+import {ProjectService} from '../services/ProjectService.js';
+import {ReputationPolicy} from '../services/ReputationPolicy.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {UserService} from '../services/UserService.js';
+import {WebhookSigningSecrets} from '../services/WebhookSigningSecrets.js';
 import {Keys} from '../services/keys.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import signale from 'signale';
@@ -254,6 +258,8 @@ export class Users {
       where: {id},
       data,
     });
+    // Plunk Lite: API requests see the change at once, not when their cached copy expires
+    await ProjectService.invalidate(project);
 
     return res.status(200).json(project);
   }
@@ -271,6 +277,12 @@ export class Users {
     // Generate new unique API keys
     const publicKey = `pk_${randomBytes(32).toString('hex')}`;
     const secretKey = `sk_${randomBytes(32).toString('hex')}`;
+
+    // Plunk Lite: the old keys stop working at once, not when their cached copy expires
+    const previous = await prisma.project.findUniqueOrThrow({
+      where: {id},
+      select: {id: true, public: true, secret: true},
+    });
 
     // Update the project with new keys
     const project = await prisma.project.update({
@@ -291,6 +303,8 @@ export class Users {
         subscription: true,
       },
     });
+
+    await ProjectService.invalidate(previous, project);
 
     // Send notification about API key regeneration
     await NtfyService.notifyApiKeysRegenerated(project.name!, id!, auth.userId!);
@@ -749,6 +763,23 @@ export class Users {
     return res.status(200).json(metrics);
   }
 
+  /**
+   * Plunk Lite: reactivates a project disabled for its sending reputation, for its owners and admins.
+   * 409 when it is not disabled, or disabled for another reason.
+   */
+  @Post('@me/projects/:id/reactivate')
+  @Middleware([isAuthenticated, requireEmailVerified])
+  @CatchAsync
+  public async reactivateProject(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    await MembershipService.requireAdminAccess(auth.userId!, id);
+    const user = await UserService.id(auth.userId!);
+
+    return res.status(200).json(await ReputationPolicy.reactivate(id, user?.email ?? auth.userId!));
+  }
+
   @Post('@me/projects/:id/reset')
   @Middleware([isAuthenticated, requireEmailVerified])
   @CatchAsync
@@ -779,10 +810,8 @@ export class Users {
 
     // Delete all project data in a transaction
     await prisma.$transaction(async tx => {
-      // Delete all emails
-      await tx.email.deleteMany({
-        where: {projectId: id},
-      });
+      // Delete all emails, still counted in the project's rates (Plunk Lite: DeletedEmailCounts)
+      await DeletedEmailCounts.deleteEmails(tx, id);
 
       // Delete all events
       await tx.event.deleteMany({
@@ -794,10 +823,11 @@ export class Users {
         where: {projectId: id},
       });
 
-      // Delete all workflows
+      // Delete all workflows, and their webhook secrets (Plunk Lite), which have no relation to them
       await tx.workflow.deleteMany({
         where: {projectId: id},
       });
+      await WebhookSigningSecrets.forgetProject(tx, id);
 
       // Delete all segments
       await tx.segment.deleteMany({
@@ -845,6 +875,9 @@ export class Users {
     const project = await prisma.project.findUnique({
       where: {id},
       select: {
+        id: true,
+        public: true,
+        secret: true,
         name: true,
         subscription: true,
         customer: true,
@@ -875,10 +908,15 @@ export class Users {
       }
     }
 
-    // Delete the project (cascading deletes will handle related data)
-    await prisma.project.delete({
-      where: {id},
-    });
+    // Delete the project (cascading deletes will handle related data). Its deleted-email counts and
+    // its webhook secrets (Plunk Lite) have no relation to it, so they go explicitly.
+    await prisma.$transaction([
+      prisma.plunkLiteDeletedEmailCount.deleteMany({where: {projectId: id}}),
+      WebhookSigningSecrets.forgetProject(prisma, id),
+      prisma.project.delete({where: {id}}),
+    ]);
+    // Plunk Lite: its keys stop authenticating at once
+    await ProjectService.invalidate(project);
 
     // Send notification about project deletion
     await NtfyService.notifyProjectDeleted(project.name, id, auth.userId);

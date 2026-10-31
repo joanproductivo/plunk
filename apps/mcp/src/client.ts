@@ -30,7 +30,7 @@ interface RequestOptions {
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
-  /** Use the public key instead of the secret key (only `/v1/track` needs this). */
+  /** Use the public key instead of the secret key (only `/v1/track` takes it). */
   usePublicKey?: boolean;
 }
 
@@ -129,6 +129,12 @@ function toApiError(response: Response, payload: unknown, raw: string, project: 
       .join('; ');
 
     message = `${message} (${detail})`;
+  }
+
+  // Plunk Lite: an address refused at sign-up comes with its likely correction
+  const details = error?.details as {suggestedEmail?: unknown} | undefined;
+  if (typeof details?.suggestedEmail === 'string') {
+    message = `${message} Suggested address: ${details.suggestedEmail}.`;
   }
 
   if (response.status === 429) {

@@ -6,8 +6,10 @@ import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {ValidationError} from '../exceptions/index.js';
 import {Keys} from './keys.js';
 
+import {WorkflowEntryService} from './WorkflowEntryService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
 /**
@@ -37,13 +39,45 @@ export class EventService {
       },
     });
 
+    // Resume workflows waiting for this event. Plunk Lite: before starting new ones, so a run this
+    // event starts does not have its own wait for the same event met by it ("order -> wait for the
+    // next order")
+    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data, emailId);
+
     // Trigger workflows that are listening for this event
     await this.triggerWorkflows(projectId, eventName, contactId, data);
 
-    // Resume workflows waiting for this event
-    await WorkflowExecutionService.handleEvent(projectId, eventName, contactId, data);
-
     return event;
+  }
+
+  /**
+   * Track the same event for several contacts, one at a time to avoid database deadlocks.
+   * A failure is logged and the remaining contacts are still processed. `onTracked` runs after
+   * each contact, failed or not, with how many are done; if it throws, the loop stops.
+   * (Plunk Lite) A failure `rethrow` picks -- the database out, say -- stops the loop instead,
+   * before that contact counts as done, so a job can retry from it.
+   */
+  public static async trackEventsSequentially(
+    projectId: string,
+    eventName: string,
+    contactIds: string[],
+    data?: Record<string, unknown>,
+    {onTracked, rethrow}: {onTracked?: (done: number) => Promise<void>; rethrow?: (error: unknown) => boolean} = {},
+  ): Promise<void> {
+    for (const [index, contactId] of contactIds.entries()) {
+      try {
+        await this.trackEvent(projectId, eventName, contactId, undefined, data);
+      } catch (error) {
+        if (rethrow?.(error)) {
+          throw error;
+        }
+        // Suppress logging in test environments to reduce noise from cleanup race conditions
+        if (process.env.NODE_ENV !== 'test') {
+          signale.error(`[EVENT] Failed to track event ${eventName} for contact ${contactId}:`, error);
+        }
+      }
+      await onTracked?.(index + 1);
+    }
   }
 
   /**
@@ -317,7 +351,7 @@ export class EventService {
   /**
    * Check if an event name is reserved for system use
    * Reserved patterns:
-   * - email.* (email.sent, email.delivery, email.open, email.click, email.bounce, email.complaint)
+   * - email.* (email.sent, email.delivery, email.open, email.click, email.bounce, email.softbounce, email.complaint)
    * - contact.subscribed, contact.unsubscribed
    * - segment.*.entry, segment.*.exit
    *
@@ -342,6 +376,26 @@ export class EventService {
     }
 
     return false;
+  }
+
+  /**
+   * Plunk Lite: refuse an event a caller may not track by hand, as the API's validation errors do
+   * @param field - The request field that holds the name (`event` on /v1/track, `name` on /events/track)
+   */
+  public static assertTrackable(eventName: string, field: string): void {
+    if (EventService.isReservedEvent(eventName)) {
+      throw new ValidationError(
+        [
+          {
+            field,
+            message: `Event name "${eventName}" is reserved for system use and cannot be manually tracked`,
+            code: 'reserved_event',
+            received: eventName,
+          },
+        ],
+        'Cannot track reserved system event',
+      );
+    }
   }
 
   /**
@@ -431,6 +485,13 @@ export class EventService {
         return;
       }
 
+      // The list this was matched against is cached for five minutes, so a workflow disabled
+      // since then still arrives here. This read is fresh.
+      if (!workflow.enabled) {
+        signale.info(`[EVENT] Workflow ${workflowId} is disabled, not starting it for contact ${contactId}`);
+        return;
+      }
+
       // Never run a workflow against a contact from another project.
       // Queried directly instead of via ContactService, which imports this service.
       const contact = await prisma.contact.findFirst({
@@ -445,34 +506,6 @@ export class EventService {
         return;
       }
 
-      // Check re-entry rules
-      if (!workflow.allowReentry) {
-        // If re-entry is not allowed, check if contact has ANY execution (regardless of status)
-        const existingExecution = await prisma.workflowExecution.findFirst({
-          where: {
-            workflowId,
-            contactId,
-          },
-        });
-
-        if (existingExecution) {
-          return;
-        }
-      } else {
-        // If re-entry is allowed, only check if there's a currently RUNNING execution
-        const runningExecution = await prisma.workflowExecution.findFirst({
-          where: {
-            workflowId,
-            contactId,
-            status: 'RUNNING',
-          },
-        });
-
-        if (runningExecution) {
-          return;
-        }
-      }
-
       const triggerStep = workflow.steps[0];
 
       if (!triggerStep) {
@@ -480,16 +513,18 @@ export class EventService {
         return;
       }
 
-      // Create workflow execution
-      const execution = await prisma.workflowExecution.create({
-        data: {
-          workflowId,
-          contactId,
-          status: 'RUNNING',
-          currentStepId: triggerStep.id,
-          context: context ? toPrismaJson(context) : undefined,
-        },
-      });
+      const entry = await WorkflowEntryService.enter(
+        workflow,
+        contactId,
+        triggerStep.id,
+        context ? toPrismaJson(context) : undefined,
+      );
+
+      if (!entry.entered) {
+        return;
+      }
+
+      const {execution} = entry;
 
       signale.info(
         `[EVENT] Started workflow ${workflowId} execution ${execution.id} for contact ${contactId}${workflow.allowReentry ? ' (re-entry allowed)' : ''}`,

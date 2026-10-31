@@ -62,10 +62,18 @@ export default function Manage() {
         'POST',
         `/contacts/public/${id as string}/${next ? 'subscribe' : 'unsubscribe'}${sourceEmailQuery(router.query)}`,
       );
-      updateContact(data);
-    } catch {
-      // Translated copy rather than the server's English message; see useRecipient.
-      setActionError(translator.t('pages.common.actionFailed'));
+      updateContact({pendingConfirmation: false, ...data});
+    } catch (error) {
+      // Translated copy rather than the server's English message; see useRecipient. An address
+      // suppressed after a bounce or complaint is only resubscribed from an email's own link.
+      setActionError(
+        translator.t(
+          // Plunk Lite: so is one the double opt-in will not ask to confirm from here
+          ['ADDRESS_SUPPRESSED', 'CONFIRMATION_NEEDS_EMAIL'].includes((error as {code?: string}).code ?? '')
+            ? 'pages.common.resubscribeNeedsEmail'
+            : 'pages.common.actionFailed',
+        ),
+      );
     } finally {
       setUpdating(false);
     }
@@ -90,7 +98,9 @@ export default function Manage() {
   // "you are unsubscribed" would be false -- they paused, and the date is what they need.
   const statusText = contact.subscribed
     ? translator.t('pages.manage.subscribedStatus')
-    : snoozed
+    : contact.pendingConfirmation
+      ? translator.t('pages.subscribe.pendingDescription', {projectName: contact.projectName, email: contact.email})
+      : snoozed
       ? translator.t('pages.snooze.status', {date: formatSnoozeDate(contact.snoozedUntil, contact.language)})
       : translator.t('pages.manage.unsubscribedStatus');
 

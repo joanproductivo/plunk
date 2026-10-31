@@ -683,8 +683,17 @@ describe('CampaignService', () => {
         status: CampaignStatus.SENDING,
         audienceType: CampaignAudienceType.ALL,
       });
+      // `startSending` stamps the send a batch belongs to
+      const sentAt = new Date();
+      await prisma.campaign.update({where: {id: campaign.id}, data: {sentAt}});
 
-      await CampaignService.processBatch(campaign.id, 1, 0, 500);
+      await CampaignService.processBatch({
+        campaignId: campaign.id,
+        batchNumber: 1,
+        offset: 0,
+        limit: 500,
+        generation: sentAt.getTime(),
+      });
 
       return prisma.email.findMany({
         where: {campaignId: campaign.id},
@@ -737,6 +746,8 @@ describe('CampaignService', () => {
       const emails = await sendBatch({subject: 'Hi', body: '<a href="{{unsubscribeUrl}}">Unsubscribe</a>'}, [{}]);
 
       expect(emails[0]?.body).toContain(`/unsubscribe/${emails[0]?.contactId}`);
+      // Plunk Lite: with the email's id, as this is its only render
+      expect(emails[0]?.body).toContain(`/unsubscribe/${emails[0]?.contactId}?e=${emails[0]?.id}`);
     });
   });
 });

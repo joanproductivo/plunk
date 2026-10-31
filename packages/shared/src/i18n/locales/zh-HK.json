@@ -17,7 +17,19 @@
       "button": "訂閱",
       "buttonLoading": "處理中...",
       "successTitle": "訂閱成功！",
-      "successDescription": "{email} 現在會收到 {projectName} 的電郵。"
+      "successDescription": "{email} 現在會收到 {projectName} 的電郵。",
+      "pendingTitle": "請查看收件匣",
+      "pendingDescription": "我哋已經寄咗電郵去 {email}。撳入面嘅連結就可以確認訂閱 {projectName}。"
+    },
+    "confirm": {
+      "title": "確認你嘅訂閱",
+      "description": "確認你想喺 {email} 接收 {projectName} 嘅電郵。",
+      "button": "確認訂閱",
+      "buttonLoading": "確認緊...",
+      "successTitle": "訂閱成功！",
+      "successDescription": "{email} 而家會收到 {projectName} 嘅電郵。",
+      "invalidTitle": "呢條連結已經失效",
+      "invalidDescription": "佢已經被較新嘅電郵取代，或者地址已經更改。請重新訂閱以取得新連結。"
     },
     "manage": {
       "title": "管理偏好設定",
@@ -50,6 +62,7 @@
       "error": "發生錯誤",
       "loadFailed": "無法載入電郵偏好設定。請檢查連結後再試。",
       "actionFailed": "發生錯誤，請再試一次。",
+      "resubscribeNeedsEmail": "無法在此處重新訂閱此地址。請使用您從我們收到的電郵中的連結。",
       "sentWith": "透過 {provider} 發送"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "你收到這封電郵是因為你訂閱了 {projectName} 的電郵。如果你不想再收到這類電郵，請",
       "updatePreferences": "更新你的偏好設定"
+    },
+    "optin": {
+      "subject": "確認訂閱 {projectName}",
+      "text": "多謝你訂閱 {projectName} 嘅電郵。\n\n請確認呢個係你嘅地址，以開始接收電郵：",
+      "button": "確認訂閱",
+      "ignore": "如果你冇訂閱，請忽略呢封電郵：你唔會被訂閱。"
     }
   }
 }

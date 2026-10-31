@@ -1,17 +1,55 @@
-import {type Contact, Prisma} from '@plunk/db';
+import {type Contact, EmailStatus, Prisma} from '@plunk/db';
 import type {
+  BulkContactActionSelector,
+  ContactListFilter,
   ContactSubscriptionStatus,
   CursorPaginatedResponse,
   FilterCondition,
   FilterGroup,
+  OptInOutcome,
   SnoozeDuration,
 } from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
+import {verifySignupsEnabled} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
-import {HttpException} from '../exceptions/index.js';
+import {ConflictError, ErrorCode, HttpException} from '../exceptions/index.js';
+import {LONG_TRANSACTION, utcTimestamp} from '../utils/database.js';
+import {normalizeEmail} from '../utils/emailAddress.js';
+import {DeletedEmailCounts} from './DeletedEmailCounts.js';
+import {EmailVerificationService} from './EmailVerificationService.js';
+import {hasRecipientOverride} from './EmailHeaderService.js';
 import {EventService} from './EventService.js';
+import {type OptInKey, OptInService} from './OptInService.js';
+import {QueueService} from './QueueService.js';
+import {SuppressionService} from './SuppressionService.js';
+
+/** Statuses of an email that reached the recipient's mailbox */
+const RECEIVED_STATUSES = new Set<EmailStatus>([
+  EmailStatus.DELIVERED,
+  EmailStatus.OPENED,
+  EmailStatus.CLICKED,
+  EmailStatus.COMPLAINED,
+]);
+
+/** Plunk Lite: most custom fields a contact can hold, and their largest size as JSON (see mergeContactData) */
+export const CONTACT_FIELDS_MAX = 200;
+export const CONTACT_DATA_MAX_BYTES = 64 * 1024;
+
+/** Options of {@link ContactService.upsert} and {@link ContactService.upsertWithOptIn} */
+interface UpsertOptions {
+  createdAt?: Date;
+  explicit?: boolean;
+  verifySignup?: boolean;
+  retried?: boolean;
+  /** Plunk Lite: who stands behind a sign-up, for the double opt-in (see upsertWithOptIn) */
+  consent?: 'unconfirmed' | 'operator' | 'import' | 'none';
+  /** Plunk Lite: the key of the request; the public one sends no confirmation email */
+  key?: OptInKey;
+  /** Plunk Lite: static segments to join on confirming a sign-up */
+  segmentIds?: string[];
+}
 
 export class ContactService {
   /**
@@ -26,18 +64,47 @@ export class ContactService {
    * model, which already lowercases on write.
    */
   public static normalizeEmail(email: string): string {
-    return email.trim().toLowerCase();
+    return normalizeEmail(email);
   }
 
   /**
-   * Translate a subscription status into a where-clause fragment.
+   * Build the where-clause for the contacts list filters: the email search, the subscription
+   * status and the segment. Shared by the list, the select-all bulk actions and the export so
+   * "all matching" always means exactly the rows the dashboard shows.
    *
    * `snoozed` is derived, not stored -- it is `subscribed = false` with a snooze date still
    * set. `unsubscribed` therefore has to exclude snoozed contacts explicitly, or the two
    * filters would overlap and the dashboard's counts would not add up.
    *
    * Falls back to the legacy `subscribed` boolean when no status is given.
+   *
+   * The segment filter reads stored memberships, so it suits static segments; a dynamic
+   * segment's stored members only exist when it tracks membership, and lag its rules.
    */
+  public static buildFilterWhere(projectId: string, filter: ContactListFilter = {}): Prisma.ContactWhereInput {
+    return {
+      projectId,
+      ...(filter.search ? {email: {contains: filter.search, mode: 'insensitive' as const}} : {}),
+      ...this.buildStatusWhere(filter.status, filter.subscribed),
+      ...(filter.segmentId ? {segmentMemberships: {some: {segmentId: filter.segmentId, exitedAt: null}}} : {}),
+    };
+  }
+
+  /**
+   * Where-clause for a "select all matching" selector: the list filters, minus the rows the
+   * user unticked.
+   */
+  public static buildQueryWhere(
+    projectId: string,
+    selector: Extract<BulkContactActionSelector, {mode: 'query'}>,
+  ): Prisma.ContactWhereInput {
+    const excludeIds = selector.excludeIds ?? [];
+    return {
+      ...this.buildFilterWhere(projectId, selector.filter),
+      ...(excludeIds.length > 0 ? {id: {notIn: excludeIds}} : {}),
+    };
+  }
+
   private static buildStatusWhere(
     status?: ContactSubscriptionStatus,
     subscribed?: boolean,
@@ -63,35 +130,20 @@ export class ContactService {
     limit = 20,
     cursor?: string,
     search?: string,
-    options?: {
-      /**
-       * Filter by subscription state, including the derived `snoozed` state.
-       * The `subscribed` and `unsubscribed` branches are backed by the
-       * `(projectId, subscribed)` index; `snoozed` narrows that further on `snoozedUntil`.
-       */
-      status?: ContactSubscriptionStatus;
-      /**
-       * Legacy boolean filter, kept so existing `?subscribed=true|false` callers keep working.
-       * Ignored when `status` is given.
-       */
-      subscribed?: boolean;
-      /** Sortable columns. `email` is covered by the `(projectId, email)` unique index. */
-      sort?: 'email' | 'createdAt';
-      dir?: 'asc' | 'desc';
-    },
+    /**
+     * The list filters other than the search (see {@link ContactListFilter}). The `subscribed`
+     * and `unsubscribed` statuses are backed by the `(projectId, subscribed)` index; `snoozed`
+     * narrows that further on `snoozedUntil`. `sort` picks the column: `email` is covered by the
+     * `(projectId, email)` unique index.
+     */
+    options?: Omit<ContactListFilter, 'search'> & {sort?: 'email' | 'createdAt'; dir?: 'asc' | 'desc'},
   ): Promise<CursorPaginatedResponse<Contact>> {
-    const where: Prisma.ContactWhereInput = {
-      projectId,
-      ...(search
-        ? {
-            email: {
-              contains: search,
-              mode: 'insensitive' as const,
-            },
-          }
-        : {}),
-      ...this.buildStatusWhere(options?.status, options?.subscribed),
-    };
+    const where = this.buildFilterWhere(projectId, {
+      search,
+      status: options?.status,
+      subscribed: options?.subscribed,
+      segmentId: options?.segmentId,
+    });
 
     // The chosen sort column leads; `id` is always the stable tiebreaker the
     // cursor (`{id}`) keys off, so keyset pagination stays correct under any
@@ -218,8 +270,9 @@ export class ContactService {
     existing: Prisma.JsonValue | null,
     incoming: Record<string, unknown>,
   ): Record<string, unknown> {
-    const merged: Record<string, unknown> =
-      existing && typeof existing === 'object' && !Array.isArray(existing) ? {...(existing as Record<string, unknown>)} : {};
+    const base: Record<string, unknown> =
+      existing && typeof existing === 'object' && !Array.isArray(existing) ? (existing as Record<string, unknown>) : {};
+    const merged: Record<string, unknown> = {...base};
 
     const reservedFields = ['plunk_id', 'plunk_email', 'id', 'email', 'unsubscribeUrl', 'subscribeUrl', 'manageUrl'];
 
@@ -245,6 +298,26 @@ export class ContactService {
       merged[key] = value;
     }
 
+    // Plunk Lite: caps on custom fields, in number and in size, which only refuse a change that
+    // grows a contact past them, so one already over a cap can still be updated
+    const before = Object.keys(base).length;
+    const after = Object.keys(merged).length;
+    if (after > CONTACT_FIELDS_MAX && after > before) {
+      throw new HttpException(
+        400,
+        `A contact can hold at most ${CONTACT_FIELDS_MAX} custom fields`,
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+    const bytesAfter = Buffer.byteLength(JSON.stringify(merged));
+    if (bytesAfter > CONTACT_DATA_MAX_BYTES && bytesAfter > Buffer.byteLength(JSON.stringify(base))) {
+      throw new HttpException(
+        400,
+        `A contact's custom fields can take at most ${CONTACT_DATA_MAX_BYTES / 1024} KB`,
+        ErrorCode.VALIDATION_ERROR,
+      );
+    }
+
     return merged;
   }
 
@@ -255,6 +328,16 @@ export class ContactService {
   ): Promise<Contact> {
     // First verify contact exists and belongs to project
     const existing = await this.get(projectId, contactId);
+
+    // An update that subscribes a suppressed address -- turning the subscription on, or moving a
+    // subscribed contact to that address -- is refused: this is the explicit path (the contact
+    // page, the API's and MCP's update). Saving only data on a contact is never refused.
+    const finalEmail = data.email !== undefined ? ContactService.normalizeEmail(data.email) : existing.email;
+    const subscribes = data.subscribed === true && !existing.subscribed;
+    const movesSubscribed = finalEmail !== existing.email && (data.subscribed ?? existing.subscribed);
+    if (subscribes || movesSubscribed) {
+      await SuppressionService.maySubscribe(projectId, finalEmail, {explicit: true});
+    }
 
     const updateData: Prisma.ContactUpdateInput = {};
 
@@ -282,6 +365,12 @@ export class ContactService {
     const isSubscriptionChanging = data.subscribed !== undefined && existing.subscribed !== data.subscribed;
     const wasSubscribed = existing.subscribed;
 
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write, so a link
+    // pressed meanwhile cannot subscribe the contact after it
+    if (data.subscribed === false) {
+      await OptInService.cancel(contactId);
+    }
+
     try {
       const updated = await prisma.contact.update({
         where: {id: contactId},
@@ -308,15 +397,16 @@ export class ContactService {
   }
 
   /**
-   * Delete a contact
+   * Delete a contact. Its emails go first, still counted in the project's rates (DeletedEmailCounts).
    */
   public static async delete(projectId: string, contactId: string): Promise<void> {
     // First verify contact exists and belongs to project
     await this.get(projectId, contactId);
 
-    await prisma.contact.delete({
-      where: {id: contactId},
-    });
+    await prisma.$transaction(async tx => {
+      await DeletedEmailCounts.deleteEmails(tx, projectId, [contactId]);
+      await tx.contact.delete({where: {id: contactId}});
+    }, LONG_TRANSACTION);
   }
 
   /**
@@ -332,6 +422,13 @@ export class ContactService {
    * Upsert a contact (create or update) with metadata merging
    * Supports persistent and non-persistent data fields
    * Reserved fields: plunk_id, plunk_email
+   * `options.createdAt` dates a new contact (an import keeps the original sign-up date); an
+   * existing contact keeps its own.
+   * A suppressed address (Plunk Lite) is never subscribed: it stays unsubscribed, or with
+   * `options.explicit` -- the dashboard's add-contact form -- the request is refused.
+   * `options.verifySignup` (Plunk Lite) refuses a new contact whose address takes no email (422).
+   * With the double opt-in on (Plunk Lite), a sign-up waits for the contact to confirm: see
+   * {@link upsertWithOptIn}.
    */
   public static async upsert(
     projectId: string,
@@ -339,8 +436,38 @@ export class ContactService {
     data?: Record<string, unknown>,
     subscribed?: boolean,
     defaultSubscribed: boolean = true,
+    options: UpsertOptions = {},
   ): Promise<Contact> {
+    return (await ContactService.upsertWithOptIn(projectId, email, data, subscribed, defaultSubscribed, options))
+      .contact;
+  }
+
+  /**
+   * {@link upsert}, telling also what became of a sign-up under the double opt-in (Plunk Lite).
+   *
+   * `options.consent` says who stands behind a sign-up -- whatever would subscribe the contact,
+   * `subscribed: true` or a new contact subscribed by default:
+   * - `unconfirmed` (the default, so a new caller waits for confirmation): with the opt-in on, the
+   *   contact stays as it was (a new one unsubscribed) and is emailed a link to confirm, unless
+   *   `options.key` is the public one. `options.segmentIds` are joined on confirming.
+   * - `operator`: the dashboard's own form; subscribed as always.
+   * - `import`: with the opt-in on, a new contact is subscribed and an existing one stays as it was.
+   * - `none` (an inbound email): an existing contact is never subscribed by it, opt-in or not; a
+   *   new one, as an `import` would be with the opt-in off and unsubscribed with it on.
+   *
+   * `optIn` is set when the opt-in kept the contact from being subscribed.
+   */
+  public static async upsertWithOptIn(
+    projectId: string,
+    email: string,
+    data?: Record<string, unknown>,
+    subscribed?: boolean,
+    defaultSubscribed: boolean = true,
+    options: UpsertOptions = {},
+  ): Promise<{contact: Contact; optIn?: OptInOutcome}> {
     const normalizedEmail = ContactService.normalizeEmail(email);
+    // What the caller asked for, before a suppression turns it down: a retry asks the same
+    const requestedSubscribed = subscribed;
 
     // Find existing contact
     const existing = await prisma.contact.findFirst({
@@ -350,15 +477,50 @@ export class ContactService {
       },
     });
 
+    // Plunk Lite: a new contact from the API (`options.verifySignup`) needs an address that can
+    // receive email, so a form's typo or a made-up address is turned away while it can be fixed
+    if (!existing && options.verifySignup && verifySignupsEnabled()) {
+      await ContactService.requireValidSignup(normalizedEmail);
+    }
+
+    // A suppressed address is never subscribed here. Most callers subscribe in passing -- an
+    // event, a send, an import, an inbound email -- and the contact simply stays unsubscribed;
+    // an explicit request (the dashboard's add-contact form) is refused instead.
+    const subscribesNow = existing ? subscribed === true && !existing.subscribed : (subscribed ?? defaultSubscribed);
+    if (subscribesNow && !(await SuppressionService.maySubscribe(projectId, normalizedEmail, options))) {
+      subscribed = false;
+    }
+
+    // Plunk Lite: a sign-up the double opt-in holds back leaves the contact as it was -- a new one
+    // unsubscribed -- and, from a form, asks it to confirm once it is written
+    const consent = options.consent ?? 'unconfirmed';
+    let optIn: 'request' | 'held' | undefined;
+    if (subscribesNow && subscribed !== false && consent !== 'operator') {
+      if (consent === 'none' && existing) {
+        optIn = 'held';
+      } else if (await OptInService.isRequired(projectId)) {
+        optIn = consent === 'unconfirmed' ? 'request' : consent === 'import' && !existing ? undefined : 'held';
+      }
+      if (optIn) {
+        subscribed = existing ? undefined : false;
+      }
+    }
+
     const mergedData = ContactService.mergeContactData(existing?.data ?? null, data ?? {});
 
+    let contact: Contact;
     if (existing) {
       // Track subscription status change
       const isSubscriptionChanging = subscribed !== undefined && existing.subscribed !== subscribed;
       const wasSubscribed = existing.subscribed;
 
+      // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write (see update)
+      if (requestedSubscribed === false) {
+        await OptInService.cancel(existing.id);
+      }
+
       try {
-        const updated = await prisma.contact.update({
+        contact = await prisma.contact.update({
           where: {id: existing.id},
           data: {
             data: Object.keys(mergedData).length > 0 ? toPrismaJson(mergedData) : Prisma.JsonNull,
@@ -371,13 +533,11 @@ export class ContactService {
         // Track subscription event if status changed
         if (isSubscriptionChanging) {
           if (subscribed && !wasSubscribed) {
-            await EventService.trackEvent(projectId, 'contact.subscribed', updated.id);
+            await EventService.trackEvent(projectId, 'contact.subscribed', contact.id);
           } else if (!subscribed && wasSubscribed) {
-            await EventService.trackEvent(projectId, 'contact.unsubscribed', updated.id);
+            await EventService.trackEvent(projectId, 'contact.unsubscribed', contact.id);
           }
         }
-
-        return updated;
       } catch (error) {
         // Provide helpful error message for database/validation issues
         throw new HttpException(
@@ -387,15 +547,24 @@ export class ContactService {
       }
     } else {
       try {
-        return await prisma.contact.create({
+        contact = await prisma.contact.create({
           data: {
             projectId,
             email: normalizedEmail,
             data: Object.keys(mergedData).length > 0 ? toPrismaJson(mergedData) : Prisma.JsonNull,
             subscribed: subscribed ?? defaultSubscribed,
+            ...(options.createdAt ? {createdAt: options.createdAt} : {}),
           },
         });
       } catch (error) {
+        // Plunk Lite: created meanwhile by a concurrent request for the same address (a form sent
+        // twice), so this one updates it instead
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && !options.retried) {
+          return ContactService.upsertWithOptIn(projectId, email, data, requestedSubscribed, defaultSubscribed, {
+            ...options,
+            retried: true,
+          });
+        }
         // Provide helpful error message for database/validation issues
         throw new HttpException(
           500,
@@ -403,6 +572,27 @@ export class ContactService {
         );
       }
     }
+
+    if (optIn === 'request') {
+      return {contact, optIn: await OptInService.request(contact, {segmentIds: options.segmentIds, key: options.key})};
+    }
+    return {contact, ...(optIn ? {optIn} : {})};
+  }
+
+  /** Plunk Lite: refuse, with the reasons and any likely correction, an address that takes no email */
+  private static async requireValidSignup(email: string): Promise<void> {
+    const verdict = await EmailVerificationService.verifySignup(email);
+    if (verdict.valid) {
+      return;
+    }
+    // The suggestion goes in the details only: the message reaches the logs and api_requests
+    const suggestion = verdict.suggestedEmail ? ' Did you mean the suggested address?' : '';
+    throw new HttpException(
+      422,
+      `This address cannot receive email: ${verdict.reasons.join('; ')}.${suggestion}`,
+      ErrorCode.INVALID_EMAIL,
+      {reasons: verdict.reasons, ...(verdict.suggestedEmail ? {suggestedEmail: verdict.suggestedEmail} : {})},
+    );
   }
 
   /**
@@ -502,14 +692,22 @@ export class ContactService {
   private static async resolveSourceEmail(
     contactId: string,
     emailId?: string,
-  ): Promise<{id: string; campaignId: string | null; suppressed: boolean} | undefined> {
+  ): Promise<{id: string; campaignId: string | null; suppressed: boolean; received: boolean} | undefined> {
     if (!emailId) {
       return undefined;
     }
 
     const email = await prisma.email.findUnique({
       where: {id: emailId},
-      select: {id: true, contactId: true, campaignId: true, bouncedAt: true, complainedAt: true},
+      select: {
+        id: true,
+        contactId: true,
+        campaignId: true,
+        bouncedAt: true,
+        complainedAt: true,
+        status: true,
+        headers: true,
+      },
     });
 
     if (email?.contactId !== contactId) {
@@ -520,6 +718,9 @@ export class ContactService {
       id: email.id,
       campaignId: email.campaignId,
       suppressed: email.bouncedAt !== null || email.complainedAt !== null,
+      // It reached the contact's own mailbox: sent to their address, not a workflow's custom
+      // recipient, and delivered (or opened, clicked or reported as spam, which all need that)
+      received: RECEIVED_STATUSES.has(email.status) && !hasRecipientOverride(email.headers),
     };
   }
 
@@ -527,7 +728,7 @@ export class ContactService {
    * Record an opt-out against the campaign email it came from: stamp the email's
    * `unsubscribedAt` and add one to the campaign's unsubscribe count.
    *
-   * The two move together, in one transaction, and the count only moves when the stamp
+   * The two move together, in one statement, and the count only moves when the stamp
    * lands. That keeps the stamped rows -- the list the campaign page drills into --
    * identical to the figure it is opened from, and makes a repeat opt-out from the same
    * email (a second click on the hosted page, a re-snooze) count once.
@@ -536,35 +737,82 @@ export class ContactService {
    * 5xx on a public unsubscribe endpoint, which would leave a mailbox provider retrying
    * a request that already took effect. A failure is logged and the opt-out stands
    * uncounted.
+   *
+   * Plunk Lite: the SES webhook records here, too, the unsubscribe a bounce or complaint causes,
+   * so the campaign's unsubscribes include it as Analytics does. A campaign's bounces arrive
+   * together, so this is one statement rather than an interactive transaction: it holds the
+   * campaign row only for the increment, and no pooled connection waits on Prisma's two-second
+   * transaction limit, which a burst would hit and leave the opt-out uncounted.
    */
-  private static async recordCampaignUnsubscribe(emailId: string, campaignId: string): Promise<void> {
+  public static async recordCampaignUnsubscribe(emailId: string, campaignId: string): Promise<void> {
     try {
-      await prisma.$transaction(async tx => {
-        const {count} = await tx.email.updateMany({
-          where: {id: emailId, unsubscribedAt: null},
-          data: {unsubscribedAt: new Date()},
-        });
-
-        if (count === 1) {
-          await tx.campaign.update({
-            where: {id: campaignId},
-            data: {unsubscribedCount: {increment: 1}},
-          });
-        }
-      });
+      const now = utcTimestamp(new Date());
+      await prisma.$executeRaw`
+        WITH stamped AS (
+          UPDATE "emails" SET "unsubscribedAt" = ${now}, "updatedAt" = ${now}
+          WHERE "id" = ${emailId} AND "unsubscribedAt" IS NULL
+          RETURNING 1
+        )
+        UPDATE "campaigns" SET "unsubscribedCount" = "unsubscribedCount" + 1, "updatedAt" = ${now}
+        WHERE "id" = ${campaignId} AND EXISTS (SELECT 1 FROM stamped)
+      `;
     } catch (error) {
       signale.warn(`[CONTACT] Failed to record unsubscribe for campaign ${campaignId}:`, error);
     }
   }
 
   /**
-   * PUBLIC: Subscribe a contact
+   * PUBLIC: Subscribe a contact. A suppressed address (Plunk Lite) is subscribed only from an email
+   * that reached the contact's mailbox, which lifts the suppression; otherwise 409.
+   *
+   * With the double opt-in on (Plunk Lite), a contact not yet subscribed who comes without an email
+   * of theirs is sent a link to confirm instead, and `pendingConfirmation` says so.
    *
    * @param source - Optional originating email, for attributing the change in
    *                 the activity feed. See {@link resolveSourceEmail}.
    */
-  public static async subscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
+  public static async subscribe(
+    contactId: string,
+    source?: {emailId?: string},
+  ): Promise<Contact & {pendingConfirmation?: true}> {
     const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
+
+    // A suppressed address is resubscribed here only by its owner: from an email of theirs that
+    // reached their mailbox. The page is public and needs only the contact's id, which a public
+    // key hands out, so without that email the request is refused rather than trusted.
+    const current = await prisma.contact.findUnique({where: {id: contactId}});
+    if (current && (await SuppressionService.find(current.projectId, current.email))) {
+      if (!sourceEmail?.received) {
+        throw new ConflictError(
+          'This address cannot be resubscribed from here. Use the subscribe link in an email you received from us.',
+          undefined,
+          ErrorCode.ADDRESS_SUPPRESSED,
+        );
+      }
+      await SuppressionService.lift(current.projectId, current.email);
+    }
+
+    // Plunk Lite: for the same reason, with the double opt-in on, the page subscribes directly only
+    // from an email that reached the contact's mailbox. Otherwise it asks the address to confirm --
+    // if it signed up or received an email before, so the page cannot email any address
+    if (
+      current &&
+      !current.subscribed &&
+      !sourceEmail?.received &&
+      (await OptInService.isRequired(current.projectId))
+    ) {
+      const outcome = (await OptInService.mayAskWithoutKey(current.id)) ? await OptInService.request(current) : 'held';
+      if (outcome === 'sent' || outcome === 'throttled') {
+        return {...current, pendingConfirmation: true};
+      }
+      throw new ConflictError(
+        outcome === 'held'
+          ? 'This address cannot be subscribed from here. Use the subscribe link in an email you received from us.'
+          : 'The confirmation email could not be sent. Try again later.',
+        undefined,
+        outcome === 'held' ? ErrorCode.CONFIRMATION_NEEDS_EMAIL : ErrorCode.CONFLICT,
+      );
+    }
 
     const contact = await prisma.contact.update({
       where: {id: contactId},
@@ -588,6 +836,9 @@ export class ContactService {
   public static async unsubscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
     const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
 
+    // Plunk Lite: unsubscribing withdraws a sign-up still to confirm, before the write (see update)
+    await OptInService.cancel(contactId);
+
     const contact = await prisma.contact.update({
       where: {id: contactId},
       // Unsubscribing on top of a snooze makes it permanent -- the recipient asked to stop,
@@ -599,8 +850,8 @@ export class ContactService {
     await EventService.trackEvent(contact.projectId, 'contact.unsubscribed', contactId, sourceEmail?.id);
 
     // Count it against the campaign the recipient opted out from. Suppressed
-    // emails are skipped: a bounce or complaint unsubscribes the contact too,
-    // and `bouncedCount` already reports those.
+    // emails are skipped: the bounce or complaint that suppressed them unsubscribed
+    // the contact, and the SES webhook counted it then, if it took them off the list.
     if (sourceEmail?.campaignId && !sourceEmail.suppressed) {
       await this.recordCampaignUnsubscribe(sourceEmail.id, sourceEmail.campaignId);
     }
@@ -659,8 +910,13 @@ export class ContactService {
    *
    * The call sites that uphold this, all marked with a reference to this comment:
    * `update`, `upsert`, `subscribe`, `unsubscribe`, `bulkSubscribe`, `bulkUnsubscribe`,
-   * the three SES suppression branches in `Webhooks`, and the workflow `UPDATE_CONTACT` step.
+   * the SES bounce and complaint handling in `Webhooks` and `suppressUnmatched`, and the workflow
+   * `UPDATE_CONTACT` step.
    * `create` needs nothing -- a new contact's `snoozedUntil` is already null.
+   *
+   * Plunk Lite adds a second line of defence: an address on the project's suppression list
+   * (SuppressionService) is never subscribed by any of these paths, nor by the sweep -- which
+   * clears its `snoozedUntil` and leaves it unsubscribed -- and is never sent to.
    *
    * Re-snoozing is allowed and simply moves the date; it does not re-count against the
    * campaign, matching the repeat-click guard on the one-click unsubscribe endpoint.
@@ -680,15 +936,23 @@ export class ContactService {
     // counts against the campaign, and the row has to be confirmed to exist anyway.
     const existing = await prisma.contact.findUnique({
       where: {id: contactId},
-      select: {subscribed: true},
+      select: {subscribed: true, snoozedUntil: true},
     });
 
     if (!existing) {
       throw new HttpException(404, 'Contact not found');
     }
+    // Plunk Lite: only a contact on the list pauses. The sweep subscribes a paused contact when the
+    // pause ends, so pausing an unsubscribed one -- which the public page needs only its id for --
+    // would subscribe someone who never asked, or who unsubscribed.
+    if (!existing.subscribed && !existing.snoozedUntil) {
+      throw new ConflictError('Only a subscribed contact can pause its emails.', undefined, ErrorCode.CONFLICT);
+    }
 
     const snoozedUntil = this.addSnoozeWindow(new Date(), duration);
 
+    // Plunk Lite: a pause withdraws a sign-up still to confirm, as unsubscribing does
+    await OptInService.cancel(contactId);
     const contact = await prisma.contact.update({
       where: {id: contactId},
       data: {subscribed: false, snoozedUntil},
@@ -739,29 +1003,43 @@ export class ContactService {
     const maxPerRun = options?.maxPerRun ?? 5000;
 
     let resumed = 0;
+    let processed = 0;
 
-    while (resumed < maxPerRun) {
-      const due = await prisma.contact.findMany({
+    while (processed < maxPerRun) {
+      const found = await prisma.contact.findMany({
         where: {snoozedUntil: {lte: new Date()}},
-        select: {id: true, projectId: true},
+        select: {id: true, projectId: true, email: true},
         orderBy: {snoozedUntil: 'asc'},
-        take: Math.min(batchSize, maxPerRun - resumed),
+        take: Math.min(batchSize, maxPerRun - processed),
       });
 
-      if (due.length === 0) {
+      if (found.length === 0) {
         break;
       }
 
-      await prisma.contact.updateMany({
-        where: {id: {in: due.map(c => c.id)}},
+      // A suppressed address ends its snooze unsubscribed. Its `snoozedUntil` is cleared in this
+      // same pass, or every later sweep would read it first again.
+      const {allowed: due, suppressed} = await SuppressionService.partition(found);
+      if (suppressed.length > 0) {
+        await prisma.contact.updateMany({
+          where: {id: {in: suppressed.map(c => c.id)}},
+          data: {snoozedUntil: null},
+        });
+      }
+
+      // Only contacts still snoozed: a bounce or complaint since they were read clears the date,
+      // and must not be undone here. Those it resubscribes are the ones counted and announced.
+      const resubscribed = await prisma.contact.updateManyAndReturn({
+        where: {id: {in: due.map(c => c.id)}, snoozedUntil: {not: null, lte: new Date()}},
         data: {subscribed: true, snoozedUntil: null},
+        select: {id: true, projectId: true},
       });
 
       // Events are per-project because `trackEvent` resolves workflows per project. Awaited,
       // unlike the bulk paths: the sweep has no caller waiting on it, and letting a batch's
       // events finish before the next batch is read keeps the load flat.
       const byProject = new Map<string, string[]>();
-      for (const contact of due) {
+      for (const contact of resubscribed) {
         const ids = byProject.get(contact.projectId);
         if (ids) {
           ids.push(contact.id);
@@ -771,21 +1049,43 @@ export class ContactService {
       }
 
       for (const [projectId, contactIds] of byProject) {
-        await this.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
+        await EventService.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
           reason: 'snooze_expired',
         });
       }
 
-      resumed += due.length;
+      processed += found.length;
+      resumed += resubscribed.length;
 
       // A short batch means the queue is drained; anything else is a full page and there may
       // be more.
-      if (due.length < batchSize) {
+      if (found.length < batchSize) {
         break;
       }
     }
 
     return resumed;
+  }
+
+  /**
+   * Distinct custom field keys in a project's contact `data`. Contacts without custom data hold
+   * a JSON `null` (see `upsert`), which `jsonb_object_keys` rejects, hence the object guard.
+   */
+  private static customFieldKeysSql(projectId: string): Prisma.Sql {
+    return Prisma.sql`
+      SELECT DISTINCT jsonb_object_keys(data) AS key
+      FROM contacts
+      WHERE
+        "projectId" = ${projectId}
+        AND data IS NOT NULL
+        AND jsonb_typeof(data) = 'object'
+    `;
+  }
+
+  /** Custom field keys used by any contact in the project, sorted. */
+  public static async getCustomFieldKeys(projectId: string): Promise<string[]> {
+    const rows = await prisma.$queryRaw<{key: string}[]>(this.customFieldKeysSql(projectId));
+    return rows.map(row => row.key).sort((a, b) => a.localeCompare(b));
   }
 
   /**
@@ -818,12 +1118,7 @@ export class ContactService {
       Array<{key: string; sample_value: string; json_type: string; contact_count: bigint}>
     >`
       WITH field_keys AS (
-        SELECT DISTINCT jsonb_object_keys(data) as key
-        FROM contacts
-        WHERE
-          "projectId" = ${projectId}
-          AND data IS NOT NULL
-          AND jsonb_typeof(data) = 'object'
+        ${this.customFieldKeysSql(projectId)}
       ),
       field_samples AS (
         SELECT
@@ -1059,25 +1354,28 @@ export class ContactService {
    * Updates multiple contacts to subscribed=true in batches.
    * `updated` = contacts flipped from unsubscribed to subscribed.
    * `unchanged` = contacts that were already subscribed (no-op, not a failure).
+   * `suppressed` = contacts left unsubscribed because their address is suppressed (Plunk Lite).
    */
   public static async bulkSubscribe(
     projectId: string,
     contactIds: string[],
-  ): Promise<{updated: number; unchanged: number}> {
+  ): Promise<{updated: number; unchanged: number; suppressed: number}> {
     const contacts = await prisma.contact.findMany({
       where: {id: {in: contactIds}, projectId},
-      select: {id: true, subscribed: true},
+      select: {id: true, projectId: true, email: true, subscribed: true},
     });
 
     if (contacts.length === 0) {
-      return {updated: 0, unchanged: 0};
+      return {updated: 0, unchanged: 0, suppressed: 0};
     }
 
-    const unsubscribedIds = contacts.filter(c => !c.subscribed).map(c => c.id);
-    const unchanged = contacts.length - unsubscribedIds.length;
+    // A suppressed address stays unsubscribed, and is counted apart so the summary says why
+    const {allowed, suppressed} = await SuppressionService.partition(contacts.filter(c => !c.subscribed));
+    const unsubscribedIds = allowed.map(c => c.id);
+    const unchanged = contacts.filter(c => c.subscribed).length;
 
     if (unsubscribedIds.length === 0) {
-      return {updated: 0, unchanged};
+      return {updated: 0, unchanged, suppressed: suppressed.length};
     }
 
     const result = await prisma.contact.updateMany({
@@ -1086,13 +1384,18 @@ export class ContactService {
       data: {subscribed: true, snoozedUntil: null},
     });
 
-    this.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
-      if (process.env.NODE_ENV !== 'test') {
-        console.error('[ContactService] Failed to track bulk subscribe events:', error);
-      }
-    });
+    // Plunk Lite: by queue, with progress and retries, rather than a loop nobody waits for that a
+    // restart cut short and that ran beside the next batch of the same bulk action
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.subscribed',
+        contactIds: unsubscribedIds,
+      }),
+      'bulk contact.subscribed events',
+    );
 
-    return {updated: result.count, unchanged};
+    return {updated: result.count, unchanged, suppressed: suppressed.length};
   }
 
   /**
@@ -1123,6 +1426,9 @@ export class ContactService {
     const snoozedIds = contacts.filter(c => !c.subscribed && c.snoozedUntil !== null).map(c => c.id);
     const idsToWrite = [...subscribedIds, ...snoozedIds];
 
+    // Plunk Lite: unsubscribing withdraws the sign-ups still to confirm, of every contact selected
+    await OptInService.cancel(contacts.map(c => c.id));
+
     if (idsToWrite.length === 0) {
       return {updated: 0, unchanged};
     }
@@ -1136,25 +1442,27 @@ export class ContactService {
       return {updated: 0, unchanged};
     }
 
-    this.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
-      if (process.env.NODE_ENV !== 'test') {
-        console.error('[ContactService] Failed to track bulk unsubscribe events:', error);
-      }
-    });
+    // Plunk Lite: by queue, as for bulkSubscribe
+    await QueueService.queueWithoutWaiting(
+      QueueService.queueContactSubscriptionEvents({
+        projectId,
+        eventName: 'contact.unsubscribed',
+        contactIds: subscribedIds,
+      }),
+      'bulk contact.unsubscribed events',
+    );
 
     return {updated: subscribedIds.length, unchanged};
   }
 
   /**
-   * Bulk delete contacts
+   * Bulk delete contacts. Their emails go first, still counted in the project's rates (DeletedEmailCounts).
    */
   public static async bulkDelete(projectId: string, contactIds: string[]): Promise<{deleted: number}> {
-    const result = await prisma.contact.deleteMany({
-      where: {
-        id: {in: contactIds},
-        projectId,
-      },
-    });
+    const result = await prisma.$transaction(async tx => {
+      await DeletedEmailCounts.deleteEmails(tx, projectId, contactIds);
+      return tx.contact.deleteMany({where: {id: {in: contactIds}, projectId}});
+    }, LONG_TRANSACTION);
 
     return {deleted: result.count};
   }
@@ -1202,30 +1510,5 @@ export class ContactService {
     }
 
     return false;
-  }
-
-  /**
-   * Track events sequentially to avoid database deadlocks
-   * Processes events one at a time with error handling
-   *
-   * @private
-   */
-  private static async trackEventsSequentially(
-    projectId: string,
-    eventName: string,
-    contactIds: string[],
-    data?: Record<string, unknown>,
-  ): Promise<void> {
-    for (const contactId of contactIds) {
-      try {
-        await EventService.trackEvent(projectId, eventName, contactId, undefined, data);
-      } catch (error) {
-        // Log error but continue processing remaining events
-        // Suppress logging in test environments to reduce noise from cleanup race conditions
-        if (process.env.NODE_ENV !== 'test') {
-          console.error(`[ContactService] Failed to track event ${eventName} for contact ${contactId}:`, error);
-        }
-      }
-    }
   }
 }

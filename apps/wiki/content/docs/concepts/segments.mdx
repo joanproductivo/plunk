@@ -14,7 +14,7 @@ Segments let you create named groups of contacts that can be targeted in campaig
 | `condition` field            | Required — describes the filters                           | Must be omitted                                         |
 | Add/remove members via API   | Not allowed (the filter decides)                           | `POST` / `DELETE` `/segments/:id/members`               |
 | Membership recomputation     | Re-evaluated in the background when tracked                | N/A — membership only changes when you call the API     |
-| Entry/exit events            | Fired only when **Track membership changes** is enabled    | Not fired by add/remove API calls                       |
+| Entry/exit events            | Fired only when **Track membership changes** is enabled    | Fired on add/remove when **Track membership changes** is enabled |
 | Updating the filter          | Member count is recomputed                                 | `condition` is silently ignored on update               |
 
 Use dynamic segments for behavioural targeting ("subscribed users on the Pro plan who opened any email in the last 14 days"). Use static segments for one-off curated lists like beta testers, conference attendees, or contacts imported from an external system.
@@ -43,25 +43,36 @@ Go to **Segments** in the dashboard and click **Create Segment**, then choose **
 
 ### Adding and removing members
 
-Open a static segment and use the **Add Members** search to find contacts. The search looks up contacts already in your project, so you can't accidentally add someone who doesn't exist. Contacts already in the segment are greyed out.
+Open a static segment and use the **Add Members** search to find contacts. The search looks up contacts already in your project, so you can't accidentally add someone who doesn't exist. Contacts already in the segment are greyed out. To remove several members at once, tick them in the member list and click **Remove selected**.
+
+A contact's own page lists its segments too: the static ones it is in, which you can leave with the × or join from the picker, and, in grey, the dynamic ones whose filter it matches right now.
+
+For larger changes, use the **Contacts** page: filter by **Segment** (alongside the search and status filters), select contacts — or all matching — and click **Add to segment** or **Remove from segment**. This runs as a bulk job (`POST /contacts/bulk-add-to-segment` / `bulk-remove-from-segment`, polled with `GET /contacts/bulk/:jobId`) that changes the members in batches of 100. When the segment tracks membership, each batch's entry/exit events go through the same background queue as the API calls below. If the job is interrupted, it carries on from the last batch it finished instead of starting over. The batch it was in the middle of runs again: an add queues those entries a second time, and a removal counts those contacts as not in the segment, since they already left.
 
 Programmatically, use:
 
-- `POST /segments/:id/members` — add contacts by email. Body: `{ emails: string[], createMissing?: boolean, subscribed?: boolean }`. With `createMissing: true`, contacts that don't exist yet are created (and start subscribed unless you pass `subscribed: false`). The response reports `{ added, created, notFound }`.
-- `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`.
+- `POST /segments/:id/members` — add contacts by email. Body: `{ emails: string[], createMissing?: boolean }`. With `createMissing: true`, contacts that don't exist yet are created, unsubscribed: in Plunk Lite, joining a segment never subscribes anyone. The response reports `{ added, created, notFound }`.
+- `DELETE /segments/:id/members` — remove contacts by email. Body: `{ emails: string[] }`. Returns `{ removed }`, the number of contacts that were in the segment and left it.
+- `segments` on `POST /v1/track` (with the secret key) and `POST /v1/send` — a list of up to 20 static segment ids the contact, or each recipient sent to, joins in the same call. With `/v1/track` the contact joins before the event is recorded, so the workflows the event starts see it in them. With the [double opt-in](/concepts/double-opt-in) on, a sign-up joins them when it confirms instead. These are entries like the ones above, with their events.
 
-Both endpoints **only** accept static segments. Calling them on a dynamic segment returns `400`.
+The two `/segments/:id/members` endpoints **only** accept static segments and up to 500 emails per request. Calling them on a dynamic segment returns `400`; the `segments` field answers `422` for an id that is not a static segment of the project.
 
-Membership changes via these API calls are immediate but **do not** fire `entry`/`exit` events — those are reserved for dynamic, tracked segments.
+Membership changes via these API calls are immediate. When the segment has **Track membership changes** enabled, they also fire the `entry` / `exit` events described below, a moment after the response: the events go through a background queue, one request at a time, and a restart resumes where it stopped. A request whose segment is deleted, or stops tracking, before its turn fires nothing. A request with many contacts and slow workflows (webhooks, for example) delays the requests queued after it.
+
+Adding a contact who is already a member counts as a new entry: the `entry` event fires again. That is what lets someone who signs up twice go through the same workflow twice — as long as that workflow has **Allow re-entry** turned on. If their first run is still waiting (on a delay or for an event), the second one runs alongside it.
+
+Adding contacts through the `segments` column of a [CSV import](/guides/importing-contacts) is not an entry: the static segment fires no events and its existing members are left as they are. A tracked dynamic segment whose filter matches those contacts — for example by membership of that static segment — still fires its own entry on its next recomputation.
 
 ## Tracking membership changes
 
-Dynamic segments can opt into **Track membership changes**. When enabled, Plunk fires events whenever a contact enters or leaves the segment:
+Segments can opt into **Track membership changes**. When enabled, Plunk fires events whenever a contact enters or leaves the segment — for dynamic segments when the background recomputation notices, for static segments when members are added or removed:
 
 - `segment.<slug>.entry` — contact joined
 - `segment.<slug>.exit` — contact left
 
-The `<slug>` is derived from the segment name: lowercased, accents and punctuation stripped, whitespace replaced with hyphens, repeated hyphens collapsed. `"VIP Customers"` becomes `segment.vip-customers.entry`. Pick segment names that produce stable slugs — renaming a segment changes the event name.
+The `<slug>` is derived from the segment name: lowercased, every character other than `a-z`, `0-9`, `_`, spaces and hyphens removed, whitespace replaced with hyphens, repeated hyphens collapsed. `"VIP Customers"` becomes `segment.vip-customers.entry`. Pick segment names that produce stable slugs — renaming a segment changes the event name. Accented letters are removed rather than replaced (`"Código"` becomes `cdigo`), so two names can end up with the same slug; the dashboard shows each tracked segment's event names and warns about clashes. The event data carries `segmentId` and `segmentName`, so a workflow condition can tell such segments apart.
+
+Workflows that add contacts to each other's segments can loop: when both have **Allow re-entry** turned on and each waits (a delay, or a wait for an event) before adding to the other's segment, they keep starting each other for as long as the contact exists — with a very short delay, continuously. Keep **Allow re-entry** off unless a workflow is meant to run more than once per contact.
 
 Use these events to drive workflows (welcome a contact when they enter a "Trial users" segment, send a re-engagement email when they exit "Active users", etc.). See [Webhooks](/guides/webhooks) for the payload format.
 
@@ -90,6 +101,8 @@ Segments can be used to:
 ## Deleting a segment
 
 Deleting a segment that's referenced by an active campaign (in `DRAFT`, `SCHEDULED`, or `SENDING` state) returns `409 Conflict`. Cancel the campaign or pick a different audience first.
+
+Deleting a segment that a workflow's `UPDATE_CONTACT` step adds to or removes from, or that a `CONDITION` step checks, also returns `409`, naming the workflows. Workflows triggered by, or waiting for, the segment's `segment.<slug>.entry` / `.exit` events are not checked: the slug follows the segment's name and is not unique, so review those yourself.
 
 ## API reference
 

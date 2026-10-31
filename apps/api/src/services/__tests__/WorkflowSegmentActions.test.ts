@@ -1,0 +1,548 @@
+import {CampaignStatus, WorkflowExecutionStatus, WorkflowStepType} from '@plunk/db';
+import {toPrismaJson} from '@plunk/types';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {EventService} from '../EventService';
+import {SegmentMembershipService} from '../SegmentMembershipService';
+import {SegmentService} from '../SegmentService';
+import {WorkflowService} from '../WorkflowService';
+
+/**
+ * Segments in workflows: an Update contact step that removes from and adds to static segments,
+ * a Condition on `segment.<id>`, and the guards against deleting segments (one or several at once)
+ * that a step, an active campaign or another segment uses.
+ */
+describe('Workflow segment actions', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+
+  beforeEach(async () => {
+    ({
+      project: {id: projectId},
+    } = await factories.createUserWithProject());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function staticSegment(name: string, trackMembership = true) {
+    return prisma.segment.create({data: {projectId, name, type: 'STATIC', trackMembership}});
+  }
+
+  async function join(segmentId: string, contactId: string) {
+    await prisma.segmentMembership.create({data: {segmentId, contactId}});
+    await prisma.segment.update({where: {id: segmentId}, data: {memberCount: {increment: 1}}});
+  }
+
+  type StepSpec = {key: string; type: WorkflowStepType; config: unknown};
+
+  /**
+   * An enabled workflow started by `eventName`: its trigger, then `steps`, wired by `edges`
+   * (`[from, to, branch?]`; 'trigger' is the trigger step).
+   */
+  async function workflow(
+    name: string,
+    eventName: string,
+    steps: StepSpec[],
+    edges: Array<[string, string, string?]>,
+    {allowReentry = false} = {},
+  ) {
+    const created = await factories.createWorkflow({
+      projectId,
+      name,
+      enabled: true,
+      allowReentry,
+      triggerConfig: {eventName},
+    });
+    const trigger = await prisma.workflowStep.findFirstOrThrow({
+      where: {workflowId: created.id, type: WorkflowStepType.TRIGGER},
+    });
+    await prisma.workflowStep.update({where: {id: trigger.id}, data: {config: toPrismaJson({eventName})}});
+
+    const ids = new Map<string, string>([['trigger', trigger.id]]);
+    for (const [i, step] of steps.entries()) {
+      const row = await prisma.workflowStep.create({
+        data: {
+          workflowId: created.id,
+          type: step.type,
+          name: step.key,
+          position: {x: (i + 1) * 100, y: 0},
+          config: toPrismaJson(step.config),
+        },
+      });
+      ids.set(step.key, row.id);
+    }
+    for (const [from, to, branch] of edges) {
+      await prisma.workflowTransition.create({
+        data: {
+          fromStepId: ids.get(from)!,
+          toStepId: ids.get(to)!,
+          ...(branch ? {condition: toPrismaJson({branch})} : {}),
+        },
+      });
+    }
+    return {workflow: created, stepId: (key: string) => ids.get(key)!};
+  }
+
+  /** The step's output for each contact that ran it */
+  async function outputsOf(stepId: string) {
+    const executions = await prisma.workflowStepExecution.findMany({
+      where: {stepId},
+      select: {output: true, execution: {select: {contactId: true}}},
+    });
+    return new Map(executions.map(e => [e.execution.contactId, e.output as Record<string, unknown>]));
+  }
+
+  async function events(contactId: string, name: string) {
+    return prisma.event.findMany({where: {projectId, contactId, name}});
+  }
+
+  describe('Update contact step', () => {
+    it('moves a contact from one segment to another, and the workflow it starts sees the new data', async () => {
+      const contact = await factories.createContact({projectId});
+      const a = await staticSegment('A');
+      const b = await staticSegment('B');
+      await join(a.id, contact.id);
+
+      const mover = await workflow(
+        'Mover',
+        'test.start',
+        [
+          {
+            key: 'move',
+            type: WorkflowStepType.UPDATE_CONTACT,
+            config: {updates: {stage: 'moved'}, segments: {remove: [a.id], add: [b.id]}},
+          },
+        ],
+        [['trigger', 'move']],
+      );
+      const follower = await workflow(
+        'Follower',
+        'segment.b.entry',
+        [
+          {
+            key: 'check',
+            type: WorkflowStepType.CONDITION,
+            config: {field: 'data.stage', operator: 'equals', value: 'moved'},
+          },
+          {key: 'saw', type: WorkflowStepType.EXIT, config: {reason: 'saw'}},
+          {key: 'missed', type: WorkflowStepType.EXIT, config: {reason: 'missed'}},
+        ],
+        [
+          ['trigger', 'check'],
+          ['check', 'saw', 'yes'],
+          ['check', 'missed', 'no'],
+        ],
+      );
+
+      await EventService.trackEvent(projectId, 'test.start', contact.id);
+
+      const memberships = await prisma.segmentMembership.findMany({where: {contactId: contact.id}});
+      expect(memberships.find(m => m.segmentId === a.id)?.exitedAt).not.toBeNull();
+      expect(memberships.find(m => m.segmentId === b.id)?.exitedAt).toBeNull();
+      // Exit before entry (timestamps can tie at millisecond precision, hence <=)
+      const [exit] = await events(contact.id, 'segment.a.exit');
+      const [entry] = await events(contact.id, 'segment.b.entry');
+      expect(exit!.createdAt.getTime()).toBeLessThanOrEqual(entry!.createdAt.getTime());
+      expect((await outputsOf(mover.stepId('move'))).get(contact.id)).toMatchObject({
+        segmentsRemoved: [a.id],
+        segmentsAdded: [b.id],
+        skippedSegments: [],
+      });
+      expect((await outputsOf(follower.stepId('check'))).get(contact.id)).toMatchObject({branch: 'yes'});
+    });
+
+    it('re-adds a current member as a new entry, starting the workflow again when it allows re-entry', async () => {
+      const contact = await factories.createContact({projectId});
+      const b = await staticSegment('B');
+      await join(b.id, contact.id);
+      await workflow(
+        'Adder',
+        'test.start',
+        [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [b.id]}}}],
+        [['trigger', 'add']],
+      );
+      const follower = await workflow(
+        'Follower',
+        'segment.b.entry',
+        [{key: 'done', type: WorkflowStepType.EXIT, config: {}}],
+        [['trigger', 'done']],
+        {allowReentry: true},
+      );
+      await factories.createWorkflowExecution(follower.workflow.id, contact.id, {
+        status: WorkflowExecutionStatus.COMPLETED,
+      });
+
+      await EventService.trackEvent(projectId, 'test.start', contact.id);
+
+      expect(await prisma.workflowExecution.count({where: {workflowId: follower.workflow.id}})).toBe(2);
+      expect(await events(contact.id, 'segment.b.entry')).toHaveLength(1);
+    });
+
+    it("skips deleted, dynamic and other projects' segments, and adds a repeated one once", async () => {
+      const contact = await factories.createContact({projectId});
+      const kept = await staticSegment('Kept');
+      const dynamic = await factories.createSegment(projectId, {
+        name: 'Dynamic',
+        filters: [{field: 'subscribed', operator: 'equals', value: true}],
+      });
+      const {project: other} = await factories.createUserWithProject();
+      const foreign = await prisma.segment.create({data: {projectId: other.id, name: 'Theirs', type: 'STATIC'}});
+      const deletedId = '00000000-0000-4000-8000-000000000001';
+      const flow = await workflow(
+        'Adder',
+        'test.start',
+        [
+          {
+            key: 'add',
+            type: WorkflowStepType.UPDATE_CONTACT,
+            config: {segments: {remove: [foreign.id], add: [deletedId, dynamic.id, kept.id, kept.id]}},
+          },
+        ],
+        [['trigger', 'add']],
+      );
+
+      await EventService.trackEvent(projectId, 'test.start', contact.id);
+
+      expect((await outputsOf(flow.stepId('add'))).get(contact.id)).toMatchObject({
+        updated: true,
+        segmentsAdded: [kept.id],
+        segmentsRemoved: [],
+        skippedSegments: [foreign.id, deletedId, dynamic.id],
+      });
+      expect(await events(contact.id, 'segment.kept.entry')).toHaveLength(1);
+      const execution = await prisma.workflowExecution.findFirstOrThrow({where: {workflowId: flow.workflow.id}});
+      expect(execution.status).toBe(WorkflowExecutionStatus.COMPLETED);
+    });
+
+    it('fails the step on a database error instead of skipping the segment', async () => {
+      const contact = await factories.createContact({projectId});
+      const b = await staticSegment('B');
+      const flow = await workflow(
+        'Adder',
+        'test.start',
+        [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [b.id]}}}],
+        [['trigger', 'add']],
+      );
+      vi.spyOn(SegmentMembershipService, 'addMembers').mockRejectedValueOnce(new Error('connection lost'));
+
+      await EventService.trackEvent(projectId, 'test.start', contact.id);
+
+      const execution = await prisma.workflowExecution.findFirstOrThrow({where: {workflowId: flow.workflow.id}});
+      expect(execution.status).toBe(WorkflowExecutionStatus.FAILED);
+    });
+  });
+
+  describe('Condition on segment membership', () => {
+    it('takes the yes branch for a member and the no branch for anyone else', async () => {
+      const member = await factories.createContact({projectId});
+      const outsider = await factories.createContact({projectId});
+      const vip = await staticSegment('VIP', false);
+      await join(vip.id, member.id);
+      const flow = await workflow(
+        'Router',
+        'test.start',
+        [
+          {
+            key: 'check',
+            type: WorkflowStepType.CONDITION,
+            config: {field: `segment.${vip.id}`, operator: 'equals', value: true},
+          },
+        ],
+        [['trigger', 'check']],
+      );
+
+      await EventService.trackEvent(projectId, 'test.start', member.id);
+      await EventService.trackEvent(projectId, 'test.start', outsider.id);
+
+      const outputs = await outputsOf(flow.stepId('check'));
+      expect(outputs.get(member.id)).toMatchObject({actualValue: true, branch: 'yes'});
+      expect(outputs.get(outsider.id)).toMatchObject({actualValue: false, branch: 'no'});
+    });
+  });
+
+  describe('SegmentService.isMember', () => {
+    it('reads static membership, and evaluates dynamic filters live', async () => {
+      const contact = await factories.createContact({projectId, data: {plan: 'pro'}});
+      const current = await staticSegment('Current', false);
+      const left = await staticSegment('Left', false);
+      await join(current.id, contact.id);
+      await prisma.segmentMembership.create({data: {segmentId: left.id, contactId: contact.id, exitedAt: new Date()}});
+      const pro = await factories.createSegment(projectId, {
+        name: 'Pro',
+        filters: [{field: 'data.plan', operator: 'equals', value: 'pro'}],
+      });
+      const free = await factories.createSegment(projectId, {
+        name: 'Free',
+        filters: [{field: 'data.plan', operator: 'equals', value: 'free'}],
+      });
+
+      expect(await SegmentService.isMember(projectId, current.id, contact.id)).toBe(true);
+      expect(await SegmentService.isMember(projectId, left.id, contact.id)).toBe(false);
+      expect(await SegmentService.isMember(projectId, pro.id, contact.id)).toBe(true);
+      expect(await SegmentService.isMember(projectId, free.id, contact.id)).toBe(false);
+    });
+
+    it("is false for a missing segment, another project's segment, or a filter that cannot be built", async () => {
+      const contact = await factories.createContact({projectId});
+      const {project: other} = await factories.createUserWithProject();
+      const theirs = await prisma.segment.create({data: {projectId: other.id, name: 'Theirs', type: 'STATIC'}});
+      await prisma.segmentMembership.create({data: {segmentId: theirs.id, contactId: contact.id}});
+      const broken = await factories.createSegment(projectId, {
+        name: 'Nested broken',
+        filters: [{field: 'segment.00000000-0000-4000-8000-000000000002', operator: 'memberOfSegment'}],
+      });
+
+      expect(await SegmentService.isMember(projectId, '00000000-0000-4000-8000-000000000003', contact.id)).toBe(false);
+      expect(await SegmentService.isMember(projectId, theirs.id, contact.id)).toBe(false);
+      expect(await SegmentService.isMember(projectId, broken.id, contact.id)).toBe(false);
+    });
+  });
+
+  describe('deleting a segment', () => {
+    it('is refused while an Update contact or Condition step uses it, naming the workflows', async () => {
+      const added = await staticSegment('Added', false);
+      const checked = await staticSegment('Checked', false);
+      const unused = await staticSegment('Unused', false);
+      await workflow(
+        'Onboarding',
+        'test.start',
+        [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [added.id]}}}],
+        [['trigger', 'add']],
+      );
+      await workflow(
+        'Router',
+        'test.start',
+        [
+          {
+            key: 'check',
+            type: WorkflowStepType.CONDITION,
+            config: {field: `segment.${checked.id}`, operator: 'exists'},
+          },
+        ],
+        [['trigger', 'check']],
+      );
+
+      await expect(SegmentService.delete(projectId, added.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('"Onboarding"'),
+      });
+      await expect(SegmentService.delete(projectId, checked.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('"Router"'),
+      });
+      await SegmentService.delete(projectId, unused.id);
+      expect(await prisma.segment.findUnique({where: {id: unused.id}})).toBeNull();
+    });
+
+    /** A condition that uses `segment.<id>` one group deep, under a plain email filter. */
+    const nestedOn = (segmentId: string) => ({
+      logic: 'OR',
+      groups: [
+        {
+          filters: [{field: 'email', operator: 'contains', value: '@'}],
+          conditions: {
+            logic: 'AND',
+            groups: [{filters: [{field: `segment.${segmentId}`, operator: 'notMemberOfSegment'}]}],
+          },
+        },
+      ],
+    });
+
+    async function dynamicSegment(name: string, usedId: string) {
+      return prisma.segment.create({
+        data: {projectId, name, type: 'DYNAMIC', condition: toPrismaJson(nestedOn(usedId))},
+      });
+    }
+
+    async function filteredCampaign(name: string, usedId: string, status: CampaignStatus) {
+      const campaign = await factories.createCampaign({projectId, name, status});
+      await prisma.campaign.update({
+        where: {id: campaign.id},
+        data: {audienceType: 'FILTERED', audienceCondition: toPrismaJson(nestedOn(usedId))},
+      });
+    }
+
+    it('is refused while another segment or an active filtered campaign uses it, naming them', async () => {
+      const filtered = await staticSegment('Filtered', false);
+      const targeted = await staticSegment('Targeted', false);
+      const done = await staticSegment('Done', false);
+      await dynamicSegment('Lapsed', filtered.id);
+      await filteredCampaign('Winback', targeted.id, CampaignStatus.SCHEDULED);
+      await filteredCampaign('Old news', done.id, CampaignStatus.SENT);
+
+      await expect(SegmentService.delete(projectId, filtered.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('the condition of the segment(s) "Lapsed"'),
+      });
+      await expect(SegmentService.delete(projectId, targeted.id)).rejects.toMatchObject({
+        code: 409,
+        message: expect.stringContaining('the active campaign(s) "Winback"'),
+      });
+      await SegmentService.delete(projectId, done.id);
+      expect(await prisma.segment.findUnique({where: {id: done.id}})).toBeNull();
+    });
+
+    describe('several at once', () => {
+      const remaining = async (ids: string[]) =>
+        (await prisma.segment.findMany({where: {id: {in: ids}}, select: {name: true}})).map(s => s.name).sort();
+
+      it('deletes every segment and its memberships', async () => {
+        const first = await staticSegment('First', false);
+        const second = await staticSegment('Second', false);
+        const contact = await factories.createContact({projectId});
+        await join(first.id, contact.id);
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: [first.id, second.id, first.id], delete: true}),
+        ).resolves.toEqual({deleted: 2});
+
+        expect(await remaining([first.id, second.id])).toEqual([]);
+        expect(await prisma.segmentMembership.count({where: {segmentId: first.id}})).toBe(0);
+      });
+
+      it('deletes none when any is in use, naming each segment and what uses it', async () => {
+        const added = await staticSegment('Added', false);
+        const removed = await staticSegment('Removed', false);
+        const checked = await staticSegment('Checked', false);
+        const sent = await staticSegment('Sent', false);
+        const unused = await staticSegment('Unused', false);
+        await workflow(
+          'Onboarding',
+          'test.start',
+          [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [added.id]}}}],
+          [['trigger', 'add']],
+        );
+        await workflow(
+          'Cleanup',
+          'test.start',
+          [{key: 'remove', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {remove: [removed.id]}}}],
+          [['trigger', 'remove']],
+        );
+        await workflow(
+          'Router',
+          'test.start',
+          [
+            {
+              key: 'check',
+              type: WorkflowStepType.CONDITION,
+              config: {field: `segment.${checked.id}`, operator: 'exists'},
+            },
+          ],
+          [['trigger', 'check']],
+        );
+        await factories.createCampaign({projectId, segmentId: sent.id, status: CampaignStatus.DRAFT});
+        await factories.createCampaign({projectId, segmentId: sent.id, status: CampaignStatus.SENT});
+        const ids = [added.id, removed.id, checked.id, sent.id, unused.id];
+
+        const refusal = SegmentService.bulkUpdate(projectId, {ids, delete: true});
+
+        await expect(refusal).rejects.toMatchObject({code: 409});
+        const {message} = (await refusal.catch((error: unknown) => error)) as Error;
+        expect(message).toContain('Nothing was deleted');
+        expect(message).toContain('"Added" is used by the workflow(s) "Onboarding"');
+        expect(message).toContain('"Removed" is used by the workflow(s) "Cleanup"');
+        expect(message).toContain('"Checked" is used by the workflow(s) "Router"');
+        expect(message).toContain('"Sent" is used by 1 active campaign(s)');
+        expect(message).not.toContain('Unused');
+        expect(await remaining(ids)).toEqual(['Added', 'Checked', 'Removed', 'Sent', 'Unused']);
+      });
+
+      it('deletes none when a segment outside them or an active filtered campaign uses one, naming them', async () => {
+        const filtered = await staticSegment('Filtered', false);
+        const targeted = await staticSegment('Targeted', false);
+        await dynamicSegment('Lapsed', filtered.id);
+        await dynamicSegment('Churned', filtered.id);
+        await filteredCampaign('Winback', targeted.id, CampaignStatus.DRAFT);
+        await factories.createCampaign({projectId, segmentId: targeted.id, status: CampaignStatus.SENDING});
+        const ids = [filtered.id, targeted.id];
+
+        const refusal = SegmentService.bulkUpdate(projectId, {ids, delete: true});
+
+        await expect(refusal).rejects.toMatchObject({code: 409});
+        const {message} = (await refusal.catch((error: unknown) => error)) as Error;
+        expect(message).toContain('"Filtered" is used by the condition of the segment(s) "Churned", "Lapsed"');
+        expect(message).toContain(
+          '"Targeted" is used by 1 active campaign(s) and the audience filter of the active campaign(s) "Winback"',
+        );
+        expect(await remaining(ids)).toEqual(['Filtered', 'Targeted']);
+      });
+
+      it('deletes a segment together with the segments that use it', async () => {
+        const base = await staticSegment('Base', false);
+        const middle = await dynamicSegment('Middle', base.id);
+        const top = await dynamicSegment('Top', middle.id);
+        const ids = [base.id, middle.id, top.id];
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids, delete: true})).resolves.toEqual({deleted: 3});
+        expect(await remaining(ids)).toEqual([]);
+      });
+
+      it('names five blocked segments and counts the rest', async () => {
+        const segments = await Promise.all(Array.from({length: 7}, (_, n) => staticSegment(`Blocked ${n}`, false)));
+        for (const segment of segments) {
+          await factories.createCampaign({projectId, segmentId: segment.id, status: CampaignStatus.DRAFT});
+        }
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: segments.map(s => s.id), delete: true}),
+        ).rejects.toMatchObject({code: 409, message: expect.stringContaining('; and 2 more.')});
+      });
+
+      it('names three of the workflows that use a segment and counts the rest', async () => {
+        const busy = await staticSegment('Busy', false);
+        for (const name of ['W1', 'W2', 'W3', 'W4']) {
+          await workflow(
+            name,
+            'test.start',
+            [{key: 'add', type: WorkflowStepType.UPDATE_CONTACT, config: {segments: {add: [busy.id]}}}],
+            [['trigger', 'add']],
+          );
+        }
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids: [busy.id], delete: true})).rejects.toMatchObject({
+          code: 409,
+          message: expect.stringContaining('the workflow(s) "W1", "W2", "W3" and 1 more'),
+        });
+      });
+
+      it('deletes none when one is not in the project', async () => {
+        const mine = await staticSegment('Mine', false);
+        const {
+          project: {id: otherProjectId},
+        } = await factories.createUserWithProject();
+        const theirs = await prisma.segment.create({data: {projectId: otherProjectId, name: 'Theirs', type: 'STATIC'}});
+
+        await expect(
+          SegmentService.bulkUpdate(projectId, {ids: [mine.id, theirs.id], delete: true}),
+        ).rejects.toMatchObject({code: 404});
+        expect(await remaining([mine.id, theirs.id])).toEqual(['Mine', 'Theirs']);
+      });
+
+      it('does nothing without delete', async () => {
+        const kept = await staticSegment('Kept', false);
+
+        await expect(SegmentService.bulkUpdate(projectId, {ids: [kept.id]})).resolves.toEqual({updated: 0});
+        expect(await remaining([kept.id])).toEqual(['Kept']);
+      });
+    });
+  });
+
+  describe('workflow fields', () => {
+    it('lists segments after the other fields, by name, with their name as label', async () => {
+      await factories.createContact({projectId, data: {plan: 'pro'}});
+      const zeta = await staticSegment('Zeta', false);
+      const alpha = await staticSegment('Alpha', false);
+
+      const {typedFields} = await WorkflowService.getAvailableFields(projectId);
+
+      const others = typedFields.filter(f => f.category !== 'Segments').map(f => f.field);
+      expect(others).toEqual([...others].sort((a, b) => a.localeCompare(b)));
+      expect(typedFields.slice(-2)).toEqual([
+        {field: `segment.${alpha.id}`, type: 'boolean', category: 'Segments', label: 'Alpha'},
+        {field: `segment.${zeta.id}`, type: 'boolean', category: 'Segments', label: 'Zeta'},
+      ]);
+    });
+  });
+});

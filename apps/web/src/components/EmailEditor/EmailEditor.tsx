@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {EditorContent, useEditor} from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import {TextAlign} from '@tiptap/extension-text-align';
 import {Color} from '@tiptap/extension-color';
 import {TextStyle} from '@tiptap/extension-text-style';
 import {Link} from '@tiptap/extension-link';
@@ -12,14 +11,40 @@ import {LogicMention} from './LogicMention';
 import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
+import {type ButtonAttrs, EmailButton} from './EmailButton';
+import {ButtonDialog} from './ButtonDialog';
+import {BoxDialog, useBoxDialog} from './BoxDialog';
+import {EmailBox, EmailDocument} from './EmailBox';
+import {ImageDialog} from './ImageDialog';
+import {type DividerAttrs, EmailDivider} from './EmailDivider';
+import {DividerDialog} from './DividerDialog';
+import {EmailSpacer, type SpacerAttrs} from './EmailSpacer';
+import {EmailVideo, type VideoAttrs} from './EmailVideo';
+import {SlashCommand} from './SlashCommand';
+import {SpacerDialog} from './SpacerDialog';
+import {VideoDialog} from './VideoDialog';
+import {useBlockDialog} from './useBlockDialog';
+import {EmailTextAlign} from './EmailTextAlign';
 import {HtmlEditor} from './HtmlEditor';
+import {PreheaderField} from './PreheaderField';
+import {brandOnChange, canvasStyle, editorAttributes, useEmailBrand} from './useEmailBrand';
+import {useActiveProject} from '../../lib/contexts/ActiveProjectProvider';
 import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks/useContacts';
 import {useConfig} from '../../lib/hooks/useConfig';
 import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
-import {renderTemplate} from '@plunk/shared';
+import {
+  BUTTON_DEFAULTS,
+  detectCustomHtmlPatterns,
+  isFramedBrand,
+  joinEmailMarkers,
+  preheaderToText,
+  renderTemplate,
+  splitEmailMarkers,
+} from '@plunk/shared';
 import {
   Button,
+  cn,
   ConfirmDialog,
   Dialog,
   DialogContent,
@@ -33,9 +58,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@plunk/ui';
-import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet, Upload, X} from 'lucide-react';
-import {network} from '../../lib/network';
-import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
+import {AlertTriangle, Code2, Eye, Monitor, PenLine, Smartphone, Tablet} from 'lucide-react';
+import {wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
 
 interface EmailEditorProps {
@@ -49,6 +73,8 @@ interface EmailEditorProps {
   // When set, the "Preview as" dropdown is scoped to this segment's members
   // instead of all contacts in the project (used for SEGMENT-audience campaigns)
   segmentId?: string;
+  // On wide screens, fill the parent's height instead of stopping at 600px
+  fillHeight?: boolean;
 }
 
 const commonVariables = [
@@ -59,23 +85,50 @@ const commonVariables = [
   {name: 'manageUrl', description: 'Manage link'},
 ];
 
-export function EmailEditor({value, onChange, placeholder, subject, from, replyTo, segmentId}: EmailEditorProps) {
+export function EmailEditor({
+  value,
+  onChange,
+  placeholder,
+  subject,
+  from,
+  replyTo,
+  segmentId,
+  fillHeight,
+}: EmailEditorProps) {
+  // The preview text and the brand travel with the body; the editors below only ever see the body
+  const {preheader, brand, body} = splitEmailMarkers(value);
+  const {activeProject} = useActiveProject();
+  const emailBrand = useEmailBrand(activeProject?.id, brand, body);
+  const markersRef = useRef({preheader, brand, body, project: emailBrand.project});
+  markersRef.current = {preheader, brand, body, project: emailBrand.project};
+  // A change keeps the email's brand, or gives an email that was empty the project's
+  const withMarkers = (html: string, nextPreheader?: string) => {
+    const current = markersRef.current;
+    return joinEmailMarkers({
+      preheader: nextPreheader ?? current.preheader,
+      brand: brandOnChange(current.brand, current.body, current.project),
+      body: html,
+    });
+  };
+  const emitChange = (html: string) => onChange(withMarkers(html));
+  const canvas = canvasStyle(emailBrand.look);
+
   // Detect if initial value has custom HTML and start in appropriate mode
-  const initialMode = detectCustomHtmlPatterns(value) ? 'html' : 'visual';
+  const initialMode = detectCustomHtmlPatterns(body) ? 'html' : 'visual';
 
   const [mode, setMode] = useState<'visual' | 'html'>(initialMode);
-  const [htmlContent, setHtmlContent] = useState(value);
+  // The preview takes the editor's place; the editor stays mounted underneath, so it keeps its history
+  const [view, setView] = useState<'edit' | 'preview'>('edit');
+  const [htmlContent, setHtmlContent] = useState(body);
   const [showVariableDialog, setShowVariableDialog] = useState(false);
   const [showImageDialog, setShowImageDialog] = useState(false);
   const [showModeWarningDialog, setShowModeWarningDialog] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
-  const [imageUrl, setImageUrl] = useState('');
-  const [imageFile, setImageFile] = useState<File | null>(null);
   const [customVariable, setCustomVariable] = useState('');
   const [defaultValue, setDefaultValue] = useState('');
+  // '' previews the first contact, 'none' previews with no contact (the template's default values)
   const [selectedContactId, setSelectedContactId] = useState<string>('');
   const [previewUpdateTrigger, setPreviewUpdateTrigger] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch available contact fields using SWR
   const {fields: availableFields, fieldDetails} = useContactFields();
@@ -107,30 +160,29 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     }
   }, [fieldDetails]);
 
-  // Clear the preview selection when the chosen contact is no longer in the
-  // available list (e.g. the segment changed). Otherwise the preview stays
-  // stuck rendering a contact that's no longer selectable in the dropdown.
-  useEffect(() => {
-    if (selectedContactId && !contacts.some(c => c.id === selectedContactId)) {
-      setSelectedContactId('');
-    }
-  }, [contacts, selectedContactId]);
+  // A chosen contact that is no longer in the list (e.g. the segment changed) falls back
+  // to the first one, so the preview never renders a contact the dropdown can't show.
+  const previewContact =
+    selectedContactId === 'none' ? undefined : (contacts.find(c => c.id === selectedContactId) ?? contacts[0]);
 
   const {data: config} = useConfig();
-  const canUploadImages = Boolean(config?.features.storage.s3Enabled);
+  const canUpload = Boolean(config?.features.storage.s3Enabled);
+  // Read by the slash menu as it updates, so it follows the config once loaded
+  const canUploadRef = useRef(canUpload);
+  canUploadRef.current = canUpload;
 
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
       StarterKit.configure({
+        // Boxes go at the top of the document, beside blocks (see EmailBox)
+        document: false,
         heading: {
           levels: [1, 2, 3],
         },
       }),
-      TextAlign.configure({
-        types: ['heading', 'paragraph'],
-        alignments: ['left', 'center', 'right', 'justify'],
-      }),
+      EmailDocument,
+      EmailTextAlign,
       Color,
       TextStyle,
       Link.configure({
@@ -140,42 +192,72 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         },
       }),
       ResizableImage,
+      EmailButton,
+      EmailDivider,
+      EmailSpacer,
+      EmailVideo,
+      EmailBox,
       Variable,
       VariableMention,
       LogicMention,
+      SlashCommand.configure({canInsertImages: () => canUploadRef.current}),
       Placeholder.configure({
-        placeholder: placeholder || 'Your next email starts here',
+        // On the empty line the cursor is in, where the slash menu would open
+        placeholder: ({editor, node}) =>
+          node.type.name !== 'paragraph'
+            ? ''
+            : editor.isEmpty
+              ? `${placeholder || 'Your next email starts here'}. Type / for blocks`
+              : 'Type / for blocks',
       }),
     ],
     // Only initialize with content if starting in visual mode
     // If starting in HTML mode (due to custom HTML), keep editor empty
-    content: initialMode === 'visual' ? value || '' : '',
+    content: initialMode === 'visual' ? body || '' : '',
     editorProps: {
-      attributes: {
-        class: 'prose prose-sm max-w-none focus:outline-none min-h-[400px] px-4 py-3 text-neutral-900',
-      },
+      // In the email's brand; useEditor applies these again whenever they change
+      attributes: editorAttributes(emailBrand.look),
     },
     onUpdate: ({editor}) => {
       const html = editor.getHTML();
-      onChange(html);
+      emitChange(html);
       setHtmlContent(html);
       // Trigger preview update
       setPreviewUpdateTrigger(prev => prev + 1);
     },
   });
 
+  const button = useBlockDialog<ButtonAttrs>(editor, 'button');
+
+  const divider = useBlockDialog<DividerAttrs>(editor, 'horizontalRule', true);
+  const spacer = useBlockDialog<SpacerAttrs>(editor, 'spacer', true);
+  const video = useBlockDialog<VideoAttrs>(editor, 'video');
+  const box = useBoxDialog(editor, emailBrand.look);
+
+  // The slash menu's image row opens the same dialog as the toolbar
+  useEffect(() => {
+    if (!editor) return;
+    const add = ({type}: {type: string}) => {
+      if (type === 'image') setShowImageDialog(true);
+    };
+    editor.on('newBlock', add);
+    return () => {
+      editor.off('newBlock', add);
+    };
+  }, [editor]);
+
   // Update editor content when value prop changes from outside
   useEffect(() => {
-    if (editor && value !== editor.getHTML() && value !== htmlContent) {
+    if (editor && body !== editor.getHTML() && body !== htmlContent) {
       // Only update editor if in visual mode or if value is simple HTML
-      const isCustomHtml = detectCustomHtmlPatterns(value);
+      const isCustomHtml = detectCustomHtmlPatterns(body);
 
       if (!isCustomHtml && mode === 'visual') {
-        editor.commands.setContent(value || '');
+        editor.commands.setContent(body || '');
       }
 
       // Always update htmlContent to stay in sync
-      setHtmlContent(value);
+      setHtmlContent(body);
 
       // If custom HTML is detected and we're in visual mode, switch to HTML mode
       if (isCustomHtml && mode === 'visual') {
@@ -210,7 +292,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     // Only switch if we have an editor and html content
     if (editor) {
       editor.commands.setContent(htmlContent || '');
-      onChange(htmlContent);
+      emitChange(htmlContent);
       setMode('visual');
     }
     setShowModeWarningDialog(false);
@@ -218,7 +300,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
 
   const handleHtmlChange = (newHtml: string) => {
     setHtmlContent(newHtml);
-    onChange(newHtml);
+    emitChange(newHtml);
   };
 
   const insertVariable = (varName: string, withDefault?: boolean) => {
@@ -232,75 +314,25 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     }
   };
 
-  const handleImageUpload = async () => {
-    if (!imageFile && !imageUrl) return;
-
-    if (imageUrl) {
-      // Insert external URL
-      (editor?.chain().focus() as any).setImage({src: imageUrl}).run();
-      setImageUrl('');
-      setShowImageDialog(false);
-    } else if (imageFile) {
-      try {
-        // Upload to S3/Minio
-        const formData = new FormData();
-        formData.append('image', imageFile);
-
-        const response = await network.upload<{url: string; key: string}>('POST', '/uploads/image', formData);
-
-        // Insert the uploaded image URL
-        (editor?.chain().focus() as any).setImage({src: response.url}).run();
-        setImageFile(null);
-        setShowImageDialog(false);
-      } catch (error) {
-        console.error('Failed to upload image:', error);
-        alert('Couldn’t upload the image. Try again.');
-      }
-    }
-  };
-
-  const replaceVariables = (text: string, contactData: Record<string, unknown>) => {
-    return renderTemplate(text, contactData);
-  };
-
-  const getPreviewHtml = () => {
-    const currentHtml = mode === 'visual' ? editor?.getHTML() || '' : htmlContent;
-    if (!selectedContactId) return currentHtml;
-
-    const contact = contacts.find(c => c.id === selectedContactId);
-    if (!contact) return currentHtml;
-
-    const contactData = {
-      email: contact.email,
-      unsubscribed: (contact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
-      unsubscribeUrl: `${window.location.origin}/unsubscribe/${contact.id}`,
-      subscribeUrl: `${window.location.origin}/subscribe/${contact.id}`,
-      manageUrl: `${window.location.origin}/manage/${contact.id}`,
-      data: contact.data || {},
-      ...((contact.data as Record<string, unknown> | null) || {}),
+  // The variables the preview renders with: the chosen contact's, or none, which leaves
+  // the template's default values (`{{name ?? friend}}`)
+  const previewVariables = (): Record<string, unknown> => {
+    if (!previewContact) return {};
+    return {
+      email: previewContact.email,
+      unsubscribed: (previewContact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
+      unsubscribeUrl: `${window.location.origin}/unsubscribe/${previewContact.id}`,
+      subscribeUrl: `${window.location.origin}/subscribe/${previewContact.id}`,
+      manageUrl: `${window.location.origin}/manage/${previewContact.id}`,
+      data: previewContact.data || {},
+      ...((previewContact.data as Record<string, unknown> | null) || {}),
     };
-
-    return replaceVariables(currentHtml, contactData);
   };
 
-  const getPreviewSubject = () => {
-    if (!subject || !selectedContactId) return subject || '';
+  // Never throws: a template that doesn't parse yet falls back to plain {{variable}} substitution
+  const renderPreview = (text: string) => renderTemplate(text, previewVariables());
 
-    const contact = contacts.find(c => c.id === selectedContactId);
-    if (!contact) return subject;
-
-    const contactData = {
-      email: contact.email,
-      unsubscribed: (contact as {subscribed?: boolean}).subscribed ? 'No' : 'Yes',
-      unsubscribeUrl: `${window.location.origin}/unsubscribe/${contact.id}`,
-      subscribeUrl: `${window.location.origin}/subscribe/${contact.id}`,
-      manageUrl: `${window.location.origin}/manage/${contact.id}`,
-      data: contact.data || {},
-      ...((contact.data as Record<string, unknown> | null) || {}),
-    };
-
-    return replaceVariables(subject, contactData);
-  };
+  const getPreviewHtml = () => renderPreview(mode === 'visual' ? editor?.getHTML() || '' : htmlContent);
 
   const getPreviewContainerWidth = () => {
     // Return the actual width the iframe should have (for media queries)
@@ -311,35 +343,48 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         return '768px';
       case 'desktop':
       default:
-        return '1200px'; // Standard desktop email width
+        return '100%';
     }
   };
 
   // Ref for the preview iframe
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
+  const previewLook = JSON.stringify(emailBrand.look);
 
   // Update iframe content when preview changes
   useEffect(() => {
-    if (previewIframeRef.current && selectedContactId) {
+    if (previewIframeRef.current && view === 'preview') {
       const iframe = previewIframeRef.current;
-      const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+      // null rather than a SecurityError if the frame was ever navigated to another origin
+      const iframeDoc = iframe.contentDocument;
 
       if (iframeDoc) {
         const previewContent = getPreviewHtml();
-        const fullHtml = wrapEmailWithStyles(previewContent);
+        const fullHtml = wrapEmailWithStyles(previewContent, emailBrand.look);
 
         iframeDoc.open();
         iframeDoc.write(fullHtml);
         iframeDoc.close();
+
+        // The frame opens nothing itself: the dashboard opens its web and mail links in a new tab
+        // with no way back to this page. Followed in the frame, a link would take it to another origin,
+        // and the preview could no longer write to it
+        const openLink = (event: MouseEvent) => {
+          const link = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+          if (!link) return;
+          event.preventDefault();
+          if (/^(https?|mailto):/i.test(link.href)) window.open(link.href, '_blank', 'noopener,noreferrer');
+        };
+        iframeDoc.addEventListener('click', openLink);
 
         // Auto-adjust iframe height to content. Reset to a small value first so
         // body content that uses % / vh heights doesn't lock the iframe to its
         // previous size (which would otherwise cause the iframe to grow by the
         // padding offset on every preview-device switch).
         const adjustHeight = () => {
-          if (!iframe.contentWindow) return;
+          const doc = iframe.contentDocument;
+          if (!doc) return;
           iframe.style.height = '0px';
-          const doc = iframe.contentWindow.document;
           const height = Math.max(
             doc.body?.scrollHeight ?? 0,
             doc.documentElement?.scrollHeight ?? 0,
@@ -356,60 +401,73 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         return () => {
           timeouts.forEach(window.clearTimeout);
           iframe.contentWindow?.removeEventListener('load', adjustHeight);
+          iframeDoc.removeEventListener('click', openLink);
         };
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, htmlContent, mode, previewDevice, previewUpdateTrigger]);
+  }, [view, previewContact?.id, htmlContent, mode, previewDevice, previewUpdateTrigger, previewLook]);
+
+  // Visual and HTML pick how you edit; Preview only covers the editor, which keeps its mode
+  const showEditor = (target: 'visual' | 'html') => {
+    setView('edit');
+    if (mode !== target) handleModeToggle();
+  };
 
   return (
-    <div className="border border-neutral-200 rounded-lg bg-white">
-      {/* Mode toggle */}
-      <div className="border-b border-neutral-200 bg-neutral-50 p-2 flex flex-col sm:flex-row justify-between sm:items-center gap-2">
-        <div className="flex gap-1">
-          <Button
-            type="button"
-            variant={mode === 'visual' ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => mode === 'html' && handleModeToggle()}
-          >
-            <Eye className="h-4 w-4 sm:mr-2" />
-            <span className="hidden sm:inline">Visual</span>
-          </Button>
-          <Button
-            type="button"
-            variant={mode === 'html' ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => mode === 'visual' && handleModeToggle()}
-          >
-            <Code2 className="h-4 w-4 sm:mr-2" />
-            <span className="hidden sm:inline">HTML</span>
-          </Button>
-        </div>
-        <div className="flex items-center gap-2 flex-1 sm:flex-none">
-          <Label htmlFor="preview-contact" className="text-xs text-neutral-600 whitespace-nowrap">
-            Preview as:
-          </Label>
-          <Select
-            value={selectedContactId || 'none'}
-            onValueChange={val => setSelectedContactId(val === 'none' ? '' : val)}
-          >
-            <SelectTrigger id="preview-contact" className="h-8 w-full sm:w-[200px] text-xs">
-              <SelectValue placeholder="Select contact…" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">
-                <span className="text-neutral-500">No preview</span>
-              </SelectItem>
-              {contacts.map(contact => (
-                <SelectItem key={contact.id} value={contact.id}>
-                  {contact.email}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+    <div
+      className={cn(
+        'border border-neutral-200 rounded-lg bg-white',
+        fillHeight && 'xl:flex xl:h-full xl:min-h-0 xl:flex-col',
+      )}
+    >
+      {/* Edit or preview */}
+      <div className="border-b border-neutral-200 bg-neutral-50 p-2 flex gap-1">
+        <Button
+          type="button"
+          variant={view === 'edit' && mode === 'visual' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => showEditor('visual')}
+        >
+          <PenLine className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">Visual</span>
+        </Button>
+        <Button
+          type="button"
+          variant={view === 'edit' && mode === 'html' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => showEditor('html')}
+        >
+          <Code2 className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">HTML</span>
+        </Button>
+        <Button
+          type="button"
+          variant={view === 'preview' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => setView('preview')}
+        >
+          <Eye className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">Preview</span>
+        </Button>
       </div>
+
+      {view === 'edit' && <PreheaderField value={preheader} onChange={next => onChange(withMarkers(body, next))} />}
+
+      {view === 'edit' && mode === 'visual' && emailBrand.differs && (
+        <div className="flex items-center justify-between gap-3 border-t border-sky-200 bg-sky-50 px-4 py-2">
+          <p className="text-xs text-sky-900">This email uses different styles from the project&apos;s brand.</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 text-xs"
+            onClick={() => onChange(joinEmailMarkers({preheader, brand: emailBrand.project, body}))}
+          >
+            Apply brand
+          </Button>
+        </div>
+      )}
 
       {/* Template syntax errors, reported as you type rather than on save */}
       {syntaxIssue && !suggestionOpen && (
@@ -447,221 +505,175 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </div>
       )}
 
-      {/* Editor content */}
-      {mode === 'visual' ? (
-        <>
-          <Toolbar
-            editor={editor}
-            onInsertVariable={() => setShowVariableDialog(true)}
-            onInsertImage={() => setShowImageDialog(true)}
-            canUploadImages={canUploadImages}
-          />
-          <div className="min-h-[400px] max-h-[600px] overflow-y-auto">
-            <EditorContent editor={editor} />
-          </div>
-          {selectedContactId && (
-            <>
-              <div className="border-t border-neutral-200 bg-neutral-100 px-4 py-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium text-neutral-600">Preview</p>
-                    <span className="text-xs text-neutral-500">
-                      ({previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : '1200px'})
-                    </span>
-                  </div>
-                  <div className="flex gap-1">
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('mobile')}
-                      className="h-7 w-7 p-0"
-                      title="Mobile (375px)"
-                    >
-                      <Smartphone className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('tablet')}
-                      className="h-7 w-7 p-0"
-                      title="Tablet (768px)"
-                    >
-                      <Tablet className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('desktop')}
-                      className="h-7 w-7 p-0"
-                      title="Desktop (1200px)"
-                    >
-                      <Monitor className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
+      {/* Editor content, hidden rather than unmounted while previewing (xl:flex would undo `hidden`) */}
+      <div className={view === 'preview' ? 'hidden' : cn(fillHeight && 'xl:flex xl:min-h-0 xl:flex-1 xl:flex-col')}>
+        {mode === 'visual' ? (
+          <>
+            <Toolbar
+              editor={editor}
+              onInsertVariable={() => setShowVariableDialog(true)}
+              onInsertImage={() => setShowImageDialog(true)}
+              onButton={button.onToolbar}
+              onDivider={divider.onToolbar}
+              onSpacer={spacer.onToolbar}
+              onVideo={video.onToolbar}
+              onBox={box.onToolbar}
+              canUpload={canUpload}
+            />
+            <div
+              className={cn(
+                'min-h-[400px] max-h-[600px] overflow-y-auto',
+                fillHeight && 'xl:min-h-0 xl:max-h-none xl:flex-1',
+              )}
+              style={canvas.outer}
+            >
+              <div style={canvas.inner} data-framed={isFramedBrand(emailBrand.look) ? '' : undefined}>
+                <EditorContent editor={editor} />
               </div>
-              <div className="p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]">
-                <div
-                  className="transition-all duration-300"
-                  style={{
-                    width: getPreviewContainerWidth(),
-                    maxWidth: '100%',
-                  }}
-                >
-                  <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
-                    {/* Email Header Preview */}
-                    {(subject || from || replyTo) && (
-                      <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
-                        {subject && (
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
-                              <p className="text-base font-semibold text-neutral-900 mt-1">{getPreviewSubject()}</p>
-                            </div>
-                          </div>
-                        )}
-                        {(from || replyTo) && (
-                          <div className="flex gap-6 pt-2 border-t border-neutral-200">
-                            {from && (
-                              <div>
-                                <p className="text-xs text-neutral-500">From</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
-                              </div>
-                            )}
-                            {replyTo && (
-                              <div>
-                                <p className="text-xs text-neutral-500">Reply-To</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <iframe
-                      ref={previewIframeRef}
-                      className="w-full border-0"
-                      style={{
-                        minHeight: '400px',
-                        height: '100%',
-                      }}
-                      title="Email preview"
-                    />
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <>
-          <div className="min-h-[400px] max-h-[600px] overflow-hidden">
+            </div>
+          </>
+        ) : (
+          <div
+            className={cn(
+              'min-h-[400px] max-h-[600px] overflow-hidden',
+              // CodeMirror stops at 600px on its own; filling, the wrapper scrolls instead
+              fillHeight && 'xl:min-h-0 xl:max-h-none xl:flex-1 xl:overflow-auto xl:[&_.cm-scroller]:max-h-none!',
+            )}
+          >
             <HtmlEditor
               value={htmlContent}
               onChange={handleHtmlChange}
               placeholder={placeholder || 'Your next email starts here'}
             />
           </div>
-          {selectedContactId && (
-            <>
-              <div className="border-t border-neutral-200 bg-neutral-100 px-4 py-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium text-neutral-600">Preview</p>
-                    <span className="text-xs text-neutral-500">
-                      ({previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : '1200px'})
-                    </span>
-                  </div>
-                  <div className="flex gap-1">
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('mobile')}
-                      className="h-7 w-7 p-0"
-                      title="Mobile (375px)"
-                    >
-                      <Smartphone className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('tablet')}
-                      className="h-7 w-7 p-0"
-                      title="Tablet (768px)"
-                    >
-                      <Tablet className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice('desktop')}
-                      className="h-7 w-7 p-0"
-                      title="Desktop (1200px)"
-                    >
-                      <Monitor className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]">
-                <div
-                  className="transition-all duration-300"
-                  style={{
-                    width: getPreviewContainerWidth(),
-                    maxWidth: '100%',
-                  }}
+        )}
+      </div>
+
+      {view === 'preview' && (
+        <div className={cn(fillHeight && 'xl:flex xl:min-h-0 xl:flex-1 xl:flex-col')}>
+          <div className="border-b border-neutral-200 bg-neutral-100 px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Label htmlFor="preview-contact" className="text-xs text-neutral-600 whitespace-nowrap">
+                Preview as
+              </Label>
+              <Select value={previewContact?.id ?? 'none'} onValueChange={setSelectedContactId}>
+                <SelectTrigger id="preview-contact" className="h-8 w-[220px] max-w-full bg-white text-xs">
+                  <SelectValue placeholder="Select contact…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">
+                    <span className="text-neutral-500">No contact (default values)</span>
+                  </SelectItem>
+                  {contacts.map(contact => (
+                    <SelectItem key={contact.id} value={contact.id}>
+                      {contact.email}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-500">
+                {previewDevice === 'mobile' ? '375px' : previewDevice === 'tablet' ? '768px' : 'Full width'}
+              </span>
+              <div className="flex gap-1">
+                <Button
+                  type="button"
+                  variant={previewDevice === 'mobile' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('mobile')}
+                  className="h-7 w-7 p-0"
+                  title="Mobile (375px)"
                 >
-                  <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
-                    {/* Email Header Preview */}
-                    {(subject || from || replyTo) && (
-                      <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
-                        {subject && (
-                          <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
-                              <p className="text-base font-semibold text-neutral-900 mt-1">{getPreviewSubject()}</p>
-                            </div>
+                  <Smartphone className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={previewDevice === 'tablet' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('tablet')}
+                  className="h-7 w-7 p-0"
+                  title="Tablet (768px)"
+                >
+                  <Tablet className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={previewDevice === 'desktop' ? 'default' : 'ghost'}
+                  size="sm"
+                  onClick={() => setPreviewDevice('desktop')}
+                  className="h-7 w-7 p-0"
+                  title="Desktop (full width)"
+                >
+                  <Monitor className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          <div
+            className={cn(
+              'p-4 bg-neutral-50 flex justify-center items-start overflow-auto min-h-[400px]',
+              fillHeight && 'xl:min-h-0 xl:flex-1',
+            )}
+          >
+            <div
+              className="transition-all duration-300"
+              style={{
+                width: getPreviewContainerWidth(),
+                maxWidth: '100%',
+              }}
+            >
+              <div className="bg-white rounded-lg border border-neutral-300 shadow-lg overflow-hidden">
+                {/* Email Header Preview */}
+                {(subject || preheader || from || replyTo) && (
+                  <div className="bg-neutral-50 border-b border-neutral-200 p-4 space-y-2">
+                    {subject && (
+                      <div>
+                        <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Subject</p>
+                        <p className="text-base font-semibold text-neutral-900 mt-1">{renderPreview(subject)}</p>
+                      </div>
+                    )}
+                    {preheader && (
+                      <div>
+                        <p className="text-xs text-neutral-500 uppercase tracking-wide font-medium">Preview text</p>
+                        {/* Stored escaped, as it goes into the email's HTML */}
+                        <p className="text-sm text-neutral-700 mt-1">{preheaderToText(renderPreview(preheader))}</p>
+                      </div>
+                    )}
+                    {(from || replyTo) && (
+                      <div className="flex gap-6 pt-2 border-t border-neutral-200">
+                        {from && (
+                          <div>
+                            <p className="text-xs text-neutral-500">From</p>
+                            <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
                           </div>
                         )}
-                        {(from || replyTo) && (
-                          <div className="flex gap-6 pt-2 border-t border-neutral-200">
-                            {from && (
-                              <div>
-                                <p className="text-xs text-neutral-500">From</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{from}</p>
-                              </div>
-                            )}
-                            {replyTo && (
-                              <div>
-                                <p className="text-xs text-neutral-500">Reply-To</p>
-                                <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
-                              </div>
-                            )}
+                        {replyTo && (
+                          <div>
+                            <p className="text-xs text-neutral-500">Reply-To</p>
+                            <p className="text-sm text-neutral-900 mt-0.5">{replyTo}</p>
                           </div>
                         )}
                       </div>
                     )}
-                    <iframe
-                      ref={previewIframeRef}
-                      className="w-full border-0"
-                      style={{
-                        minHeight: '400px',
-                        height: '100%',
-                      }}
-                      title="Email preview"
-                    />
                   </div>
-                </div>
+                )}
+                {/* No scripts and no windows: the body is the author's HTML, written into a document of the
+                    dashboard's origin. Its links are opened by the dashboard (see openLink) */}
+                <iframe
+                  ref={previewIframeRef}
+                  sandbox="allow-same-origin"
+                  className="w-full border-0"
+                  style={{
+                    minHeight: '400px',
+                    height: '100%',
+                  }}
+                  title="Email preview"
+                />
               </div>
-            </>
-          )}
-        </>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Variable insertion dialog */}
@@ -776,83 +788,21 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         variant="destructive"
       />
 
-      {/* Image insertion dialog */}
-      <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Insert image</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="image-url" className="text-sm font-medium mb-2 block">
-                Image URL
-              </Label>
-              <Input
-                id="image-url"
-                value={imageUrl}
-                onChange={e => setImageUrl(e.target.value)}
-                placeholder="https://example.com/image.jpg"
-                type="url"
-              />
-            </div>
+      <ButtonDialog {...button.dialogProps} defaultStyle={emailBrand.button} canUpload={canUpload} />
+      <DividerDialog {...divider.dialogProps} />
+      <SpacerDialog {...spacer.dialogProps} />
+      <VideoDialog {...video.dialogProps} />
+      <BoxDialog
+        {...box.dialogProps}
+        buttonColor={emailBrand.button?.backgroundColor ?? BUTTON_DEFAULTS.backgroundColor}
+      />
 
-            {canUploadImages && (
-              <>
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <span className="w-full border-t border-neutral-200" />
-                  </div>
-                  <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-white px-2 text-neutral-500">Or upload</span>
-                  </div>
-                </div>
-
-                <div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={e => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setImageFile(file);
-                        setImageUrl('');
-                      }
-                    }}
-                    className="hidden"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full"
-                  >
-                    <Upload className="h-4 w-4 mr-2" />
-                    Choose file
-                  </Button>
-                  {imageFile && (
-                    <div className="mt-2 flex items-center justify-between p-2 bg-neutral-50 rounded border border-neutral-200">
-                      <span className="text-sm text-neutral-700 truncate">{imageFile.name}</span>
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setImageFile(null)}>
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            <div className="flex gap-2 justify-end">
-              <Button type="button" variant="outline" onClick={() => setShowImageDialog(false)}>
-                Cancel
-              </Button>
-              <Button type="button" onClick={handleImageUpload} disabled={!imageUrl && !imageFile}>
-                Insert
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ImageDialog
+        open={showImageDialog}
+        onOpenChange={setShowImageDialog}
+        canUpload={canUpload}
+        onInsert={src => (editor?.chain().focus() as any).setImage({src}).run()}
+      />
 
       {/* Custom styles for editor */}
       <style jsx global>{`
@@ -927,15 +877,63 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           margin: 16px 0;
         }
 
+        /* Boxes: their text colour for what the prose styles colour, as when sending */
+        .ProseMirror [data-box] h1,
+        .ProseMirror [data-box] h2,
+        .ProseMirror [data-box] h3,
+        .ProseMirror [data-box] strong,
+        .ProseMirror [data-box] code,
+        .ProseMirror [data-box] blockquote {
+          color: inherit;
+        }
+        .ProseMirror [data-box] blockquote {
+          border-left-color: currentColor;
+        }
+        .ProseMirror [data-box] [data-node-view-content] > :first-child {
+          margin-top: 0;
+        }
+        .ProseMirror [data-box] [data-node-view-content] > :last-child {
+          margin-bottom: 0;
+        }
+        /* In a framed column, full width reaches past the editor's own side padding (px-4) */
+        [data-framed] .ProseMirror [data-box-full] {
+          margin-left: -1rem !important;
+          margin-right: -1rem !important;
+        }
+        .ProseMirror [data-box] .box-settings {
+          opacity: 0.4;
+        }
+        .ProseMirror [data-box]:hover .box-settings,
+        .ProseMirror [data-box]:focus-within .box-settings {
+          opacity: 1;
+        }
+
         .resizable-image-container {
           display: inline-block;
           position: relative;
           max-width: 100%;
         }
 
-        .resizable-image-container.selected {
+        .resizable-image-container.selected,
+        .ProseMirror .node-button.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-spacer.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-video.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror .node-box.ProseMirror-selectednode > [data-node-view-wrapper],
+        .ProseMirror hr.ProseMirror-selectednode {
           outline: 2px solid #3b82f6;
           outline-offset: 2px;
+        }
+
+        /* A divider is as thin as its line; a taller invisible band takes the clicks */
+        .ProseMirror hr {
+          position: relative;
+          overflow: visible;
+          cursor: pointer;
+        }
+        .ProseMirror hr::after {
+          content: '';
+          position: absolute;
+          inset: -8px 0;
         }
 
         .resizable-image-container img {
@@ -946,15 +944,18 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           outline: none;
         }
 
-        .ProseMirror p.is-editor-empty:first-child::before {
+        .ProseMirror p.is-empty::before {
           color: #9ca3af;
           content: attr(data-placeholder);
           float: left;
           height: 0;
           pointer-events: none;
         }
+        .ProseMirror p.is-empty:not(.is-editor-empty)::before {
+          color: #d1d5db;
+        }
 
-        /* Variable autocomplete styles */
+        /* Suggestion menus ({{, {% and /) */
         .tippy-box[data-theme~='variable-suggestion'] {
           background-color: white;
           border: 1px solid #e5e7eb;

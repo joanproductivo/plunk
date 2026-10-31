@@ -1,25 +1,8 @@
 import type {Contact} from '@plunk/db';
-import type {ContactSubscriptionStatus} from '@plunk/types';
+import {type ContactDisplayStatus, contactStatus} from '@plunk/types';
 import {Badge} from '@plunk/ui';
-import {Clock, MailCheck, MailX} from 'lucide-react';
+import {Clock, MailCheck, MailQuestionMark, MailX} from 'lucide-react';
 import React from 'react';
-
-/**
- * How the dashboard reads a contact's subscription state.
- *
- * `snoozed` is derived rather than stored: a snooze is `subscribed = false` plus a date, which
- * is what lets every send path suppress a snoozed contact through the `subscribed` filter it
- * already has. The cost of that is exactly this -- the two "not subscribed" states look
- * identical until you check the date, so every surface that reports status has to go through
- * here rather than branching on the boolean.
- */
-export function contactStatus(contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>): ContactSubscriptionStatus {
-  if (contact.subscribed) {
-    return 'subscribed';
-  }
-
-  return contact.snoozedUntil ? 'snoozed' : 'unsubscribed';
-}
 
 /**
  * Absolute date for a snooze end, in the operator's locale.
@@ -43,24 +26,43 @@ export function formatSnoozedUntil(value: Date | string | null): string {
   return new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric'}).format(date);
 }
 
-const STATUS_LABEL: Record<ContactSubscriptionStatus, string> = {
+const STATUS_LABEL: Record<ContactDisplayStatus, string> = {
   subscribed: 'Subscribed',
+  pending: 'Pending confirmation',
   snoozed: 'Snoozed',
   unsubscribed: 'Unsubscribed',
 };
 
+/** A contact as the list and its page read it: `pendingConfirmation` (Plunk Lite) from the API */
+type StatusContact = Pick<Contact, 'subscribed' | 'snoozedUntil'> & {pendingConfirmation?: boolean};
+
 /**
  * The status badge, shared by the table and card views of the contacts list so the two cannot
  * disagree. Snoozed takes a neutral fill rather than a red one: the contact is coming back, and
- * colouring it like a loss would misreport the list's health.
+ * colouring it like a loss would misreport the list's health. A contact still to confirm a
+ * sign-up (Plunk Lite) is amber: it asked to join and has not yet.
  */
-export function ContactStatusBadge({contact}: {contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>}) {
+export function ContactStatusBadge({contact}: {contact: StatusContact}) {
   const status = contactStatus(contact);
 
   return (
     <Badge
-      variant={status === 'subscribed' ? 'success' : status === 'snoozed' ? 'neutral' : 'destructive'}
-      title={status === 'snoozed' ? `Resumes on ${formatSnoozedUntil(contact.snoozedUntil)}` : undefined}
+      variant={
+        status === 'subscribed'
+          ? 'success'
+          : status === 'snoozed'
+            ? 'neutral'
+            : status === 'pending'
+              ? 'warning'
+              : 'destructive'
+      }
+      title={
+        status === 'snoozed'
+          ? `Resumes on ${formatSnoozedUntil(contact.snoozedUntil)}`
+          : status === 'pending'
+            ? 'Signed up, but has not yet clicked the link in the confirmation email'
+            : undefined
+      }
     >
       {STATUS_LABEL[status]}
     </Badge>
@@ -68,11 +70,15 @@ export function ContactStatusBadge({contact}: {contact: Pick<Contact, 'subscribe
 }
 
 /** The matching icon shown beside the email address. */
-export function ContactStatusIcon({contact}: {contact: Pick<Contact, 'subscribed' | 'snoozedUntil'>}) {
+export function ContactStatusIcon({contact}: {contact: StatusContact}) {
   const status = contactStatus(contact);
 
   if (status === 'subscribed') {
     return <MailCheck className="h-4 w-4 shrink-0 text-green-600" aria-hidden="true" />;
+  }
+
+  if (status === 'pending') {
+    return <MailQuestionMark className="h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />;
   }
 
   if (status === 'snoozed') {

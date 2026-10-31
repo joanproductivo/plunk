@@ -2,7 +2,7 @@ import type {ProjectWithRole} from '@plunk/types';
 import dayjs from 'dayjs';
 import {getDomain} from 'tldts';
 
-import {API_URI, NODE_ENV} from '../app/constants.js';
+import {API_URI, DASHBOARD_URI, NODE_ENV} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {wrapRedis} from '../database/redis.js';
 
@@ -39,6 +39,29 @@ function getCookieDomain(): string | undefined {
   }
 }
 
+/**
+ * Whether the dashboard and API are the same site (same scheme and registrable domain), as browsers define it
+ * for SameSite. When they are, the session cookie can be `Lax`, which stops browsers from attaching it to
+ * cross-site form submissions. Only split-domain deployments need `None`.
+ */
+function isDashboardSameSite(): boolean {
+  try {
+    const api = new URL(API_URI);
+    const dashboard = new URL(DASHBOARD_URI);
+
+    if (api.protocol !== dashboard.protocol) {
+      return false;
+    }
+
+    const apiSite = getDomain(api.hostname, {allowPrivateDomains: true}) ?? api.hostname;
+    const dashboardSite = getDomain(dashboard.hostname, {allowPrivateDomains: true}) ?? dashboard.hostname;
+
+    return apiSite === dashboardSite;
+  } catch {
+    return false;
+  }
+}
+
 export class UserService {
   public static readonly COOKIE_NAME = 'next_token';
 
@@ -54,14 +77,11 @@ export class UserService {
     }
 
     return wrapRedis(Keys.User.email(email), async () => {
-      return prisma.user.findFirst({
-        where: {
-          email: {
-            equals: email,
-            mode: 'insensitive',
-          },
-        },
-      });
+      // Case-insensitive by lower(), not by Prisma's `mode: 'insensitive'`: that is an ILIKE,
+      // where `_` and `%` in the address are wildcards, so `_lice@x.com` found alice@x.com
+      const [match] = await prisma.$queryRaw<{id: string}[]>`
+        SELECT "id" FROM "users" WHERE lower("email") = lower(${email}) LIMIT 1`;
+      return match ? prisma.user.findUnique({where: {id: match.id}}) : null;
     });
   }
 
@@ -93,7 +113,7 @@ export class UserService {
       httpOnly: true,
       expires: expires ?? dayjs().add(7, 'days').toDate(),
       secure: isHttps,
-      sameSite: isHttps ? 'none' : 'lax',
+      sameSite: isHttps && !isDashboardSameSite() ? 'none' : 'lax',
       path: '/',
       domain: getCookieDomain(),
     } as const;

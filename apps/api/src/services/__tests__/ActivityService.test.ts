@@ -1,7 +1,17 @@
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
 import {ActivityType} from '@plunk/types';
+import {redis} from '../../database/redis';
 import {ActivityService} from '../ActivityService';
+import {Keys} from '../keys';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+
+// Stats follow the no-tracking configuration set toggle; pin it on so they do not depend
+// on the environment the suite runs in
+vi.mock('../../app/constants.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../app/constants.js')>()),
+  TRACKING_TOGGLE_ENABLED: true,
+}));
 
 /**
  * Subscription changes are stored as reserved-name events (`contact.subscribed`,
@@ -261,5 +271,177 @@ describe('ActivityService - workflow activity', () => {
     } while (cursor);
 
     expect(seen).toEqual(started.map(execution => `${execution.id}_started`));
+  });
+});
+
+/**
+ * The dashboard measures its open rate the way analytics does: against emails that went
+ * out with tracking, under the project's current tracking mode.
+ */
+describe('ActivityService - stats', () => {
+  const prisma = getPrismaClient();
+
+  const setUp = async (tracking: TrackingMode) => {
+    const project = await factories.createProject({tracking});
+    const contact = await factories.createContact({projectId: project.id});
+    const send = (sourceType: EmailSourceType, options: {openedAt?: Date} = {}) =>
+      factories.createEmail({
+        projectId: project.id,
+        contactId: contact.id,
+        sourceType,
+        status: EmailStatus.SENT,
+        sentAt: new Date(),
+        ...options,
+      });
+    return {project, contact, send};
+  };
+
+  it('measures the open rate against tracked emails only when transactional mail is not tracked', async () => {
+    const {project, send} = await setUp(TrackingMode.MARKETING_ONLY);
+    await send(EmailSourceType.TRANSACTIONAL);
+    await send(EmailSourceType.CAMPAIGN, {openedAt: new Date()});
+
+    const stats = await ActivityService.getStats(project.id);
+
+    expect(stats).toMatchObject({totalEmailsTracked: 1, totalEmailsOpened: 1, openRate: 100});
+  });
+
+  it('leaves inbound, simulated and unsent emails out of the open rate', async () => {
+    const {project, contact, send} = await setUp(TrackingMode.ENABLED);
+    await send(EmailSourceType.CAMPAIGN, {openedAt: new Date()});
+    const simulated = await send(EmailSourceType.CAMPAIGN);
+    await prisma.email.update({where: {id: simulated.id}, data: {simulated: true}});
+    await factories.createEmail({
+      projectId: project.id,
+      contactId: contact.id,
+      sourceType: EmailSourceType.INBOUND,
+      status: EmailStatus.RECEIVED,
+    });
+    await factories.createEmail({
+      projectId: project.id,
+      contactId: contact.id,
+      sourceType: EmailSourceType.WORKFLOW,
+      status: EmailStatus.FAILED,
+    });
+
+    const stats = await ActivityService.getStats(project.id);
+
+    expect(stats.openRate).toBe(100);
+  });
+
+  it('counts only emails that went out as emails sent', async () => {
+    const {project, contact, send} = await setUp(TrackingMode.ENABLED);
+    await send(EmailSourceType.CAMPAIGN);
+    const simulated = await send(EmailSourceType.CAMPAIGN);
+    await prisma.email.update({where: {id: simulated.id}, data: {simulated: true}});
+    for (const [sourceType, status] of [
+      [EmailSourceType.INBOUND, EmailStatus.RECEIVED],
+      [EmailSourceType.WORKFLOW, EmailStatus.FAILED],
+      [EmailSourceType.TRANSACTIONAL, EmailStatus.PENDING],
+    ] as const) {
+      await factories.createEmail({projectId: project.id, contactId: contact.id, sourceType, status});
+    }
+
+    const stats = await ActivityService.getStats(project.id);
+
+    expect(stats.totalEmailsSent).toBe(1);
+  });
+
+  it('follows a change of tracking mode instead of serving stats cached under the old one', async () => {
+    const {project, send} = await setUp(TrackingMode.ENABLED);
+    await send(EmailSourceType.TRANSACTIONAL);
+    await send(EmailSourceType.CAMPAIGN, {openedAt: new Date()});
+
+    expect((await ActivityService.getStats(project.id)).openRate).toBe(50);
+
+    await prisma.project.update({where: {id: project.id}, data: {tracking: TrackingMode.MARKETING_ONLY}});
+    await redis.del(Keys.Project.id(project.id));
+
+    expect((await ActivityService.getStats(project.id)).openRate).toBe(100);
+  });
+
+  it('measures nothing when tracking is disabled', async () => {
+    const {project, send} = await setUp(TrackingMode.DISABLED);
+    await send(EmailSourceType.CAMPAIGN, {openedAt: new Date()});
+    await send(EmailSourceType.TRANSACTIONAL);
+
+    const stats = await ActivityService.getStats(project.id);
+
+    expect(stats).toMatchObject({totalEmailsTracked: 0, totalEmailsOpened: 0, openRate: 0, clickRate: 0});
+  });
+});
+
+/**
+ * Plunk Lite: a bounce or complaint taken back from the AWS dead-letter queue says so, with when it
+ * happened, and a complaint of a contact left subscribed says that too
+ */
+describe('ActivityService - events taken back from the dead-letter queue', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+  let contactId: string;
+
+  beforeEach(async () => {
+    const {project} = await factories.createUserWithProject();
+    projectId = project.id;
+    contactId = (await factories.createContact({projectId})).id;
+  });
+
+  const email = (data: Record<string, unknown>) =>
+    prisma.email.create({
+      data: {
+        projectId,
+        contactId,
+        subject: 'Hi',
+        body: '<p>Hi</p>',
+        from: 'hello@plunk.test',
+        sourceType: EmailSourceType.TRANSACTIONAL,
+        sentAt: new Date(),
+        ...data,
+      },
+    });
+
+  it('marks a bounce and a complaint taken back, and not one SNS delivered in time', async () => {
+    const occurredAt = new Date(Date.now() - 3_600_000).toISOString();
+    const recovered = await email({status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    const live = await email({status: EmailStatus.BOUNCED, bouncedAt: new Date()});
+    const complained = await email({status: EmailStatus.COMPLAINED, complainedAt: new Date()});
+    await prisma.event.createMany({
+      data: [
+        {
+          projectId,
+          contactId,
+          emailId: recovered.id,
+          name: 'email.bounce',
+          data: {bounceType: 'Permanent', recoveredFromDlq: true, occurredAt},
+        },
+        {projectId, contactId, emailId: live.id, name: 'email.bounce', data: {bounceType: 'Permanent'}},
+        {
+          projectId,
+          contactId,
+          emailId: complained.id,
+          name: 'email.complaint',
+          data: {recoveredFromDlq: true, occurredAt, keptSubscribed: true},
+        },
+      ],
+    });
+
+    const {data} = await ActivityService.getActivities(projectId, 50, undefined, [
+      ActivityType.EMAIL_BOUNCED,
+      ActivityType.EMAIL_COMPLAINT,
+    ]);
+    const byEmail = (id: string, type: ActivityType) =>
+      data.find(activity => activity.type === type && activity.id.startsWith(id))?.metadata;
+
+    expect(byEmail(recovered.id, ActivityType.EMAIL_BOUNCED)).toMatchObject({
+      bounceType: 'Permanent',
+      recoveredFromDlq: true,
+      occurredAt,
+    });
+    expect(byEmail(live.id, ActivityType.EMAIL_BOUNCED)).not.toHaveProperty('recoveredFromDlq');
+    expect(byEmail(complained.id, ActivityType.EMAIL_COMPLAINT)).toMatchObject({
+      recoveredFromDlq: true,
+      occurredAt,
+      keptSubscribed: true,
+    });
   });
 });

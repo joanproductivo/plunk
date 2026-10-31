@@ -77,6 +77,36 @@ export async function resolveContact(
   return {id: match.id, label: match.email};
 }
 
+/**
+ * How the project's suppression list (Plunk Lite) shows up in the contact tools. An address that
+ * bounced for good or reported spam is never subscribed or emailed again, whatever the path, and
+ * only the dashboard can lift it -- so the model has to explain it, not retry or work around it.
+ */
+const SUPPRESSION_HELP = [
+  '**Suppressed addresses:** an address that bounced permanently or reported an email as spam is on',
+  "the project's suppression list. It is never subscribed or emailed again, by any tool, until someone",
+  "removes the suppression on the contact's page in the Plunk dashboard; no tool can lift it, and",
+  'deleting and re-creating the contact does not either, because the list is kept by address.',
+  'Do not retry or look for another way to subscribe it: tell the user why (bounce or complaint, and',
+  'the date) and that only the dashboard can lift it.',
+].join('\n');
+
+/** The reason a write left a contact unsubscribed, from `_meta.suppressed` on `POST /contacts` */
+export function suppressionNote(contact: unknown): string {
+  const suppressed = (contact as {_meta?: {suppressed?: {reason?: string; createdAt?: string}}} | null)?._meta
+    ?.suppressed;
+  if (!suppressed) {
+    return '';
+  }
+
+  const why = suppressed.reason === 'COMPLAINT' ? 'reported an email as spam' : 'bounced permanently';
+  const when = typeof suppressed.createdAt === 'string' ? ` on ${suppressed.createdAt.slice(0, 10)}` : '';
+  return (
+    ` The contact stays unsubscribed: its address ${why}${when} and is on the project's suppression list.` +
+    " Only removing the suppression on the contact's page in the Plunk dashboard lets it be subscribed again."
+  );
+}
+
 export function registerContactTools(ctx: ToolContext, client: PlunkClient): void {
   register(
     ctx,
@@ -144,7 +174,10 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
         '',
         '**NOT for:** Browsing or searching many contacts — use `plunk_list_contacts`.',
         '',
-        '**Returns:** The contact record (id, email, subscribed, data, timestamps).',
+        '**Returns:** The contact record (id, email, subscribed, data, timestamps), and `suppression`:',
+        "`{reason, createdAt}` when the address is on the project's suppression list (`reason` is",
+        '`BOUNCE` or `COMPLAINT`), otherwise null. A suppressed address is never emailed, transactional',
+        'email included — check this when the user asks why someone is not getting their emails.',
         '',
         '**Pass `email` if that is what the user gave you** — you do not need to look the ID up first.',
         'Matching on email is exact and case-insensitive.',
@@ -225,7 +258,11 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
         '**Returns:** The updated contact, with `subscribed: true`.',
         '',
         '**Only do this when the contact has actually asked to be re-subscribed.** Re-subscribing',
-        'someone who opted out is a compliance problem, not a convenience.',
+        'someone who opted out is a compliance problem, not a convenience. It subscribes at once, even with',
+        "the project's double opt-in on (Plunk Lite), and no confirmation email is sent.",
+        '',
+        'A suppressed address fails with 409 `ADDRESS_SUPPRESSED`, and the error gives the reason and date.',
+        SUPPRESSION_HELP,
         '',
         '**Key trigger phrases:** "resubscribe them", "opt them back in", "they want emails again"',
       ].join('\n'),
@@ -264,6 +301,17 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
         '',
         '**Returns:** The created or updated contact, including its ID.',
         '',
+        'A new contact whose domain does not exist, takes no email, is disposable or is a slip of a large',
+        "provider's (gmial.com) is refused with INVALID_EMAIL and the likely correction, and is not created.",
+        '',
+        'A suppressed address is never subscribed: the call still succeeds, but the contact comes back',
+        'with `subscribed: false` and `_meta.suppressed` (`{reason, createdAt}`).',
+        SUPPRESSION_HELP,
+        '',
+        "With the project's double opt-in on (Plunk Lite), subscribing here is a sign-up: the contact comes back",
+        'with `subscribed: false` and `_meta.pendingConfirmation`, gets a confirmation email, and is subscribed',
+        'when it clicks the link. To subscribe someone who already asked for it, use `plunk_subscribe_contact`.',
+        '',
         '**When to use:**',
         '- Adding someone to the list',
         '- Setting custom fields on a contact you may not have seen before',
@@ -288,7 +336,7 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
           body: {email, subscribed, data},
         });
 
-        return jsonResult('Contact created or updated:', contact);
+        return jsonResult(`Contact created or updated.${suppressionNote(contact)}`, contact);
       }),
   );
 
@@ -308,6 +356,11 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
         '',
         '**Important:** Setting a key in `data` to null deletes that key. Fields you omit are left',
         'untouched. Changing the email to one already used by another contact fails with 409.',
+        '',
+        'Subscribing a suppressed address — `subscribed: true` on an unsubscribed contact, or moving a',
+        'subscribed contact to a suppressed email — fails with 409 `ADDRESS_SUPPRESSED`, and nothing is',
+        'changed. Updating only `data` always works.',
+        SUPPRESSION_HELP,
         '',
         '**Key trigger phrases:** "update their plan", "change their email", "set their custom field"',
       ].join('\n'),
@@ -349,6 +402,9 @@ export function registerContactTools(ctx: ToolContext, client: PlunkClient): voi
         '**Returns:** Confirmation of deletion.',
         '',
         '**This cannot be undone.** Confirm with the user before calling it.',
+        '',
+        "Deleting does not take the address off the project's suppression list: a contact re-created",
+        'for a suppressed address still cannot be subscribed or emailed.',
         '',
         '**Key trigger phrases:** "delete this contact", "remove them entirely", "GDPR erase"',
       ].join('\n'),

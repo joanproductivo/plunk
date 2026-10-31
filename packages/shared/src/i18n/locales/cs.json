@@ -17,7 +17,19 @@
       "button": "Přihlásit se k odběru",
       "buttonLoading": "Přihlašování...",
       "successTitle": "Odběr byl aktivován!",
-      "successDescription": "Na adresu {email} budou nyní chodit e-maily od odesílatele {projectName}."
+      "successDescription": "Na adresu {email} budou nyní chodit e-maily od odesílatele {projectName}.",
+      "pendingTitle": "Zkontrolujte svou schránku",
+      "pendingDescription": "Poslali jsme e-mail na {email}. Klikněte na odkaz v něm a potvrďte odběr od {projectName}."
+    },
+    "confirm": {
+      "title": "Potvrďte odběr",
+      "description": "Potvrďte, že chcete dostávat e-maily od {projectName} na {email}.",
+      "button": "Potvrdit odběr",
+      "buttonLoading": "Potvrzování...",
+      "successTitle": "Odběr je aktivní!",
+      "successDescription": "{email} nyní bude dostávat e-maily od {projectName}.",
+      "invalidTitle": "Tento odkaz už nefunguje",
+      "invalidDescription": "Nahradil ho novější e-mail, nebo se adresa změnila. Přihlaste se znovu a dostanete nový odkaz."
     },
     "manage": {
       "title": "Správa předvoleb",
@@ -50,6 +62,7 @@
       "error": "Chyba",
       "loadFailed": "Nepodařilo se načíst vaše e-mailové předvolby. Zkontrolujte odkaz a zkuste to znovu.",
       "actionFailed": "Něco se pokazilo. Zkuste to prosím znovu.",
+      "resubscribeNeedsEmail": "Tuto adresu zde nelze znovu přihlásit. Použijte odkaz v e-mailu, který jste od nás obdrželi.",
       "sentWith": "Odesláno přes {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Tento e-mail jste obdrželi, protože jste souhlasili se zasíláním e-mailů od {projectName}. Pokud si již nepřejete dostávat tyto e-maily, můžete",
       "updatePreferences": "změnit své předvolby"
+    },
+    "optin": {
+      "subject": "Potvrďte odběr od {projectName}",
+      "text": "Děkujeme za přihlášení k odběru e-mailů od {projectName}.\n\nAbyste je začali dostávat, potvrďte, že je to vaše adresa:",
+      "button": "Potvrdit odběr",
+      "ignore": "Pokud jste se nepřihlásili, tento e-mail ignorujte: odběr nebude aktivován."
     }
   }
 }

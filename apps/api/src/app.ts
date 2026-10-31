@@ -1,15 +1,16 @@
+import type {Server as HttpServer} from 'node:http';
+
 import {Server} from '@overnightjs/core';
 import cookies from 'cookie-parser';
 import cors from 'cors';
 import type {NextFunction, Request, Response} from 'express';
-import {json, raw} from 'express';
+import {raw} from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import signale from 'signale';
 import {ZodError} from 'zod';
 
 import {
-  DASHBOARD_URI,
   GITHUB_OAUTH_ENABLED,
   GOOGLE_OAUTH_ENABLED,
   LANDING_URI,
@@ -20,21 +21,28 @@ import {
   RATE_LIMIT_ENABLED,
   RATE_LIMIT_SEND_PER_SECOND,
   RATE_LIMIT_TRACK_PER_SECOND,
+  SHUTDOWN_TIMEOUT_MS,
   S3_ENABLED,
   SMTP_ENABLED,
   STRIPE_ENABLED,
   TRACKING_TOGGLE_ENABLED,
-  WIKI_URI,
+  verifySignupsEnabled,
 } from './app/constants.js';
+import {ALLOWED_ORIGINS, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';
+import {Alerts} from './controllers/Alerts.js';
 import {Analytics} from './controllers/Analytics.js';
 import {Auth} from './controllers/Auth.js';
+import {Brand} from './controllers/Brand.js';
 import {Campaigns} from './controllers/Campaigns.js';
 import {Contacts} from './controllers/Contacts.js';
 import {Domains} from './controllers/Domains.js';
 import {Events} from './controllers/Events.js';
+import {Footers} from './controllers/Footers.js';
 import {Oauth} from './controllers/Oauth/index.js';
+import {OptIn} from './controllers/OptIn.js';
+import {OptInSettings} from './controllers/OptInSettings.js';
 import {Projects} from './controllers/Projects.js';
 import {Segments} from './controllers/Segments.js';
 import {Templates} from './controllers/Templates.js';
@@ -54,9 +62,14 @@ import {
   emailBodyCleanupQueue,
   idempotencyKeyCleanupQueue,
   segmentCountQueue,
+  emailRecoverySweepQueue,
   snoozeSweepQueue,
+  plunkLiteChecksQueue,
 } from './services/QueueService.js';
+import {EmailVerificationService} from './services/EmailVerificationService.js';
 import * as S3Service from './services/S3Service.js';
+import {checkConfigurationSets} from './services/SesEventMatch.js';
+import {useJsonBodyParsers} from './middleware/bodyParsers.js';
 import {requestIdMiddleware} from './middleware/requestId.js';
 import {databaseRequestLogger} from './middleware/requestLogger.js';
 import {logger, requestLogger} from './utils/logger.js';
@@ -77,7 +90,7 @@ const server = new (class extends Server {
     });
 
     // Parse the rest of our application as json
-    this.app.use(json({limit: '50mb'}));
+    useJsonBodyParsers(this.app);
     this.app.use(cookies());
     this.app.use(helmet());
 
@@ -90,11 +103,7 @@ const server = new (class extends Server {
     // Log all requests to database for historical tracking and analytics
     this.app.use(databaseRequestLogger);
 
-    // Build allowed origins from environment variables
-    const allowedOrigins =
-      NODE_ENV === 'development'
-        ? [/.*\.localhost:1000/, 'http://localhost:3000', 'http://localhost:4000']
-        : [DASHBOARD_URI, LANDING_URI, WIKI_URI];
+    const allowedOrigins = ALLOWED_ORIGINS;
 
     // Public API endpoints that should allow all origins
     const publicApiPaths = ['/v1', '/v1/track', '/v1/send'];
@@ -133,15 +142,7 @@ const server = new (class extends Server {
             return callback(null, true);
           }
 
-          // Check if origin matches any allowed origin (string or regex)
-          const isAllowed = allowedOrigins.some(allowed => {
-            if (allowed instanceof RegExp) {
-              return allowed.test(origin);
-            }
-            return allowed === origin;
-          });
-
-          if (isAllowed) {
+          if (isAllowedOrigin(origin)) {
             callback(null, true);
           } else {
             // Log CORS rejection with helpful information
@@ -163,13 +164,18 @@ const server = new (class extends Server {
     this.addControllers([
       new Actions(),
       new Activity(),
+      new Alerts(),
       new Analytics(),
       new Auth(),
+      new Brand(),
       new Campaigns(),
       new Oauth(),
       new Users(),
       new Contacts(),
       new Domains(),
+      new Footers(),
+      new OptIn(),
+      new OptInSettings(),
       new Projects(),
       new Segments(),
       new Templates(),
@@ -240,6 +246,27 @@ server.app.use((error: Error, req: Request, res: Response, _next: NextFunction) 
         statusCode,
         requestId,
         suggestion: 'Ensure your request body is valid JSON and Content-Type header is set to "application/json".',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    return res.status(statusCode).json(response);
+  }
+
+  // A body over the parser's limit: the client's to fix, not a server error
+  if ((error as {type?: unknown}).type === 'entity.too.large') {
+    const statusCode = 413;
+
+    logger.warn('Request body too large', {endpoint: `${req.method} ${req.path}`}, res);
+
+    const response: ErrorResponse = {
+      success: false,
+      error: {
+        code: ErrorCode.INVALID_REQUEST_BODY,
+        message: 'Request body is too large',
+        statusCode,
+        requestId,
+        suggestion: 'Send a smaller body. Attachments to /v1/send can add up to about 7 MB.',
       },
       timestamp: new Date().toISOString(),
     };
@@ -413,11 +440,55 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', error => {
   signale.error('Uncaught Exception:', error);
-  // Don't exit the process - just log the error
+  // Plunk Lite: the process may be left in any state, so close as on a signal -- letting the
+  // requests running finish -- and exit with an error so pm2 starts it again, as the worker does
+  shutdown('uncaughtException', 1);
 });
 
+let httpServer: HttpServer | undefined;
+let stopping = false;
+
+/**
+ * Stop taking requests and let the running ones finish: a request cut off between creating an
+ * email row and queueing its job would leave the row PENDING with nothing to send it. Work a
+ * request starts without awaiting it (a manual workflow start) is not waited for.
+ */
+function shutdown(signal: string, exitCode = 0) {
+  // A second signal must not fall through to Node's default handler, which exits at once
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+
+  signale.info(`[API] Received ${signal}, closing the HTTP server...`);
+
+  const deadline = setTimeout(() => {
+    signale.error(`[API] Requests did not finish within ${SHUTDOWN_TIMEOUT_MS / 1000}s, exiting`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+
+  if (!httpServer) {
+    process.exit(exitCode);
+  }
+
+  // Stops accepting connections and waits for the requests already running
+  httpServer.close(() => {
+    signale.success('[API] HTTP server closed');
+    process.exit(exitCode);
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
 void prisma.$connect().then(async () => {
-  server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
+  httpServer = server.app.listen(PORT, '0.0.0.0', () => signale.success('[HTTPS] Ready on', PORT));
+
+  // Plunk Lite: the disposable domains list, fetched before the first sign-up needs it
+  if (verifySignupsEnabled()) {
+    void EmailVerificationService.warmUp();
+  }
 
   // Feature matrix
   const features = [
@@ -479,6 +550,35 @@ void prisma.$connect().then(async () => {
     }
   }
 
+  // Not awaited: a slow SES response must not hold up scheduling the background jobs below.
+  // Plunk Lite: a set that does not publish its bounces and complaints is told to every project.
+  void checkConfigurationSets();
+
+  scheduleRepeatables();
+}, startupFailed);
+
+/**
+ * Plunk Lite: the database could not be reached at startup. Exit so pm2 starts the api again;
+ * staying up would leave a process that never listens and that pm2 thinks is fine.
+ */
+function startupFailed(error: unknown): never {
+  signale.error('[API] Could not connect to the database, exiting so pm2 restarts the api:', error);
+  process.exit(1);
+}
+
+/**
+ * Plunk Lite: schedule the repeatable jobs, and if one cannot be added, all of them again in 30
+ * seconds, since each has a fixed id and adding it again changes nothing. Before, a failure skipped
+ * the jobs after it until the next restart, without a word.
+ */
+function scheduleRepeatables(): void {
+  addRepeatables().catch((error: unknown) => {
+    signale.error('[BACKGROUND-JOB] Could not schedule the repeatable jobs, trying again in 30 seconds:', error);
+    setTimeout(scheduleRepeatables, 30_000).unref();
+  });
+}
+
+async function addRepeatables(): Promise<void> {
   // Set up repeatable job for domain verification (BullMQ)
   // Run every 5 minutes to check domain verification status with AWS SES
   await domainVerificationQueue.add(
@@ -604,4 +704,71 @@ void prisma.$connect().then(async () => {
   );
 
   signale.info('[BACKGROUND-JOB] Snooze sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
-});
+
+  // Set up repeatable job for the email recovery sweep (BullMQ)
+  // Every 5 minutes: an email left PENDING without a job, or SENDING after its worker stopped,
+  // holds its campaign in SENDING until something settles it. A run with nothing stuck costs
+  // two indexed queries returning no rows; it never sends anything.
+  await emailRecoverySweepQueue.add(
+    'sweep-stuck-emails',
+    {},
+    {
+      repeat: {
+        pattern: '*/5 * * * *', // Every 5 minutes
+      },
+      jobId: 'email-recovery-sweep-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Email recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
+
+  // Plunk Lite: every 15 minutes, whether SES events reach the webhook. One grouped query over the
+  // emails of the last six hours, by the `createdAt` index; it only records and alerts. And one
+  // question to SQS: whether the dead-letter queue holds events SNS could not deliver, drained if so.
+  await plunkLiteChecksQueue.add(
+    'sns-health',
+    {},
+    {
+      repeat: {
+        pattern: '*/15 * * * *', // Every 15 minutes
+      },
+      jobId: 'sns-health-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] SES events check scheduled (BullMQ repeatable job, runs every 15 minutes)');
+
+  // Plunk Lite: every 15 minutes, how full Redis is against its maxmemory; once full it refuses
+  // every write, queued emails included
+  await plunkLiteChecksQueue.add(
+    'redis-memory',
+    {},
+    {
+      repeat: {
+        pattern: '*/15 * * * *', // Every 15 minutes
+      },
+      jobId: 'redis-memory-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Redis memory check scheduled (BullMQ repeatable job, runs every 15 minutes)');
+
+  // Plunk Lite: every 5 minutes, recover the workflow runs nothing would move on any more: fail the
+  // ones a restart left RUNNING, so they no longer keep their contacts out of the workflow, and end
+  // or fail the ones left WAITING past the end of their wait. Few kept, so they do not crowd out the
+  // other checks.
+  await plunkLiteChecksQueue.add(
+    'workflow-recovery',
+    {},
+    {
+      repeat: {
+        pattern: '*/5 * * * *', // Every 5 minutes
+      },
+      jobId: 'workflow-recovery-repeatable', // Fixed ID to prevent duplicates
+      attempts: 2,
+      removeOnComplete: 20,
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Workflow recovery sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
+}

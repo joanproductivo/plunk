@@ -1,15 +1,25 @@
-import type {Contact, Email, Project} from '@plunk/db';
-import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
+import type {Contact, Email, Project, TemplateType} from '@plunk/db';
+import {EmailSourceType, EmailStatus, Prisma, TrackingMode} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
-import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED} from '../app/constants.js';
+import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, TRACKING_TOGGLE_ENABLED} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
-import {createTranslatorSync, renderTemplate} from '@plunk/shared';
+import {
+  contactLanguage,
+  footerParagraph,
+  type ProjectFooters,
+  renderTemplate,
+  unsubscribeFooterHtml,
+} from '@plunk/shared';
+
+import {POOL_WAIT_TRANSACTION} from '../utils/database.js';
+import {renderBody} from '../utils/emailBody.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
-import {withSourceEmail} from './EmailHeaderService.js';
+import {RECIPIENT_OVERRIDE_HEADER, withSourceEmail} from './EmailHeaderService.js';
+import {ProjectService} from './ProjectService.js';
 import {QueueService} from './QueueService.js';
 
 interface Attachment {
@@ -21,6 +31,8 @@ interface Attachment {
 }
 
 interface SendEmailParams {
+  /** A fixed id for the row (campaign emails): creating it a second time returns the first */
+  id?: string;
   projectId: string;
   contactId: string;
   subject: string;
@@ -39,12 +51,59 @@ interface SendEmailParams {
   isTransactional?: boolean; // Override source type to TRANSACTIONAL (e.g. for transactional campaigns)
 }
 
+/** Decides, inside the transaction that creates an email, whether it may still be created */
+type CreateGuard = (tx: Prisma.TransactionClient) => Promise<boolean>;
+
+/**
+ * Part of the error of a failed email that SES may still have accepted: the connection failed
+ * after the request went out, or the worker stopped mid-send. Such an email is treated as sent
+ * wherever a cancelled campaign decides whether anything reached a recipient.
+ */
+export const POSSIBLY_SENT_NOTE = 'may have been sent';
+
+/** A create that collided with an existing row's primary key */
+function isIdConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = error.meta?.target;
+  return Array.isArray(target) ? target.includes('id') : String(target).endsWith('_pkey');
+}
+
 /**
  * Email Service
  * Builds and queues outbound email. The send itself is jobs/email-processor.ts, and the SES
  * events that follow it are handled by controllers/Webhooks.ts.
  */
 export class EmailService {
+  /**
+   * Whether an email may only go to a subscribed contact.
+   *
+   * Decided when the email is queued and again by the send path just before it leaves: a
+   * contact can unsubscribe, bounce or complain in between, and a large campaign takes an hour
+   * to drain at 14/s.
+   *
+   * - Campaign and workflow emails are marketing. A transactional template makes their source
+   *   type TRANSACTIONAL, as does a transactional campaign.
+   * - A transactional send with a MARKETING template is still marketing.
+   * - A workflow email to a custom recipient goes to an address outside the contact list.
+   */
+  public static requiresSubscribedContact(params: {
+    sourceType: EmailSourceType;
+    templateType?: TemplateType | null;
+    hasRecipientOverride: boolean;
+  }): boolean {
+    if (params.hasRecipientOverride) {
+      return false;
+    }
+
+    if (params.sourceType !== EmailSourceType.TRANSACTIONAL) {
+      return true;
+    }
+
+    return params.templateType === 'MARKETING';
+  }
+
   /**
    * Send a transactional email via API
    */
@@ -58,7 +117,13 @@ export class EmailService {
       });
 
       // If using a marketing template, check subscription status
-      if (template?.type === 'MARKETING') {
+      if (
+        this.requiresSubscribedContact({
+          sourceType: EmailSourceType.TRANSACTIONAL,
+          templateType: template?.type,
+          hasRecipientOverride: false,
+        })
+      ) {
         const contact = await prisma.contact.findUnique({
           where: {id: params.contactId},
           select: {subscribed: true, email: true},
@@ -113,9 +178,14 @@ export class EmailService {
   }
 
   /**
-   * Send a campaign email
+   * Send a campaign email.
+   *
+   * With a guard, the email is created in a transaction that runs the guard first, and nothing is
+   * created, counted or queued when the guard says no (null is returned).
    */
-  public static async sendCampaignEmail(params: SendEmailParams): Promise<Email> {
+  public static sendCampaignEmail(params: SendEmailParams): Promise<Email>;
+  public static sendCampaignEmail(params: SendEmailParams, guard: CreateGuard): Promise<Email | null>;
+  public static async sendCampaignEmail(params: SendEmailParams, guard?: CreateGuard): Promise<Email | null> {
     // Check if campaign or template is transactional to determine source type
     let sourceType: EmailSourceType = EmailSourceType.CAMPAIGN;
 
@@ -149,23 +219,50 @@ export class EmailService {
       signale.warn(`[BILLING_LIMIT] ${limitCheck.message}`);
     }
 
-    const email = await prisma.email.create({
-      data: {
-        projectId: params.projectId,
-        contactId: params.contactId,
-        subject: params.subject,
-        body: params.body,
-        from: params.from,
-        fromName: params.fromName,
-        replyTo: params.replyTo,
-        headers: params.headers ? toPrismaJson(params.headers) : undefined,
-        attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
-        sourceType,
-        templateId: params.templateId,
-        campaignId: params.campaignId,
-        status: EmailStatus.PENDING,
-      },
-    });
+    let email: Email | null;
+    try {
+      const create = (client: Prisma.TransactionClient) =>
+        client.email.create({
+          data: {
+            id: params.id,
+            projectId: params.projectId,
+            contactId: params.contactId,
+            subject: params.subject,
+            body: params.body,
+            from: params.from,
+            fromName: params.fromName,
+            replyTo: params.replyTo,
+            headers: params.headers ? toPrismaJson(params.headers) : undefined,
+            attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
+            sourceType,
+            templateId: params.templateId,
+            campaignId: params.campaignId,
+            status: EmailStatus.PENDING,
+          },
+        });
+
+      email = guard
+        ? await prisma.$transaction(async tx => ((await guard(tx)) ? create(tx) : null), POOL_WAIT_TRANSACTION)
+        : await create(prisma);
+    } catch (error) {
+      const existing =
+        params.id && isIdConflict(error) ? await prisma.email.findUnique({where: {id: params.id}}) : null;
+      if (!existing) {
+        throw error;
+      }
+
+      // An earlier run of the same batch created this email. It is not created or counted
+      // again; if it was never sent, it is queued again, because that run may have died
+      // before queueing it (the job id is the email's, so a job that exists is not doubled).
+      if (existing.status === EmailStatus.PENDING) {
+        await this.queueEmail(existing.id, existing.sourceType);
+      }
+      return existing;
+    }
+
+    if (!email) {
+      return null;
+    }
 
     // Increment usage counter in cache
     await BillingLimitService.incrementUsage(params.projectId, sourceType);
@@ -199,7 +296,7 @@ export class EmailService {
     // Check subscription status for marketing emails
     // Transactional emails should always be sent regardless of subscription status
     // Custom recipient emails also bypass subscription checks (they're not in the contact list)
-    if (sourceType !== EmailSourceType.TRANSACTIONAL && !params.recipientEmail) {
+    if (this.requiresSubscribedContact({sourceType, hasRecipientOverride: Boolean(params.recipientEmail)})) {
       const contact = await prisma.contact.findUnique({
         where: {id: params.contactId},
         select: {subscribed: true},
@@ -251,7 +348,7 @@ export class EmailService {
     // If custom recipient email is provided, store it in headers for later use
     const emailHeaders = params.headers ? {...params.headers} : {};
     if (params.recipientEmail) {
-      emailHeaders['X-Plunk-Recipient-Override'] = params.recipientEmail;
+      emailHeaders[RECIPIENT_OVERRIDE_HEADER] = params.recipientEmail;
     }
 
     const email = await prisma.email.create({
@@ -318,379 +415,30 @@ export class EmailService {
   }
 
   /**
-   * Detects if HTML contains custom patterns that indicate it was written in the HTML editor
-   * rather than the visual editor. Mirrors the same logic in apps/web/src/lib/emailStyles.ts.
-   *
-   * The TipTap editor loads StarterKit + TextAlign + Color + TextStyle + Link +
-   * ResizableImage + VariableMention. TextStyle/Color/Link round-trip <span style="..."> and
-   * <a style="..."> markup. This detection therefore PERMITS span + inline styles and only
-   * REJECTS markup TipTap cannot represent (tables, divs, forms, embeds, custom attrs,
-   * <style> blocks, etc).
+   * The outbound streams sent with open and click tracking under a tracking mode, so stats
+   * measure opens and clicks only against emails that could record them. Mirrors
+   * SESService: without a no-tracking configuration set every email goes out tracked.
    */
-  private static detectCustomHtmlPatterns(html: string): boolean {
-    if (!html || html.trim() === '') return false;
-
-    const classMatches = html.matchAll(/class\s*=\s*["']([^"']*)["']/gi);
-    let hasCustomClasses = false;
-    for (const match of classMatches) {
-      const classValue = match[1];
-      if (!classValue) continue;
-      const classes = classValue.split(/\s+/).filter((c: string) => c.length > 0);
-      const allowedPrefixes = ['prose', 'variable-', 'email-image', 'ProseMirror', 'resizable-image', 'selected', 'resize-handle'];
-      const hasDisallowedClass = classes.some((cls: string) => !allowedPrefixes.some((prefix: string) => cls.startsWith(prefix)));
-      if (hasDisallowedClass) {
-        hasCustomClasses = true;
-        break;
-      }
-    }
-
-    // Element-attribute-scoped regex; the leading [\s"'] guard prevents `id=` inside
-    // href URLs (e.g. `?id=...`) from false-matching as an HTML id attribute.
-    const hasCustomAttributes = /<[a-z][^>]*?[\s"'](?:data-|aria-|role=|id=)/i.test(html);
-
-    // Elements TipTap cannot round-trip with the currently-loaded extension set.
-    // <span> is intentionally excluded -- TipTap's TextStyle extension handles it.
-    const hasCustomElements =
-      /<(?:div|section|article|header|footer|nav|aside|main|table|tr|td|th|tbody|thead|tfoot|colgroup|col|form|input|button|select|textarea|iframe|video|audio|svg|object|embed|details|summary|dialog)\b/i.test(
-        html,
-      );
-
-    const hasMediaQueries = /@media/i.test(html);
-    const hasStyleTags = /<style[^>]*>/i.test(html);
-
-    return hasCustomClasses || hasCustomAttributes || hasCustomElements || hasMediaQueries || hasStyleTags;
+  public static trackedSourceTypes(
+    trackingMode: TrackingMode,
+    toggleEnabled: boolean = TRACKING_TOGGLE_ENABLED,
+  ): EmailSourceType[] {
+    const outbound = Object.values(EmailSourceType).filter(type => type !== EmailSourceType.INBOUND);
+    return toggleEnabled ? outbound.filter(type => this.shouldTrackEmail(trackingMode, type)) : outbound;
   }
 
   /**
-   * Wraps visual editor content with a full HTML document and prose styles.
-   * Mirrors wrapEmailWithStyles() in apps/web/src/lib/emailStyles.ts so sent emails
-   * match the preview modal exactly.
+   * The tracked streams of a project under its current tracking mode. A project that cannot
+   * be found or read counts as tracking everything, the default mode, so stats still load.
    */
-  private static wrapWithEmailStyles(htmlBody: string): string {
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    /* Base reset */
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: 16px;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      line-height: 1.5;
-      color: #111827;
+  public static async trackedStreams(projectId: string): Promise<EmailSourceType[]> {
+    try {
+      const project = await ProjectService.id(projectId);
+      return this.trackedSourceTypes(project?.tracking ?? TrackingMode.ENABLED);
+    } catch (error) {
+      signale.warn('[EMAIL] Failed to read the tracking mode, measuring stats as if everything is tracked:', error);
+      return this.trackedSourceTypes(TrackingMode.ENABLED);
     }
-
-    /* Tailwind Typography (prose) base styles */
-    .prose {
-      color: #374151;
-      max-width: 600px;
-    }
-    .prose [class~="lead"] {
-      color: #4b5563;
-      font-size: 1.25em;
-      line-height: 1.6;
-      margin-top: 1.2em;
-      margin-bottom: 1.2em;
-    }
-    .prose a {
-      color: #3b82f6;
-      text-decoration: underline;
-      font-weight: 500;
-    }
-    .prose strong {
-      color: #111827;
-      font-weight: 600;
-    }
-    .prose ol, .prose ul {
-      margin-top: 1.25em;
-      margin-bottom: 1.25em;
-      padding-left: 1.625em;
-    }
-    .prose li {
-      margin-top: 0.5em;
-      margin-bottom: 0.5em;
-    }
-    .prose ol > li {
-      padding-left: 0.375em;
-    }
-    .prose ul > li {
-      padding-left: 0.375em;
-    }
-    .prose > ul > li p {
-      margin-top: 0.75em;
-      margin-bottom: 0.75em;
-    }
-    .prose > ul > li > *:first-child {
-      margin-top: 1.25em;
-    }
-    .prose > ul > li > *:last-child {
-      margin-bottom: 1.25em;
-    }
-    .prose > ol > li > *:first-child {
-      margin-top: 1.25em;
-    }
-    .prose > ol > li > *:last-child {
-      margin-bottom: 1.25em;
-    }
-    .prose ul ul, .prose ul ol, .prose ol ul, .prose ol ol {
-      margin-top: 0.75em;
-      margin-bottom: 0.75em;
-    }
-    .prose hr {
-      border: none;
-      border-top: 1px solid #e5e7eb;
-      margin-top: 3em;
-      margin-bottom: 3em;
-    }
-    .prose blockquote {
-      font-weight: 500;
-      font-style: italic;
-      color: #111827;
-      border-left-width: 0.25rem;
-      border-left-color: #e5e7eb;
-      quotes: "\\201C""\\201D""\\2018""\\2019";
-      margin-top: 1.6em;
-      margin-bottom: 1.6em;
-      padding-left: 1em;
-    }
-    .prose h1 {
-      color: #111827;
-      font-weight: 800;
-      font-size: 2.25em;
-      margin-top: 0;
-      margin-bottom: 0.8888889em;
-      line-height: 1.1111111;
-    }
-    .prose h2 {
-      color: #111827;
-      font-weight: 700;
-      font-size: 1.5em;
-      margin-top: 2em;
-      margin-bottom: 1em;
-      line-height: 1.3333333;
-    }
-    .prose h3 {
-      color: #111827;
-      font-weight: 600;
-      font-size: 1.25em;
-      margin-top: 1.6em;
-      margin-bottom: 0.6em;
-      line-height: 1.6;
-    }
-    .prose h4 {
-      color: #111827;
-      font-weight: 600;
-      margin-top: 1.5em;
-      margin-bottom: 0.5em;
-      line-height: 1.5;
-    }
-    .prose img {
-      margin-top: 2em;
-      margin-bottom: 2em;
-    }
-    .prose figure {
-      margin-top: 2em;
-      margin-bottom: 2em;
-    }
-    .prose figure > * {
-      margin-top: 0;
-      margin-bottom: 0;
-    }
-    .prose code {
-      color: #111827;
-      font-weight: 600;
-      font-size: 0.875em;
-    }
-    .prose code::before {
-      content: "\`";
-    }
-    .prose code::after {
-      content: "\`";
-    }
-    .prose pre {
-      color: #e5e7eb;
-      background-color: #1f2937;
-      overflow-x: auto;
-      font-size: 0.875em;
-      line-height: 1.7142857;
-      margin-top: 1.7142857em;
-      margin-bottom: 1.7142857em;
-      border-radius: 0.375rem;
-      padding-top: 0.8571429em;
-      padding-right: 1.1428571em;
-      padding-bottom: 0.8571429em;
-      padding-left: 1.1428571em;
-    }
-    .prose pre code {
-      background-color: transparent;
-      border-width: 0;
-      border-radius: 0;
-      padding: 0;
-      font-weight: 400;
-      color: inherit;
-      font-size: inherit;
-      font-family: inherit;
-      line-height: inherit;
-    }
-    .prose pre code::before {
-      content: none;
-    }
-    .prose pre code::after {
-      content: none;
-    }
-    .prose table {
-      width: 100%;
-      table-layout: auto;
-      text-align: left;
-      margin-top: 2em;
-      margin-bottom: 2em;
-      font-size: 0.875em;
-      line-height: 1.7142857;
-      border-collapse: collapse;
-    }
-    .prose thead {
-      border-bottom-width: 1px;
-      border-bottom-color: #d1d5db;
-    }
-    .prose thead th {
-      color: #111827;
-      font-weight: 600;
-      vertical-align: bottom;
-      padding-right: 0.5714286em;
-      padding-bottom: 0.5714286em;
-      padding-left: 0.5714286em;
-    }
-    .prose tbody tr {
-      border-bottom-width: 1px;
-      border-bottom-color: #e5e7eb;
-    }
-    .prose tbody tr:last-child {
-      border-bottom-width: 0;
-    }
-    .prose tbody td {
-      vertical-align: top;
-      padding-top: 0.5714286em;
-      padding-right: 0.5714286em;
-      padding-bottom: 0.5714286em;
-      padding-left: 0.5714286em;
-    }
-    .prose p {
-      margin-top: 1.25em;
-      margin-bottom: 1.25em;
-    }
-
-    /* prose-sm modifier */
-    .prose-sm {
-      font-size: 0.875rem;
-      line-height: 1.7142857;
-    }
-    .prose-sm p {
-      margin-top: 1.1428571em;
-      margin-bottom: 1.1428571em;
-    }
-    .prose-sm h1 {
-      font-size: 2.1428571em;
-      margin-top: 0;
-      margin-bottom: 0.8em;
-      line-height: 1.2;
-    }
-    .prose-sm h2 {
-      font-size: 1.4285714em;
-      margin-top: 1.6em;
-      margin-bottom: 0.8em;
-      line-height: 1.4;
-    }
-    .prose-sm h3 {
-      font-size: 1.2857143em;
-      margin-top: 1.5555556em;
-      margin-bottom: 0.4444444em;
-      line-height: 1.5555556;
-    }
-    .prose-sm h4 {
-      margin-top: 1.4285714em;
-      margin-bottom: 0.5714286em;
-      line-height: 1.4285714;
-    }
-    .prose-sm img {
-      margin-top: 1.7142857em;
-      margin-bottom: 1.7142857em;
-    }
-    .prose-sm ol, .prose-sm ul {
-      margin-top: 1.1428571em;
-      margin-bottom: 1.1428571em;
-      padding-left: 1.5714286em;
-    }
-    .prose-sm li {
-      margin-top: 0.2857143em;
-      margin-bottom: 0.2857143em;
-    }
-
-    /* max-w-none utility */
-    .max-w-none {
-      max-width: none;
-    }
-
-    /* Custom editor styles */
-    .variable-highlight, .variable-placeholder, .variable-mention {
-      background-color: #dbeafe;
-      color: #1e40af;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-family: 'Courier New', monospace;
-      font-size: 14px;
-      display: inline;
-    }
-
-    .prose table {
-      border-collapse: collapse;
-      width: 100%;
-      margin: 16px 0;
-    }
-
-    .prose th, .prose td {
-      border: 1px solid #e5e7eb;
-      padding: 8px 12px;
-      text-align: left;
-      min-width: 100px;
-    }
-
-    .prose th {
-      background-color: #f3f4f6;
-      font-weight: 600;
-    }
-
-    .prose img {
-      max-width: 100%;
-      height: auto;
-      display: block;
-      margin: 16px 0;
-    }
-
-    .prose .resizable-image-wrapper {
-      display: block;
-      margin: 16px 0;
-    }
-
-    .prose .resizable-image-container {
-      display: inline-block;
-      position: relative;
-      max-width: 100%;
-    }
-
-    .prose .resizable-image-container img {
-      margin: 0;
-    }
-  </style>
-</head>
-<body>
-  <div class="prose prose-sm max-w-none">
-    ${htmlBody}
-  </div>
-</body>
-</html>`;
   }
 
   /**
@@ -703,53 +451,31 @@ export class EmailService {
     project,
     includeUnsubscribe = true,
     sourceEmailId,
+    footers,
   }: {
     content: string;
     contact: Contact;
     project: Project;
     includeUnsubscribe?: boolean;
+    /** The project's own footers by language (ProjectFooterService); Plunk's for the rest. */
+    footers?: ProjectFooters;
     /**
      * Id of the email this footer is being rendered into, so an opt-out from the
      * footer link can be attributed to it. See {@link withSourceEmail}.
      */
     sourceEmailId?: string;
   }): string {
-    // Wrap visual editor content with prose styles so the sent email matches the preview modal.
-    // Custom HTML (from the HTML editor) already carries its own styles and is used as-is.
-    let html = this.detectCustomHtmlPatterns(content) ? content : this.wrapWithEmailStyles(content);
-
     const unsubscribeHtml = includeUnsubscribe
       ? (() => {
-          // Get contact-level locale (overrides project language)
-          const contactLocale =
-            contact.data &&
-            typeof contact.data === 'object' &&
-            !Array.isArray(contact.data) &&
-            'locale' in contact.data &&
-            typeof contact.data.locale === 'string'
-              ? contact.data.locale
-              : null;
-
-          // Get translator for contact's locale or project's language
-          const translator = createTranslatorSync(contactLocale || project.language || 'en');
-          const unsubscribeText = translator.t('email.footer.unsubscribeText', {
-            projectName: project.name,
-          });
-          const updatePreferencesText = translator.t('email.footer.updatePreferences');
-
-          return `<table align="center" width="100%" style="max-width: 480px; width: 100%; margin-left: auto; margin-right: auto; font-family: Inter, ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'; border: 0; cellpadding: 0; cellspacing: 0;" role="presentation">
-          <tbody>
-            <tr>
-              <td>
-                <hr style="border: none; border-top: 1px solid #eaeaea; width: 100%; margin-top: 12px; margin-bottom: 12px;">
-                <p style="font-size: 12px; line-height: 24px; margin: 16px 0; text-align: center; color: rgb(64, 64, 64);">
-                  ${unsubscribeText}
-                  <a href="${withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId)}">${updatePreferencesText}</a>.
-                </p>
-              </td>
-            </tr>
-          </tbody>
-        </table>`;
+          // The contact's language (their locale, else the project's), with its own footer or Plunk's
+          return unsubscribeFooterHtml(
+            footerParagraph({
+              language: contactLanguage(contact.data, project.language),
+              projectName: project.name,
+              href: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId),
+              footers,
+            }),
+          );
         })()
       : '';
 
@@ -787,17 +513,8 @@ export class EmailService {
         </table>`
         : '';
 
-    // Combine footer and badge
-    const footerHtml = `${unsubscribeHtml}${badgeHtml}`;
-
-    // Insert before closing body tag if it exists, otherwise append
-    if (html.includes('</body>')) {
-      html = html.replace('</body>', `${footerHtml}</body>`);
-    } else {
-      html = `${html}${footerHtml}`;
-    }
-
-    return html;
+    // The footer and badge go at the end of the email, on its background if it has one
+    return renderBody(content, sourceEmailId, `${unsubscribeHtml}${badgeHtml}`);
   }
 
   /**

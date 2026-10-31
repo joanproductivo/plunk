@@ -13,6 +13,7 @@ import {DomainUnverifiedEmail, DomainVerifiedEmail, sendPlatformEmail} from '@pl
 import {DASHBOARD_URI, LANDING_URI} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
+import {FailureAlertService} from '../services/FailureAlertService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {disableFeedbackForwarding, getIdentities, verifyDomain} from '../services/SESService.js';
 import {Keys} from '../services/keys.js';
@@ -156,6 +157,12 @@ export async function checkDomainVerifications() {
         // If domain was unverified, invalidate cache
         if (dbDomain.verified && !isVerified) {
           signale.warn(`[DOMAIN-VERIFICATION] Domain ${sesIdentity.domain} is no longer verified`);
+
+          await FailureAlertService.recordDomainUnverified(
+            dbDomain.projectId,
+            {id: dbDomain.id, domain: sesIdentity.domain},
+            sesIdentity.status,
+          );
 
           // Send email notification about domain verification failed
           try {

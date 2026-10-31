@@ -6,6 +6,7 @@ import {DASHBOARD_URI, LANDING_URI} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {redis, wrapRedis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
@@ -173,6 +174,8 @@ export class DomainService {
           },
         },
       });
+
+      await FailureAlertService.recordDomainUnverified(updatedDomain.project.id, domain, attributes.status);
 
       // Send notification about domain verification failed
       await NtfyService.notifyDomainVerificationFailed(

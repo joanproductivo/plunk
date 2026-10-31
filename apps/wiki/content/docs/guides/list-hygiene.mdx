@@ -8,7 +8,9 @@ Plunk automatically monitors the bounce and complaint rates of your emails to he
 
 ## Bounce Management
 
-A bounce occurs when an email cannot be delivered to the recipient's inbox. Plunk records every bounce as an `email.bounce` event on the contact, and automatically unsubscribes the contact **only on permanent (hard) bounces**. Transient (soft) bounces don't change subscription state — they're typically retried by the upstream mail server.
+A bounce occurs when an email cannot be delivered to the recipient's inbox. Plunk records permanent and undetermined bounces as an `email.bounce` event on the contact, and soft ones as `email.softbounce`, and automatically unsubscribes the contact on **permanent (hard) and undetermined bounces**. Transient (soft) bounces don't change subscription state — they're typically retried by the upstream mail server.
+
+A bounce only unsubscribes the contact, and is only tracked as theirs, when the address that bounced is the contact's own: a workflow email sent to a custom recipient that bounces leaves the contact subscribed.
 
 ### Types of Bounces
 
@@ -16,9 +18,11 @@ A bounce occurs when an email cannot be delivered to the recipient's inbox. Plun
 |------|-------------|---------------------|
 | **Permanent (hard)** | Permanent delivery failure — invalid address, blocked domain, recipient rejected. | Yes |
 | **Transient (soft)** | Temporary delivery failure — mailbox full, server unavailable, greylisted. | No |
-| **Undetermined** | The upstream provider couldn't classify the bounce. | No |
+| **Undetermined** | The upstream provider couldn't classify the bounce. Treated as permanent to be safe. | Yes |
 
-Both bounce types fire an `email.bounce` event you can branch on inside workflows or webhooks (use the event payload's `bounceType` field to distinguish them).
+A bounce with the subtype `OnAccountSuppressionList` is for an address AWS SES already blocks because it bounced or complained before: SES never attempts it. The contact is unsubscribed, but the bounce does not count toward your bounce rate, as SES does not count it either.
+
+Permanent and undetermined bounces fire an `email.bounce` event, and soft ones an `email.softbounce` event, that you can branch on inside workflows or webhooks (the payload's `bounceType` field says which kind it was).
 
 ### Preventing bounces
 

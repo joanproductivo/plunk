@@ -21,9 +21,9 @@ export interface PlunkMcpConfig {
    */
   apiKey?: string;
   /**
-   * Public key (`pk_*`), optional. `POST /v1/track` is the one endpoint that
-   * requires a public key, so without this `plunk_track_event` has to resolve
-   * the contact first and go through `POST /events/track` instead.
+   * Public key (`pk_*`), optional. With it `plunk_track_event` calls
+   * `POST /v1/track` in one request; without it, it resolves the contact first
+   * and goes through `POST /events/track`.
    */
   publicKey?: string;
   /** Base URL of the Plunk API. Self-hosters point this at their own API domain. */

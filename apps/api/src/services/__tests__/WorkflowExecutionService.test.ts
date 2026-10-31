@@ -29,6 +29,11 @@ describe('WorkflowExecutionService', () => {
 
       const contact = await factories.createContact({projectId});
       const execution = await factories.createWorkflowExecution(workflow.id, contact.id);
+      // Plunk Lite: a run waits together with its wait step, on that step
+      await prisma.workflowExecution.update({
+        where: {id: execution.id},
+        data: {status: WorkflowExecutionStatus.WAITING, currentStepId: steps[0].id},
+      });
 
       // Create step execution in WAITING state
       const stepExecution = await prisma.workflowStepExecution.create({

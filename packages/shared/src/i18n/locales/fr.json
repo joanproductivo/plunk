@@ -17,7 +17,19 @@
       "button": "S’abonner",
       "buttonLoading": "Abonnement en cours...",
       "successTitle": "Vous êtes abonné !",
-      "successDescription": "{email} recevra désormais les e-mails de {projectName}."
+      "successDescription": "{email} recevra désormais les e-mails de {projectName}.",
+      "pendingTitle": "Consultez votre boîte de réception",
+      "pendingDescription": "Nous avons envoyé un e-mail à {email}. Cliquez sur le lien qu’il contient pour confirmer votre abonnement à {projectName}."
+    },
+    "confirm": {
+      "title": "Confirmez votre abonnement",
+      "description": "Confirmez que vous souhaitez recevoir les e-mails de {projectName} à {email}.",
+      "button": "Confirmer l'abonnement",
+      "buttonLoading": "Confirmation...",
+      "successTitle": "Vous êtes abonné !",
+      "successDescription": "{email} recevra désormais les e-mails de {projectName}.",
+      "invalidTitle": "Ce lien ne fonctionne plus",
+      "invalidDescription": "Il a été remplacé par un e-mail plus récent, ou l'adresse a changé. Inscrivez-vous à nouveau pour recevoir un nouveau lien."
     },
     "manage": {
       "title": "Gérer les préférences",
@@ -50,6 +62,7 @@
       "error": "Erreur",
       "loadFailed": "Impossible de charger vos préférences e-mail. Vérifiez le lien et réessayez.",
       "actionFailed": "Une erreur s'est produite. Veuillez réessayer.",
+      "resubscribeNeedsEmail": "Cette adresse ne peut pas être réabonnée d'ici. Utilisez le lien d'un e-mail que vous avez reçu de notre part.",
       "sentWith": "Envoyé avec {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Vous recevez cet e-mail parce que vous avez accepté de recevoir des e-mails de la part de {projectName}. Si vous ne souhaitez plus recevoir d’e-mails de ce type, veuillez",
       "updatePreferences": "mettre à jour vos préférences"
+    },
+    "optin": {
+      "subject": "Confirmez votre abonnement à {projectName}",
+      "text": "Merci de vous être inscrit aux e-mails de {projectName}.\n\nPour commencer à les recevoir, confirmez que cette adresse est bien la vôtre :",
+      "button": "Confirmer mon abonnement",
+      "ignore": "Si vous ne vous êtes pas inscrit, ignorez cet e-mail : vous ne serez pas abonné."
     }
   }
 }

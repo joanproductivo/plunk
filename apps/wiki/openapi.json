@@ -26,7 +26,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "API Key",
-        "description": "API Key authentication. The project is automatically derived from the key.\n\n**`/v1/track` requires a public key (`pk_*`)** — it is the one endpoint intended for client-side use, and a secret key is rejected there with `401`.\n\n**Every other endpoint requires a secret key (`sk_*`)** and rejects public keys with `401`.\n\nSo the two key types are not interchangeable in either direction: pick the key that matches the endpoint you are calling."
+        "description": "API Key authentication. The project is automatically derived from the key.\n\n**`/v1/track` takes a public key (`pk_*`)** — it is the one endpoint intended for client-side use — **or a secret key (`sk_*`)**, from a server. A self-hosted server can switch the public key off (`PLUNK_LITE_PUBLIC_TRACK=off`): it is then refused with `403`, and the secret key keeps working.\n\n**Every other endpoint requires a secret key (`sk_*`)** and rejects public keys with `401`."
       }
     },
     "schemas": {
@@ -595,7 +595,7 @@
       "post": {
         "tags": ["Public API"],
         "summary": "Send transactional email",
-        "description": "Send a transactional email via the public API. Automatically creates or updates the recipient contact.\n\n**Required content:** either a `template` ID, **or** both `subject` and `body`. Template fields can be overridden by explicit request fields.\n\n**Sender:** `from` is required unless using a template that already has a `from` configured. The sender's domain must be verified.\n\n**Multiple recipients:** when `to` is an array, each recipient is processed sequentially with its own contact upsert and rendered email — there is no batch-send semantics. Sending is always immediate; for scheduled sends, use a Campaign.\n\n**Attachments:** up to 10 attachments per email and 10 MB total by default. The total message size cannot exceed 40 MB.\n\n**Message format:** `body` is your HTML. Plunk generates a plain text alternative from it and sends both, which avoids the spam penalties that apply to HTML-only mail. There is no plain text field to set.",
+        "description": "Send a transactional email via the public API. Automatically creates or updates the recipient contact.\n\n**Required content:** either a `template` ID, **or** both `subject` and `body`. Template fields can be overridden by explicit request fields.\n\n**Sender:** `from` is required unless using a template that already has a `from` configured. The sender's domain must be verified.\n\n**Multiple recipients:** `to` takes 1 to 50 recipients. Each is processed in turn with its own contact upsert and rendered email — there is no batch-send semantics. A recipient that is refused (a client error) does not stop the others: the answer is `207` with `data.failed` listing `{email, code, message, suggestedEmail?}` for those not sent. An unexpected error stops the ones after it, which are listed with `NOT_ATTEMPTED`. A request that sent nothing answers with the error. A `207` keeps its `Idempotency-Key`, so retrying it gives `409` and never sends the others twice. Sending is always immediate; for scheduled sends, use a Campaign.\n\n**New recipients:** a recipient that is not a contact yet is refused with `422 INVALID_EMAIL` when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`); `error.details` has `reasons` and any `suggestedEmail`. No contact is created for it.\n\n**Attachments:** up to 10 attachments per email and 10 MB total by default. A request can be at most 10 MB, so attachments, which travel base64-encoded, can add up to about 7 MB.\n\n**Message format:** `body` is your HTML. Plunk generates a plain text alternative from it and sends both, which avoids the spam penalties that apply to HTML-only mail. There is no plain text field to set.",
         "operationId": "sendEmail",
         "requestBody": {
           "required": true,
@@ -653,6 +653,8 @@
                             }
                           ]
                         },
+                        "minItems": 1,
+                        "maxItems": 50,
                         "description": "Array of recipients (strings or objects)"
                       }
                     ],
@@ -704,9 +706,18 @@
                     "type": "string",
                     "description": "**Deprecated.** Sender display name. Prefer `from: { name, email }`. Used only as a fallback when `from` is a string and no name is set there."
                   },
+                  "segments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "maxItems": 20,
+                    "description": "Static segments to add each recipient that is sent to, by id (up to 20). Checked before anything is sent: an id that is not a static segment of the project answers `422`. A recipient whose email is refused is not added. Adding a current member counts as a new entry: with **Track membership changes** on, the segment's `entry` event fires again. If adding fails after the emails were queued, the answer carries `segmentsError` instead of an error, so a retry does not send them again."
+                  },
                   "subscribed": {
                     "type": "boolean",
-                    "description": "Subscription state to apply to the recipient. For **new** contacts, defaults to `false` on `/v1/send`. For **existing** contacts, omitting this preserves their current state — pass `true` or `false` to explicitly change it. A change emits `contact.subscribed` or `contact.unsubscribed`."
+                    "description": "Subscription state to apply to the recipient. For **new** contacts, defaults to `false` on `/v1/send`. For **existing** contacts, omitting this preserves their current state — pass `true` or `false` to explicitly change it. A change emits `contact.subscribed` or `contact.unsubscribed`. With the [double opt-in](/concepts/double-opt-in) on (Plunk Lite), `true` on a recipient not yet subscribed sends a confirmation email and subscribes them when they confirm; a marketing template is then refused with `422` `OPT_IN_NEEDS_TRANSACTIONAL`, before anything is written."
                   },
                   "data": {
                     "type": "object",
@@ -727,7 +738,7 @@
                   },
                   "attachments": {
                     "type": "array",
-                    "description": "Email attachments. Default cap: 10 attachments and 10 MB total. The full message size cannot exceed 40 MB.",
+                    "description": "Email attachments. Default cap: 10 attachments and 10 MB total. A request can be at most 10 MB, about 7 MB of attachments.",
                     "maxItems": 10,
                     "items": {
                       "type": "object",
@@ -909,6 +920,10 @@
                         "timestamp": {
                           "type": "string",
                           "format": "date-time"
+                        },
+                        "segmentsError": {
+                          "type": "string",
+                          "description": "Plunk Lite, only with `segments`: the emails were queued, but adding their contacts to some of the segments failed. Do not retry the send; add the contacts to the segments another way."
                         }
                       }
                     }
@@ -924,6 +939,36 @@
                           "email": "user@example.com"
                         },
                         "email": "ac32f08e-c6b9-45d3-9824-a73dff1e3bbf"
+                      }
+                    ],
+                    "timestamp": "2025-01-15T10:30:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Sent to some recipients; `data.failed` lists the others. As with `200`, `data.segmentsError` says when adding the recipients sent to to `segments` failed.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "success": true,
+                  "data": {
+                    "emails": [
+                      {
+                        "contact": {
+                          "id": "cnt_abc123",
+                          "email": "user@example.com"
+                        },
+                        "email": "ac32f08e-c6b9-45d3-9824-a73dff1e3bbf"
+                      }
+                    ],
+                    "failed": [
+                      {
+                        "email": "ana@gmial.com",
+                        "code": "INVALID_EMAIL",
+                        "message": "This address cannot receive email: Looks like a typo of gmail.com. Did you mean the suggested address?",
+                        "suggestedEmail": "ana@gmail.com"
                       }
                     ],
                     "timestamp": "2025-01-15T10:30:00.000Z"
@@ -983,7 +1028,7 @@
       "post": {
         "tags": ["Public API"],
         "summary": "Track event",
-        "description": "Track an event for a contact. Automatically creates or upserts the contact, then records the event. Tracked events can be used as workflow triggers, segment filters, and audience filters.\n\n**Reserved event names** (rejected with `VALIDATION_ERROR` and code `reserved_event`): anything matching `email.*`, `contact.subscribed`, `contact.unsubscribed`, `segment.<slug>.entry`, `segment.<slug>.exit`. These are emitted by Plunk itself.\n\n**Idempotency**: re-tracking the same event creates a new event record. Send an `Idempotency-Key` header to have a repeated request refused with `409` instead.",
+        "description": "Track an event for a contact. Automatically creates or upserts the contact, then records the event. Tracked events can be used as workflow triggers, segment filters, and audience filters.\n\n**Reserved event names** (rejected with `VALIDATION_ERROR` and code `reserved_event`): anything matching `email.*`, `contact.subscribed`, `contact.unsubscribed`, `segment.<slug>.entry`, `segment.<slug>.exit`. These are emitted by Plunk itself.\n\n**New contacts:** an address that is not a contact yet is refused with `422 INVALID_EMAIL` when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`); `error.details` has `reasons` and any `suggestedEmail`, and the event is not recorded.\n\n**Idempotency**: re-tracking the same event creates a new event record. Send an `Idempotency-Key` header to have a repeated request refused with `409` instead. Keys are shared by the whole project, whichever key sent them: with the secret key, use a random one, since the public key could take a predictable one first.\n\n**Keys:** the public key (`pk_*`) from a browser, or the secret key (`sk_*`) from a server, which creates or updates the contact and records the event in one call.",
         "operationId": "trackEvent",
         "requestBody": {
           "required": true,
@@ -1002,9 +1047,18 @@
                     "type": "string",
                     "description": "Event name. Cannot match the reserved patterns above."
                   },
+                  "segments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "maxItems": 20,
+                    "description": "Static segments to add the contact to, by id (up to 20). **Secret key only**: with the public key the request is refused with `403`. Checked before anything is written: an id that is not a static segment of the project answers `422`. The contact joins them before the event is recorded, so the workflows the event starts see it in them; their `entry` events (with **Track membership changes** on) fire after it. Adding a current member counts as a new entry, so repeating the call fires the entry again — send an `Idempotency-Key` to refuse a repeat."
+                  },
                   "subscribed": {
                     "type": "boolean",
-                    "description": "Subscription state to apply to the contact. **New** contacts default to subscribed (`true`). **Existing** contacts keep their current state unless you pass an explicit value here. Pass `false` to track an event without resubscribing an unsubscribed contact."
+                    "description": "Subscription state to apply to the contact. **New** contacts default to subscribed (`true`). **Existing** contacts keep their current state unless you pass an explicit value here. Pass `false` to track an event without resubscribing an unsubscribed contact. With the [double opt-in](/concepts/double-opt-in) on (Plunk Lite), a sign-up (a new contact, or `true` on an unsubscribed one) waits for the contact to confirm instead: see `pendingConfirmation` in the response."
                   },
                   "data": {
                     "type": "object",
@@ -1049,6 +1103,15 @@
                         "timestamp": {
                           "type": "string",
                           "format": "date-time"
+                        },
+                        "pendingConfirmation": {
+                          "type": "boolean",
+                          "description": "Plunk Lite, only when the double opt-in held the sign-up back: `true` when the contact waits to confirm, `false` when no confirmation email is sent for this key (the public key)."
+                        },
+                        "optIn": {
+                          "type": "string",
+                          "enum": ["sent", "throttled", "capped", "failed", "held"],
+                          "description": "Plunk Lite, with `pendingConfirmation`: what became of the confirmation email."
                         }
                       }
                     }
@@ -1059,6 +1122,16 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The public key is switched off on this server (`PLUNK_LITE_PUBLIC_TRACK=off`), or was sent with `segments`: call it from a server with the secret key. Or the project is disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "409": {
             "$ref": "#/components/responses/IdempotencyConflict"
@@ -1309,6 +1382,15 @@
             "description": "Filter by subscription state. Omit to return both subscribed and unsubscribed contacts."
           },
           {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["subscribed", "snoozed", "unsubscribed", "pending"]
+            },
+            "description": "Filter by status; wins over `subscribed`. `pending` (Plunk Lite) lists the contacts waiting to confirm a sign-up of the double opt-in, who are also `unsubscribed`. Every row carries `pendingConfirmation`."
+          },
+          {
             "name": "sort",
             "in": "query",
             "schema": {
@@ -1418,6 +1500,10 @@
                             },
                             "isUpdate": {
                               "type": "boolean"
+                            },
+                            "pendingConfirmation": {
+                              "type": "boolean",
+                              "description": "Plunk Lite: the double opt-in held the sign-up back; `true` when the contact waits to confirm."
                             }
                           }
                         }
@@ -1448,6 +1534,10 @@
                             },
                             "isUpdate": {
                               "type": "boolean"
+                            },
+                            "pendingConfirmation": {
+                              "type": "boolean",
+                              "description": "Plunk Lite: the double opt-in held the sign-up back; `true` when the contact waits to confirm."
                             }
                           }
                         }
@@ -2043,6 +2133,64 @@
         }
       }
     },
+    "/campaigns/{id}/audience": {
+      "get": {
+        "tags": [
+          "Campaigns"
+        ],
+        "summary": "Unsubscribed recipients of a send (Plunk Lite)",
+        "description": "How many unsubscribed contacts a send of the campaign would reach now. Only a `TRANSACTIONAL` campaign reaches them; for any other type this is `0`. Addresses suppressed after a bounce or a complaint are counted, though the send skips them.",
+        "operationId": "getCampaignAudience",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "unsubscribed": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "data": {
+                    "unsubscribed": 12
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/campaigns/{id}/send": {
       "post": {
         "tags": ["Campaigns"],
@@ -2123,7 +2271,7 @@
             }
           },
           "400": {
-            "description": "Unparseable `scheduledFor`, or the campaign is not in a sendable state.",
+            "description": "Unparseable `scheduledFor`, the campaign is not in a sendable state, or (Plunk Lite) an immediate send would not fit in what is left of the SES 24-hour quota, keeping 5 % of it for transactional and workflow emails, counting what the campaigns still sending have left. The message gives the figures. A scheduled send is checked when its time comes: if it does not fit then, it stays scheduled and an alert says so.",
             "content": {
               "application/json": {
                 "schema": {

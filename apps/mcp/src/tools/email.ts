@@ -7,6 +7,14 @@ import {jsonResult, register, requireConfirmation, runTool, type ToolContext} fr
 /** Above this many recipients a single send is treated as a bulk action. */
 const BULK_RECIPIENT_THRESHOLD = 1;
 
+/** Plunk Lite: a recipient of a partial send that was not sent */
+interface FailedRecipient {
+  email: string;
+  code: string;
+  message: string;
+  suggestedEmail?: string;
+}
+
 const recipient = z.union([
   z.string().describe('Email address'),
   z.object({
@@ -46,6 +54,24 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
         'on a verified domain unless the template already sets one.',
         '',
         '**This cannot be undone once sent.** Sending to multiple recipients asks for confirmation first.',
+        'Up to 50 recipients. With several, one that is refused does not stop the others, though an unexpected',
+        'error stops the ones after it: the result says which were not sent and why. Do not resend to the ones',
+        'that went out.',
+        '',
+        '**New recipients:** an address whose domain does not exist, takes no email, is disposable or is a slip of',
+        "a large provider's (gmial.com) is refused with INVALID_EMAIL (with any suggested correction), and no",
+        'contact is created for it.',
+        '',
+        "**Suppressed addresses:** an address on the project's suppression list (it bounced permanently",
+        'or reported spam) is never emailed, transactional email included. The send is still accepted and',
+        'returns an email record, but that email is dropped before it goes out, marked failed with',
+        '"Address is suppressed after a bounce" (or "complaint"). `subscribed: true` does not subscribe it',
+        'either. Do not resend: `plunk_get_contact` shows the `suppression`, and only the Plunk dashboard',
+        "can lift it, from the contact's page.",
+        '',
+        '**Double opt-in (Plunk Lite):** with it on, `subscribed: true` does not subscribe a recipient who is not',
+        'yet: they also get a confirmation email, and join the `segments` when they confirm. A marketing template',
+        'with `subscribed: true` is refused with 422 OPT_IN_NEEDS_TRANSACTIONAL.',
         '',
         '**Key trigger phrases:** "send an email", "email this to", "notify", "send them a message"',
       ].join('\n'),
@@ -111,11 +137,23 @@ export function registerEmailTools(ctx: ToolContext, client: PlunkClient): void 
           }
         }
 
-        const result = await client.request({
+        const result = await client.request<{data?: {emails?: unknown[]; failed?: FailedRecipient[]}}>({
           method: 'POST',
           path: '/v1/send',
           body: {to, subject, body, template, from, reply, data, subscribed},
         });
+
+        // Plunk Lite: a partial send (207) lists the recipients that were not sent
+        const failed = result?.data?.failed ?? [];
+        if (failed.length > 0) {
+          const sent = result?.data?.emails?.length ?? 0;
+          const notSent = failed
+            .map(
+              f => `${f.email} (${f.code}: ${f.message}${f.suggestedEmail ? ` Suggested: ${f.suggestedEmail}` : ''})`,
+            )
+            .join('; ');
+          return jsonResult(`Sent to ${sent} of ${recipients.length} recipient(s). Not sent: ${notSent}`, result);
+        }
 
         return jsonResult(`Sent to ${recipients.length} recipient(s).`, result);
       }),

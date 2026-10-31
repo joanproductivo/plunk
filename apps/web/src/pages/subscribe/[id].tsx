@@ -1,5 +1,5 @@
 import {Button, IconSpinner} from '@plunk/ui';
-import {Check} from 'lucide-react';
+import {Check, MailCheck} from 'lucide-react';
 import {useRouter} from 'next/router';
 import React, {useState} from 'react';
 
@@ -51,14 +51,36 @@ export default function Subscribe() {
         'POST',
         `/contacts/public/${id as string}/subscribe${sourceEmailQuery(router.query)}`,
       );
-      updateContact(data);
-    } catch {
-      // Translated copy rather than the server's English message; see useRecipient.
-      setActionError(translator.t('pages.common.actionFailed'));
+      updateContact({pendingConfirmation: false, ...data});
+    } catch (error) {
+      // Translated copy rather than the server's English message; see useRecipient. An address
+      // suppressed after a bounce or complaint is only resubscribed from an email's own link.
+      setActionError(
+        translator.t(
+          // Plunk Lite: so is one the double opt-in will not ask to confirm from here
+          ['ADDRESS_SUPPRESSED', 'CONFIRMATION_NEEDS_EMAIL'].includes((error as {code?: string}).code ?? '')
+            ? 'pages.common.resubscribeNeedsEmail'
+            : 'pages.common.actionFailed',
+        ),
+      );
     } finally {
       setSubscribing(false);
     }
   };
+
+  // Plunk Lite: with the double opt-in on, the address confirms from the email just sent to it
+  if (contact.pendingConfirmation) {
+    return (
+      <RecipientShell page="subscribe" translator={translator}>
+        <ResultState icon={MailCheck} title={translator.t('pages.subscribe.pendingTitle')}>
+          <RichText
+            template={translator.t('pages.subscribe.pendingDescription')}
+            values={{projectName: contact.projectName, email: contact.email}}
+          />
+        </ResultState>
+      </RecipientShell>
+    );
+  }
 
   if (contact.subscribed) {
     return (

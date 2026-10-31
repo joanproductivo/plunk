@@ -36,6 +36,7 @@ Set your subdomains here. The application automatically derives all internal and
 | `AWS_SES_SECRET_ACCESS_KEY`         | Yes      | AWS secret access key for SES.                                                                                                                   | `wJalr...`                                      |
 | `SES_CONFIGURATION_SET`             | No       | SES configuration set name used for open/click tracking.                                                                                         | `plunk-configuration-set` (default)             |
 | `SES_CONFIGURATION_SET_NO_TRACKING` | No       | A second SES configuration set without tracking. When set, projects can toggle email tracking on/off. If omitted, the tracking toggle is hidden. | `plunk-no-tracking-configuration-set` (default) |
+| `IGNORE_AUTOMATIC_OPENS`            | No       | Leave out opens SES marks as likely made by software (`isBotEvent: "Likely"`), such as Gmail fetching the tracking pixel on delivery. Any value other than `true` counts every open. | `true` (default)                                |
 | `MAIL_FROM_SUBDOMAIN`               | No       | Subdomain prefix used when constructing the MAIL FROM hostname for a verified domain (e.g. with default `plunk` and domain `yourdomain.com`, the MAIL FROM is `plunk.yourdomain.com`). Override when the default subdomain is already in use (e.g. by an R2/CDN custom domain), since the MAIL FROM hostname needs MX + TXT records that can't coexist with a CNAME. | `plunk`                                         |
 
 ## Storage (Minio)
@@ -66,11 +67,11 @@ The bundled Docker setup includes Minio with defaults that work out of the box. 
 
 ## Attachments
 
-Plunk supports attachments on transactional emails. AWS SES caps total message size at 40 MB; the defaults below leave headroom but can be tuned for your use case.
+Plunk supports attachments on transactional emails. AWS SES caps total message size at 40 MB, but a `/v1/send` request can be at most 10 MB, the limit of the image's nginx and of the API's body parser. Attachments travel base64-encoded, which adds a third, so in practice they can add up to about 7 MB. The defaults below can be tuned within that.
 
 | Variable                 | Required | Description                                                                                                              | Default |
 | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ | ------- |
-| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. Hard upper bound enforced by AWS SES is 40 MB.                     | `10`    |
+| `MAX_ATTACHMENT_SIZE_MB` | No       | Maximum total attachment size in megabytes per email. Requests are capped at 10 MB, so ~7 MB.                           | `10`    |
 | `MAX_ATTACHMENTS_COUNT`  | No       | Maximum number of attachments per email.                                                                                 | `10`    |
 
 ## API Rate Limiting
@@ -172,6 +173,13 @@ Plunk bundles a self-hosted [ntfy](https://ntfy.sh) server for internal system n
 | `DISABLE_SIGNUPS`        | No       | When `true`, the signup endpoint rejects new registrations. Useful for private instances.                                   | `false` |
 | `VERIFY_EMAIL_ON_SIGNUP` | No       | When `true`, validates emails on signup — checks for disposable domains, plus-addressing, domain existence, and MX records. | `false` |
 
+## Contact Sign-ups (Plunk Lite)
+
+| Variable                    | Required | Description                                                                                                                                                                                                                                                                                                            | Default |
+| --------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `PLUNK_LITE_VERIFY_SIGNUPS` | No       | A new contact from `/v1/track`, `/v1/send` or `POST /contacts` is refused with `422 INVALID_EMAIL` (with `reasons` and any `suggestedEmail`) when its domain does not exist, takes no email, is disposable or is a slip of a large provider's (`gmial.com`). Uncertain DNS answers let it in. `false` switches it off. | `true`  |
+| `PLUNK_LITE_PUBLIC_TRACK`   | No       | When `off`, `/v1/track` refuses the public key (`pk_*`) with `403`, since a form that calls it from the browser exposes that key. The form's server then calls `/v1/track` with the secret key (`sk_*`), which it always takes.                                                                                          | `on`    |
+
 ## Interface
 
 | Variable       | Required | Description                                                                                                                                                      | Default |
@@ -180,12 +188,18 @@ Plunk bundles a self-hosted [ntfy](https://ntfy.sh) server for internal system n
 
 ## Security
 
-| Variable                      | Required | Description                                                                                                                                                | Default |
-| ----------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `AUTO_PROJECT_DISABLE`        | No       | When `true`, projects are automatically suspended when bounce or complaint rate thresholds are exceeded. Set to `false` to manage project status manually. | `true`  |
-| `EMAIL_RATE_LIMIT_PER_SECOND` | No       | Override the email sending rate limit. If not set, Plunk automatically fetches the quota from your AWS SES account.                                        | —       |
-| `EMAIL_WORKER_CONCURRENCY`    | No       | Number of emails the worker processes in parallel. When unset, derived from the effective rate limit so a higher SES quota scales throughput automatically. | —       |
-| `EMAIL_WORKER_MAX_CONCURRENCY`| No       | Upper bound applied to the auto-derived worker concurrency. Raise this only after sizing the Prisma connection pool accordingly.                            | `50`    |
+| Variable                               | Required | Description                                                                                                                                                                                                                               | Default |
+| -------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `AUTO_PROJECT_DISABLE`                 | No       | When `true`, projects are automatically suspended when bounce or complaint rate thresholds are exceeded. Set to `false` to manage project status manually.                                                                                | `true`  |
+| `PLUNK_LITE_DISABLE_BOUNCE_PERCENT`    | No       | 7-day bounce rate (%) at which a project is disabled, with at least 25 bounces in 200 emails. Past the 5% critical rate the project is alerted and the campaign or workflow sending is stopped. Between 0 and 100.                        | `8`     |
+| `PLUNK_LITE_DISABLE_COMPLAINT_PERCENT` | No       | 7-day complaint rate (%) at which a project is disabled, with at least 5 complaints, however few emails were sent. Past the 0.1% critical rate the project is alerted and the campaign or workflow sending is stopped. Between 0 and 100. | `0.4`   |
+| `EMAIL_RATE_LIMIT_PER_SECOND`          | No       | Override the email sending rate limit. If not set, Plunk automatically fetches the quota from your AWS SES account.                                                                                                                       | —       |
+| `EMAIL_WORKER_CONCURRENCY`             | No       | Number of emails the worker processes in parallel. When unset, derived from the effective rate limit so a higher SES quota scales throughput automatically.                                                                               | —       |
+| `EMAIL_WORKER_MAX_CONCURRENCY`         | No       | Upper bound applied to the auto-derived worker concurrency. Raise this only after sizing the Prisma connection pool accordingly.                                                                                                          | `50`    |
+
+`EMAIL_RATE_LIMIT_PER_SECOND`, `EMAIL_WORKER_CONCURRENCY` and `EMAIL_WORKER_MAX_CONCURRENCY` take a whole number above 0. Anything else is ignored with a warning at startup, as if the variable were not set.
+
+The two `PLUNK_LITE_DISABLE_*_PERCENT` values accept a decimal comma (`0,4`). Any other value outside 0–100 is logged at startup and replaced by the default, so a typo never keeps Plunk from starting.
 
 ## Advanced
 

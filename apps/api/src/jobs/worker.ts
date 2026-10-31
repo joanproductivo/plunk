@@ -9,6 +9,8 @@
 import {Worker} from 'bullmq';
 import signale from 'signale';
 
+import {SHUTDOWN_TIMEOUT_MS} from '../app/constants.js';
+
 import {createApiRequestCleanupWorker} from './api-request-cleanup-processor.js';
 import {buildBackgroundIndexes} from './background-index-builder.js';
 import {createIdempotencyKeyCleanupWorker} from './idempotency-key-cleanup-processor.js';
@@ -19,13 +21,18 @@ import {createCardVerificationWorker} from './card-verification-processor.js';
 import {createCampaignStatsSweepWorker} from './campaign-stats-sweep-processor.js';
 import {createSnoozeSweepWorker} from './snooze-sweep-processor.js';
 import {createCardVerificationSweepWorker} from './card-verification-sweep-processor.js';
+import {createDlqWorker} from './dlq-processor.js';
 import {createDomainVerificationWorker} from './domain-verification-processor.js';
 import {createEmailBodyCleanupWorker} from './email-body-cleanup-processor.js';
+import {createEmailRecoverySweepWorker} from './email-recovery-sweep-processor.js';
 import {createEmailWorker} from './email-processor.js';
+import {createEventTrackingWorker} from './event-tracking-processor.js';
 import {createImportWorker} from './import-processor.js';
 import {createMeterWorker} from './meter-processor.js';
+import {createPlunkLiteChecksWorker} from './plunk-lite-checks-processor.js';
 import {createScheduledCampaignWorker} from './scheduled-processor.js';
 import {createSegmentCountWorker} from './segment-count-processor.js';
+import {createSegmentMembershipEventsWorker} from './segment-membership-events-processor.js';
 import {createWorkflowWorker} from './workflow-processor-queue.js';
 
 const workers: {name: string; worker: Worker}[] = [];
@@ -119,6 +126,31 @@ async function startWorkers() {
     workers.push({name: 'card-verification-sweep', worker: cardVerificationSweepWorker});
     signale.success('[WORKER] Card verification sweep worker started');
 
+    // Start email recovery sweep worker
+    const emailRecoverySweepWorker = createEmailRecoverySweepWorker();
+    workers.push({name: 'email-recovery-sweep', worker: emailRecoverySweepWorker});
+    signale.success('[WORKER] Email recovery sweep worker started');
+
+    // Start segment membership events worker
+    const segmentMembershipEventsWorker = createSegmentMembershipEventsWorker();
+    workers.push({name: 'segment-membership-events', worker: segmentMembershipEventsWorker});
+    signale.success('[WORKER] Segment membership events worker started');
+
+    // Start event tracking worker
+    const eventTrackingWorker = createEventTrackingWorker();
+    workers.push({name: 'event-tracking', worker: eventTrackingWorker});
+    signale.success('[WORKER] Event tracking worker started');
+
+    // Start Plunk Lite's checks worker
+    const plunkLiteChecksWorker = createPlunkLiteChecksWorker();
+    workers.push({name: 'plunk-lite-checks', worker: plunkLiteChecksWorker});
+    signale.success('[WORKER] Plunk Lite checks worker started');
+
+    // Start Plunk Lite's drain of the dead-letter queue of SES events
+    const dlqWorker = createDlqWorker();
+    workers.push({name: 'plunk-lite-dlq', worker: dlqWorker});
+    signale.success('[WORKER] Dead-letter queue worker started');
+
     signale.success('[WORKER] All workers started successfully');
 
     // Not awaited: index builds can take a long time and must not hold up job processing
@@ -129,17 +161,35 @@ async function startWorkers() {
   }
 }
 
+let stopping = false;
+
 async function stopWorkers() {
+  // A second signal, or an error raised while closing, must not start a second close
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+
   signale.info('[WORKER] Stopping workers...');
 
-  for (const {name, worker} of workers) {
-    try {
-      await worker.close();
-      signale.info(`[WORKER] ${name} worker stopped`);
-    } catch (error) {
-      signale.error(`[WORKER] Error stopping ${name} worker:`, error);
-    }
-  }
+  const deadline = setTimeout(() => {
+    signale.error(`[WORKER] Workers did not stop within ${SHUTDOWN_TIMEOUT_MS / 1000}s, exiting`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+
+  // Closed together: each close waits for that queue's active jobs, so closing them one
+  // after another would add up every queue's wait and run past the kill timeout
+  await Promise.allSettled(
+    workers.map(async ({name, worker}) => {
+      try {
+        await worker.close();
+        signale.info(`[WORKER] ${name} worker stopped`);
+      } catch (error) {
+        signale.error(`[WORKER] Error stopping ${name} worker:`, error);
+      }
+    }),
+  );
 
   signale.success('[WORKER] All workers stopped');
   process.exit(0);

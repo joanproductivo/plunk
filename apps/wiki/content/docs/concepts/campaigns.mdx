@@ -41,6 +41,8 @@ Campaigns support three audience types:
 
 `MARKETING` and `HEADLESS` campaigns automatically skip unsubscribed contacts. `TRANSACTIONAL` campaigns deliver to everyone matching the audience regardless of subscription state — use it sparingly and only for genuine transactional content.
 
+In Plunk Lite, the send dialogs of a `TRANSACTIONAL` campaign say how many unsubscribed contacts it reaches (`GET /campaigns/:id/audience`), and so does the MCP before it sends one.
+
 ## Sender domain verification
 
 The `from` address must be on a domain you've verified for sending. Creating or updating a campaign with an unverified `from` returns `403`. See [Verifying domains](/guides/verifying-domains).
@@ -61,25 +63,30 @@ Once a campaign is `SENT` or `CANCELLED` it can't be edited or resent — duplic
 
 Trigger a send with `POST /campaigns/:id/send`. The campaign is queued and sent in the background; depending on the audience size, this can take seconds for small lists to longer for very large ones. You can monitor progress on the campaign detail page in the dashboard.
 
+In Plunk Lite, a send that would not fit in what is left of your SES 24-hour quota is refused with `400` as it starts, and the campaign stays as it was. Campaigns get up to 95 % of the quota, counting what was sent in the last 24 hours and what the campaigns still sending have left; the other 5 % stays free for transactional and workflow emails. Without an answer from SES, the send goes on. A scheduled campaign is checked when its time comes: if it does not fit then, it stays `SCHEDULED` with an alert, to send or schedule again. Two campaigns started at the same moment can both pass the check; what does not fit waits for the quota, as below.
+
+While a campaign sends, the queue keeps to what SES says about the whole account. If it reports the sending rate, the queue waits a second. If the daily quota is used up, the queue waits a quarter of an hour and tries again. If the account is paused, the queue pauses and tries again every 30 minutes. None of these spend an email's attempts, for up to 48 hours from the first time an email is held back, whatever held it: after that it goes on to the usual retries, and fails with an alert if SES still refuses it. The quota and the pause each raise an "Amazon SES" alert, which the first email out afterwards resolves. Whether the account is paused is asked of SES (`GetAccount`, its enforcement status), if the IAM policy allows `ses:GetAccount`. Many refusals at once from more than one sender domain are taken for a pause too, with or without that answer, since SES's status can lag the first refusals. An email SES refuses for itself (an address or sender that is not verified, for one) fails at once, without retries.
+
 To cancel a `SCHEDULED` or `SENDING` campaign, call `POST /campaigns/:id/cancel`. Cancellation stops further sending but cannot recall emails that have already been handed off to the recipient's mail server.
 
 ## Stats
 
-`GET /campaigns/:id/stats` reports the counts and rates the dashboard shows: recipients, sent, delivered, opened, clicked, bounced, complained, and unsubscribed, plus the matching rates. Counts are read from the campaign itself, so the call stays fast while a campaign is sending. Delivery, open, click, bounce and complaint counts are updated in the background as events arrive, so they can trail the latest event by a short interval. Unsubscribes are counted the moment they happen. Every rate is a percentage of `sentCount`.
+`GET /campaigns/:id/stats` reports the counts and rates the dashboard shows: recipients, sent, delivered, opened, clicked, bounced, complained, unsubscribed, and lost, plus the matching rates. Counts are read from the campaign itself, so the call stays fast while a campaign is sending. Delivery, open, click, bounce and complaint counts are updated in the background as events arrive, so they can trail the latest event by a short interval. Unsubscribes are counted the moment they happen. Every rate is a percentage of `sentCount`.
 
 ### What a campaign cost you
 
-Three columns describe recipients you lost, and each one counts a given recipient exactly once:
+Three columns describe recipients you lost, and a fourth counts each recipient lost once:
 
 | Field | Means | Traced by |
 | ----- | ----- | --------- |
 | `bouncedCount` | Mail that could not be delivered. Hard bounces suppress the contact. | `Email.bouncedAt`, set by the SES bounce webhook |
 | `complainedCount` | Recipients who reported the campaign as spam. Suppresses the contact. | `Email.complainedAt`, set by the SES complaint webhook |
-| `unsubscribedCount` | Recipients who deliberately opted out, including snoozes. A recipient who opts out more than once from the same email counts once. | `Email.unsubscribedAt`, set from the `?e=` parameter on the unsubscribe link |
+| `unsubscribedCount` | Recipients who opted out, including snoozes and the unsubscribe a bounce or complaint causes. A recipient who opts out more than once from the same email counts once. | `Email.unsubscribedAt`, set from the `?e=` parameter on the unsubscribe link, or by the SES webhook when a bounce or complaint unsubscribes the contact |
+| `lostCount` | Recipients lost to any of the three, each counted once. | The three above, less the emails counted in more than one |
 
 On the campaign page, click any of the three figures to see the contacts behind it.
 
-Bounces and complaints flip the contact to unsubscribed as well, but they are reported in their own column and never in `unsubscribedCount` — the same lost recipient counted twice would overstate both.
+Bounces and complaints flip the contact to unsubscribed as well. When the contact was subscribed (or snoozed), that unsubscribe counts in `unsubscribedCount` too, so the same recipient can appear under a bounce or complaint and under the unsubscribes. Use `lostCount`, not the sum of the three, for how many recipients the campaign lost.
 
 `unsubscribedCount` also excludes opt-outs it cannot attribute: a dashboard toggle, a CSV import, `PATCH /contacts/:id`, or a link from mail sent before the parameter existed belongs to no campaign, so it is counted against none. See [Unsubscribe pages](/guides/unsubscribe-pages#knowing-which-email-caused-it).
 

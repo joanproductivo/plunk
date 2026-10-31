@@ -135,6 +135,8 @@ Writing tools:
 | `plunk_send_campaign`              | Send or schedule a campaign *(destructive, irreversible)* |
 | `plunk_cancel_campaign`            | Stop a scheduled or in-flight campaign *(destructive)*    |
 | `plunk_create_segment`             | Create an audience segment                                |
+| `plunk_add_to_segment`             | Add contacts to a static segment by email                 |
+| `plunk_remove_from_segment`        | Remove contacts from a static segment by email            |
 | `plunk_create_workflow`            | Create a workflow, disabled, triggered by an event        |
 | `plunk_update_workflow`            | Rename, change the trigger event, or allow re-entry       |
 | `plunk_duplicate_workflow`         | Copy a workflow, disabled, e.g. for another language      |
@@ -188,9 +190,15 @@ Plunk's secret key is all-or-nothing over its project, so this server adds its o
   one recipient, ask you to confirm before anything goes out, and the prompt tells you how many people
   will receive it. Enabling a workflow that has email steps with `plunk_set_workflow_enabled` asks too,
   and names the trigger event. So do changing the trigger of an enabled workflow that sends email and
-  starting one for a contact with `plunk_start_workflow_execution`. Confirmation is not a tool argument, so the model cannot grant it to itself.
+  starting one for a contact with `plunk_start_workflow_execution`, and changing the members of a segment that
+  tracks membership with `plunk_add_to_segment` or `plunk_remove_from_segment`, since its entry and exit events
+  can start workflows. Confirmation is not a tool argument, so the model cannot grant it to itself.
   Clients that cannot show a prompt cannot send — set `PLUNK_ALLOW_UNCONFIRMED_SENDS=true` if you are
   running headless and accept that.
+- **A `TRANSACTIONAL` campaign says how many unsubscribed contacts it reaches.** Such a campaign
+  reaches them too, so `plunk_send_campaign` puts their number in the confirmation. If the number
+  cannot be read, it refuses to send unless called again with `includeUnsubscribed: true`, which the
+  model is told to pass only once you have said to (Plunk Lite).
 - **Read-only mode is enforced by registration**, not by convention. With `PLUNK_READ_ONLY=true` the
   mutating tools are never registered, so they cannot be called even by name.
 - **Billing, project deletion, and key rotation are unreachable.** Those endpoints require a dashboard
@@ -201,10 +209,9 @@ for anything you would not want an agent to change.
 
 ## Event tracking and the two key types
 
-Plunk's `/v1/track` endpoint requires the **public** key, and it is the only endpoint that does.
-Without `PLUNK_PUBLIC_KEY`, `plunk_track_event` gets the same result with the secret key by upserting
-the contact first and then recording the event against it. Both paths create the contact if it does
-not exist. Setting `PLUNK_PUBLIC_KEY` just makes it one request instead of two.
+With `PLUNK_PUBLIC_KEY`, `plunk_track_event` calls Plunk's `/v1/track` endpoint in one request.
+Without it, it gets the same result with the secret key by upserting the contact first and then
+recording the event against it. Both paths create the contact if it does not exist.
 
 ## Development
 

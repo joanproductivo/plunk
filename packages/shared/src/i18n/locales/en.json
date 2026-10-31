@@ -17,7 +17,19 @@
       "button": "Subscribe",
       "buttonLoading": "Subscribing...",
       "successTitle": "You're subscribed!",
-      "successDescription": "{email} will now receive emails from {projectName}."
+      "successDescription": "{email} will now receive emails from {projectName}.",
+      "pendingTitle": "Check your inbox",
+      "pendingDescription": "We sent an email to {email}. Click the link in it to confirm your subscription to {projectName}."
+    },
+    "confirm": {
+      "title": "Confirm your subscription",
+      "description": "Confirm that you want to receive emails from {projectName} at {email}.",
+      "button": "Confirm subscription",
+      "buttonLoading": "Confirming...",
+      "successTitle": "You're subscribed!",
+      "successDescription": "{email} will now receive emails from {projectName}.",
+      "invalidTitle": "This link no longer works",
+      "invalidDescription": "It was replaced by a newer email, or the address changed. Sign up again to get a new link."
     },
     "manage": {
       "title": "Manage Preferences",
@@ -50,6 +62,7 @@
       "error": "Error",
       "loadFailed": "We couldn't load your email preferences. Check the link and try again.",
       "actionFailed": "Something went wrong. Please try again.",
+      "resubscribeNeedsEmail": "This address can't be resubscribed from here. Use the link in an email you received from us.",
       "sentWith": "Sent with {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "You received this email because you agreed to receive emails from {projectName}. If you no longer wish to receive emails like this, please",
       "updatePreferences": "update your preferences"
+    },
+    "optin": {
+      "subject": "Confirm your subscription to {projectName}",
+      "text": "Thanks for signing up for emails from {projectName}.\n\nTo start receiving them, confirm that this is your address:",
+      "button": "Confirm my subscription",
+      "ignore": "If you didn't sign up, ignore this email: you won't be subscribed."
     }
   }
 }

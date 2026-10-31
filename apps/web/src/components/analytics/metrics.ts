@@ -1,4 +1,9 @@
-import type {AnalyticsGranularity, AnalyticsTimeseriesPoint} from '@plunk/types';
+import type {
+  AnalyticsAudiencePoint,
+  AnalyticsGranularity,
+  AnalyticsTimeseriesPoint,
+  EmailMetricCounts,
+} from '@plunk/types';
 import dayjs from 'dayjs';
 
 export type MetricKey =
@@ -21,20 +26,51 @@ export interface MetricDefinition {
   thresholds?: {warning: number; critical: number};
   /** Per-bucket value, null when there is nothing to measure against */
   fromPoint: (p: AnalyticsTimeseriesPoint) => number | null;
+  /**
+   * The volume that has to be above zero for the figure to mean anything: emails sent, or
+   * the emails sent with open and click tracking for the figures built on opens and clicks
+   */
+  volume: (counts: VolumeCounts) => number;
 }
 
+type VolumeCounts = Pick<EmailMetricCounts, 'sent' | 'tracked'>;
+
+const sent = (c: VolumeCounts) => c.sent;
+const tracked = (c: VolumeCounts) => c.tracked;
 const ratio = (part: number, whole: number) => (whole > 0 ? (part / whole) * 100 : null);
 
 export const METRICS: MetricDefinition[] = [
-  {key: 'sent', label: 'Sent', kind: 'count', better: 'up', fromPoint: p => p.sent},
-  {key: 'deliveryRate', label: 'Delivery rate', kind: 'rate', better: 'up', fromPoint: p => ratio(p.delivered, p.sent)},
-  {key: 'openRate', label: 'Open rate', kind: 'rate', better: 'up', fromPoint: p => ratio(p.opened, p.sent)},
-  {key: 'clickRate', label: 'Click rate', kind: 'rate', better: 'up', fromPoint: p => ratio(p.clicked, p.sent)},
+  {key: 'sent', label: 'Sent', kind: 'count', better: 'up', volume: sent, fromPoint: p => p.sent},
+  {
+    key: 'deliveryRate',
+    label: 'Delivery rate',
+    kind: 'rate',
+    better: 'up',
+    volume: sent,
+    fromPoint: p => ratio(p.delivered, p.sent),
+  },
+  {
+    key: 'openRate',
+    label: 'Open rate',
+    kind: 'rate',
+    better: 'up',
+    volume: tracked,
+    fromPoint: p => ratio(p.opened, p.tracked),
+  },
+  {
+    key: 'clickRate',
+    label: 'Click rate',
+    kind: 'rate',
+    better: 'up',
+    volume: tracked,
+    fromPoint: p => ratio(p.clicked, p.tracked),
+  },
   {
     key: 'clickToOpenRate',
     label: 'Click-to-open',
     kind: 'rate',
     better: 'up',
+    volume: tracked,
     fromPoint: p => ratio(p.clicked, p.opened),
   },
   {
@@ -42,7 +78,9 @@ export const METRICS: MetricDefinition[] = [
     label: 'Bounce rate',
     kind: 'rate',
     better: 'down',
-    thresholds: {warning: 5, critical: 10},
+    // The API's SECURITY_THRESHOLDS (7-day bounce rate)
+    thresholds: {warning: 2.5, critical: 5},
+    volume: sent,
     fromPoint: p => ratio(p.bounced, p.sent),
   },
   {
@@ -50,7 +88,9 @@ export const METRICS: MetricDefinition[] = [
     label: 'Complaint rate',
     kind: 'rate',
     better: 'down',
-    thresholds: {warning: 0.075, critical: 0.15},
+    // The API's SECURITY_THRESHOLDS (7-day complaint rate)
+    thresholds: {warning: 0.05, critical: 0.1},
+    volume: sent,
     fromPoint: p => ratio(p.complained, p.sent),
   },
   {
@@ -58,6 +98,7 @@ export const METRICS: MetricDefinition[] = [
     label: 'Unsubscribe rate',
     kind: 'rate',
     better: 'down',
+    volume: sent,
     fromPoint: p => ratio(p.unsubscribed, p.sent),
   },
 ];
@@ -163,3 +204,20 @@ export function formatBucketLong(bucket: string, granularity: AnalyticsGranulari
   return granularity === 'hour' ? d.format('ddd, MMM D · HH:mm') : d.format('ddd, MMM D, YYYY');
 }
 
+/**
+ * Plunk Lite: how the contacts gained and lost add up. A bounce or complaint also unsubscribes the
+ * contact, so it is in both `unsubscribed` and `suppressed`; sums use `lost`, which holds each
+ * contact that left once, while each figure shown on its own keeps its full count.
+ */
+export function audienceBalance(p: Omit<AnalyticsAudiencePoint, 'bucket'>) {
+  return {
+    net: p.newContacts - p.lost,
+    /** Unsubscribed without a bounce or complaint: the bar stacked on top of the suppressed one */
+    unsubscribedOnly: p.lost - p.suppressed,
+    /**
+     * Counted under both figures: unsubscribed by a bounce or complaint, but also an opt-out and a
+     * spam report, or a snooze and a bounce, in the same bucket
+     */
+    inBoth: p.unsubscribed + p.suppressed - p.lost,
+  };
+}

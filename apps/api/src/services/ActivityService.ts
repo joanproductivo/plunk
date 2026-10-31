@@ -6,6 +6,7 @@ import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
+import {EmailService} from './EmailService.js';
 import {Keys} from './keys.js';
 
 /**
@@ -46,6 +47,34 @@ interface SubscriptionSourceEmail {
   subject: string;
   campaign: {name: string} | null;
   workflowExecution: {workflow: {name: string}} | null;
+}
+
+/** Plunk Lite: how an event taken back from the AWS dead-letter queue is shown, with when it happened */
+interface RecoveredMark {
+  recoveredFromDlq: true;
+  occurredAt?: string;
+  /** A complaint of a contact who had subscribed again since, left subscribed */
+  keptSubscribed?: true;
+}
+
+/** What an email's events say that its row does not (see fetchEmailOutcomes) */
+interface EmailOutcome {
+  link?: string;
+  bounceType?: string;
+  bounceRecovered?: RecoveredMark;
+  complaintRecovered?: RecoveredMark;
+}
+
+/** The mark of an event's data written by the drain of the dead-letter queue, if it has one */
+function recoveredFrom(data: Prisma.JsonObject): RecoveredMark | undefined {
+  if (data.recoveredFromDlq !== true) {
+    return undefined;
+  }
+  return {
+    recoveredFromDlq: true,
+    ...(typeof data.occurredAt === 'string' && {occurredAt: data.occurredAt}),
+    ...(data.keptSubscribed === true && {keptSubscribed: true}),
+  };
 }
 
 export class ActivityService {
@@ -193,8 +222,17 @@ export class ActivityService {
    * Falls back to database aggregation if cache miss
    */
   public static async getStats(projectId: string, startDate?: Date, endDate?: Date): Promise<ActivityStats> {
+    // Opens and clicks are measured against the streams the project tracks now, so they are
+    // part of the cache key: changing the tracking mode must not serve stats from the old one
+    const trackedStreams = await EmailService.trackedStreams(projectId);
+
     // Try to get from cache
-    const cacheKey = Keys.Activity.stats(projectId, startDate?.getTime() || 'all', endDate?.getTime() || 'now');
+    const cacheKey = Keys.Activity.stats(
+      projectId,
+      startDate?.getTime() || 'all',
+      endDate?.getTime() || 'now',
+      trackedStreams.join(','),
+    );
 
     try {
       const cached = await redis.get(cacheKey);
@@ -214,7 +252,7 @@ export class ActivityService {
     };
 
     // Compute stats from database (in parallel for performance)
-    const [totalEvents, emailStats] = await Promise.all([
+    const [totalEvents, emailGroups] = await Promise.all([
       // Count total events
       prisma.event.count({
         where: {
@@ -223,16 +261,17 @@ export class ActivityService {
         },
       }),
 
-      // Aggregate email stats
-      prisma.email.aggregate({
+      // Email counts per stream, so opens and clicks can be measured against tracked emails.
+      // Every column read here is in emails_projectId_createdAt_stats_idx, so the counts are
+      // served from that index alone
+      prisma.email.groupBy({
+        by: ['sourceType', 'simulated'],
         where: {
           projectId,
           createdAt: dateFilter,
         },
-        // _all rather than id: COUNT(*) can be served from emails_projectId_createdAt_stats_idx
-        // alone, COUNT("id") would need every row fetched since id is not in that index
         _count: {
-          _all: true,
+          sentAt: true,
           openedAt: true,
           clickedAt: true,
         },
@@ -249,18 +288,25 @@ export class ActivityService {
       },
     });
 
-    const totalEmailsSent = emailStats._count._all;
-    const totalEmailsOpened = emailStats._count.openedAt || 0;
-    const totalEmailsClicked = emailStats._count.clickedAt || 0;
+    // Measured as analytics does: outbound emails that went out, leaving out mail to the SES
+    // mailbox simulator, which never reaches anyone
+    const outbound = emailGroups.filter(group => !group.simulated && group.sourceType !== 'INBOUND');
+    const tracked = outbound.filter(group => trackedStreams.includes(group.sourceType));
+
+    const totalEmailsSent = outbound.reduce((sum, group) => sum + group._count.sentAt, 0);
+    const totalEmailsTracked = tracked.reduce((sum, group) => sum + group._count.sentAt, 0);
+    const totalEmailsOpened = tracked.reduce((sum, group) => sum + group._count.openedAt, 0);
+    const totalEmailsClicked = tracked.reduce((sum, group) => sum + group._count.clickedAt, 0);
 
     const stats: ActivityStats = {
       totalEvents,
       totalEmailsSent,
+      totalEmailsTracked,
       totalEmailsOpened,
       totalEmailsClicked,
       totalWorkflowsStarted,
-      openRate: totalEmailsSent > 0 ? (totalEmailsOpened / totalEmailsSent) * 100 : 0,
-      clickRate: totalEmailsSent > 0 ? (totalEmailsClicked / totalEmailsSent) * 100 : 0,
+      openRate: totalEmailsTracked > 0 ? (totalEmailsOpened / totalEmailsTracked) * 100 : 0,
+      clickRate: totalEmailsTracked > 0 ? (totalEmailsClicked / totalEmailsTracked) * 100 : 0,
     };
 
     // Cache for 5 minutes
@@ -805,6 +851,7 @@ export class ActivityService {
             ...baseMetadata,
             error: email.error,
             bounceType: outcome?.bounceType,
+            ...outcome?.bounceRecovered,
           },
         });
       }
@@ -824,6 +871,7 @@ export class ActivityService {
           metadata: {
             ...baseMetadata,
             error: email.error,
+            ...outcome?.complaintRecovered,
           },
         });
       }
@@ -833,29 +881,34 @@ export class ActivityService {
   }
 
   /**
-   * What the email rows on a page cannot say themselves: which link was clicked and what
-   * kind of bounce it was. Both live only on the email's events.
+   * What the email rows on a page cannot say themselves: which link was clicked, what kind of
+   * bounce it was, and (Plunk Lite) whether its bounce or complaint was taken back from the AWS
+   * dead-letter queue, and when it happened. All of it lives only on the email's events.
    *
    * One query per page, over at most `limit` emails, served by the events (emailId) index,
-   * and skipped when the page has no clicked or bounced email the caller asked for.
+   * and skipped when the page has no clicked, bounced or complained email the caller asked for.
    */
   private static async fetchEmailOutcomes(
-    emails: {id: string; clickedAt: Date | null; bouncedAt: Date | null}[],
+    emails: {id: string; clickedAt: Date | null; bouncedAt: Date | null; complainedAt: Date | null}[],
     types?: ActivityType[],
-  ): Promise<Map<string, {link?: string; bounceType?: string}>> {
+  ): Promise<Map<string, EmailOutcome>> {
     const wantClicks = !types || types.includes(ActivityType.EMAIL_CLICKED);
     const wantBounces = !types || types.includes(ActivityType.EMAIL_BOUNCED);
+    const wantComplaints = !types || types.includes(ActivityType.EMAIL_COMPLAINT);
     const ids = emails
-      .filter(email => (wantClicks && email.clickedAt) || (wantBounces && email.bouncedAt))
+      .filter(
+        email =>
+          (wantClicks && email.clickedAt) || (wantBounces && email.bouncedAt) || (wantComplaints && email.complainedAt),
+      )
       .map(email => email.id);
 
-    const outcomes = new Map<string, {link?: string; bounceType?: string}>();
+    const outcomes = new Map<string, EmailOutcome>();
     if (ids.length === 0) {
       return outcomes;
     }
 
     const events = await prisma.event.findMany({
-      where: {emailId: {in: ids}, name: {in: ['email.click', 'email.bounce']}},
+      where: {emailId: {in: ids}, name: {in: ['email.click', 'email.bounce', 'email.complaint']}},
       select: {emailId: true, name: true, data: true},
       // Oldest first, so the first click and the bounce that suppressed the contact win
       orderBy: {createdAt: 'asc'},
@@ -877,6 +930,11 @@ export class ActivityService {
         data.bounceType !== 'Transient'
       ) {
         outcome.bounceType = data.bounceType;
+        outcome.bounceRecovered = recoveredFrom(data);
+      }
+      // The first complaint, the one that recorded `complainedAt`
+      if (event.name === 'email.complaint' && !('complaintRecovered' in outcome)) {
+        outcome.complaintRecovered = recoveredFrom(data);
       }
 
       outcomes.set(event.emailId, outcome);

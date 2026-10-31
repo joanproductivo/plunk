@@ -1,10 +1,12 @@
 import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {deleteUnsentCampaignEmails} from '../../jobs/campaign-cancel-cleanup-processor';
+import {prisma as servicePrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {CampaignService} from '../CampaignService';
 import {Keys} from '../keys';
+import {NtfyService} from '../NtfyService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 /**
@@ -187,7 +189,7 @@ describe('CampaignService - cancel', () => {
 });
 
 /**
- * The cleanup's raw SQL, tested on its own. Its two predicates are what stand between
+ * The cleanup's raw SQL, tested on its own. Its predicates are what stand between
  * clearing a queue and destroying delivery history, and neither is expressible in the
  * `deleteMany` the rest of the codebase would use -- Prisma has no LIMIT there, and an
  * unbounded delete is the thing this job exists to avoid.
@@ -240,6 +242,77 @@ describe('deleteUnsentCampaignEmails', () => {
 
     expect(deleted).toBe(1);
     expect(await prisma.email.findUnique({where: {id: sent.id}})).not.toBeNull();
+  });
+
+  it('never deletes a row being sent, which SES may be accepting at that moment', async () => {
+    const sending = await makeEmail();
+    await prisma.email.update({where: {id: sending.id}, data: {status: EmailStatus.SENDING}});
+    await makeEmail();
+
+    const deleted = await deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
+
+    // The row stays, so the revert sees an email that may have departed and keeps the campaign
+    // cancelled instead of letting it be sent again
+    expect(deleted).toBe(1);
+    expect(await prisma.email.findUnique({where: {id: sending.id}})).not.toBeNull();
+  });
+
+  /**
+   * Claim an email as a worker that read the campaign as sending before the cancel does, while the
+   * cleanup runs: it picks the row while still PENDING and waits for the claim to commit. Returns
+   * what the cleanup deleted.
+   */
+  async function cleanUpWhileClaiming(emailId: string): Promise<number> {
+    let deleting: Promise<number> | undefined;
+    await prisma.$transaction(async tx => {
+      await tx.email.updateMany({
+        where: {id: emailId, status: EmailStatus.PENDING},
+        data: {status: EmailStatus.SENDING},
+      });
+      deleting = deleteUnsentCampaignEmails(campaignId, new Date(Date.now() + 1000));
+      // Commit only once the delete is waiting on the claimed row: earlier, it would read the
+      // row as SENDING and skip it with or without the re-check
+      for (let waited = 0; ; waited += 20) {
+        const [{blocked}] = await prisma.$queryRaw<{blocked: bigint}[]>`
+          SELECT count(*) AS blocked FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%DELETE FROM "emails"%'
+        `;
+        if (blocked > 0n) break;
+        if (waited > 4000) throw new Error('The cleanup never waited on the claimed row');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    });
+    return deleting!;
+  }
+
+  it('never deletes a row a worker claims while the delete waits for it', async () => {
+    const claimed = await makeEmail();
+
+    expect(await cleanUpWhileClaiming(claimed.id)).toBe(0);
+    expect((await prisma.email.findUnique({where: {id: claimed.id}}))?.status).toBe(EmailStatus.SENDING);
+  });
+
+  it('goes on past a batch that a claimed row cut short', async () => {
+    const contact = await factories.createContact({projectId, email: `bulk-${Date.now()}@plunk.test`});
+    await prisma.email.createMany({
+      data: Array.from({length: 1100}, () => ({
+        projectId,
+        contactId: contact.id,
+        campaignId,
+        subject: 'Bulk',
+        body: '<p>x</p>',
+        from: 'hello@plunk.test',
+        sourceType: EmailSourceType.CAMPAIGN,
+        status: EmailStatus.PENDING,
+      })),
+    });
+    // The first row the cleanup's first batch reads, so that batch deletes one row short of full
+    const [first] = await prisma.$queryRaw<{id: string}[]>`
+      SELECT "id" FROM "emails" WHERE "campaignId" = ${campaignId} AND "sentAt" IS NULL LIMIT 1
+    `;
+
+    expect(await cleanUpWhileClaiming(first.id)).toBe(1099);
+    expect(await prisma.email.count({where: {campaignId}})).toBe(1);
   });
 
   it('leaves rows created after the cancellation alone', async () => {
@@ -304,7 +377,64 @@ describe('deleteUnsentCampaignEmails', () => {
 
     expect(deleted).toBe(1100);
     expect(await prisma.email.count({where: {campaignId}})).toBe(0);
-    // One full batch, then the remainder ends the loop.
-    expect(progress).toEqual([1000]);
+    // A full batch, the remainder, and then an empty batch ends the loop.
+    expect(progress).toEqual([1000, 1100]);
+  });
+});
+
+/** Plunk Lite: a cancel and the end of the send at the same moment */
+describe('CampaignService - cancel and finalize racing', () => {
+  const prisma = getPrismaClient();
+  let projectId: string;
+
+  beforeEach(async () => {
+    projectId = (await factories.createUserWithProject()).project.id;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps a campaign cancelled while its last email was being counted, and does not announce it', async () => {
+    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENDING});
+    await prisma.campaign.update({where: {id: campaign.id}, data: {totalRecipients: 1}});
+    const contact = await factories.createContact({projectId});
+    await prisma.email.create({
+      data: {
+        projectId,
+        contactId: contact.id,
+        campaignId: campaign.id,
+        subject: 'Done',
+        body: '<p>x</p>',
+        from: 'hello@plunk.test',
+        sourceType: 'CAMPAIGN',
+        status: EmailStatus.SENT,
+        sentAt: new Date(),
+      },
+    });
+    const announce = vi.spyOn(NtfyService, 'notifyCampaignSendCompleted');
+    const count = servicePrisma.email.count.bind(servicePrisma.email);
+    vi.spyOn(servicePrisma.email, 'count').mockImplementation((async (args: never) => {
+      await prisma.campaign.update({where: {id: campaign.id}, data: {status: CampaignStatus.CANCELLED}});
+      return count(args);
+    }) as never);
+
+    await CampaignService.finalizeIfDone(campaign.id);
+
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.CANCELLED);
+    expect(announce).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a campaign that finished sending since it was read', async () => {
+    const campaign = await factories.createCampaign({projectId, status: CampaignStatus.SENT});
+    const get = CampaignService.get.bind(CampaignService);
+    vi.spyOn(CampaignService, 'get').mockImplementationOnce(async (...args) => ({
+      ...(await get(...args)),
+      status: CampaignStatus.SENDING,
+    }));
+
+    await expect(CampaignService.cancel(projectId, campaign.id)).rejects.toThrow('Can only cancel');
+
+    expect((await prisma.campaign.findUniqueOrThrow({where: {id: campaign.id}})).status).toBe(CampaignStatus.SENT);
   });
 });

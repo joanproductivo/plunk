@@ -17,7 +17,19 @@
       "button": "Zapisz się",
       "buttonLoading": "Zapisywanie...",
       "successTitle": "Zapisano!",
-      "successDescription": "Adres {email} będzie teraz otrzymywać wiadomości od nadawcy {projectName}."
+      "successDescription": "Adres {email} będzie teraz otrzymywać wiadomości od nadawcy {projectName}.",
+      "pendingTitle": "Sprawdź skrzynkę",
+      "pendingDescription": "Wysłaliśmy e-mail na adres {email}. Kliknij zawarty w nim link, aby potwierdzić subskrypcję {projectName}."
+    },
+    "confirm": {
+      "title": "Potwierdź subskrypcję",
+      "description": "Potwierdź, że chcesz otrzymywać e-maile od {projectName} na adres {email}.",
+      "button": "Potwierdź subskrypcję",
+      "buttonLoading": "Potwierdzanie...",
+      "successTitle": "Subskrypcja potwierdzona!",
+      "successDescription": "{email} będzie teraz otrzymywać e-maile od {projectName}.",
+      "invalidTitle": "Ten link już nie działa",
+      "invalidDescription": "Zastąpiła go nowsza wiadomość lub adres się zmienił. Zapisz się ponownie, aby otrzymać nowy link."
     },
     "manage": {
       "title": "Zarządzaj preferencjami",
@@ -50,6 +62,7 @@
       "error": "Błąd",
       "loadFailed": "Nie udało się wczytać preferencji e-mail. Sprawdź link i spróbuj ponownie.",
       "actionFailed": "Coś poszło nie tak. Spróbuj ponownie.",
+      "resubscribeNeedsEmail": "Tego adresu nie można tu ponownie zapisać. Użyj linku z wiadomości e-mail, którą od nas otrzymałeś.",
       "sentWith": "Wysłano przez {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Otrzymujesz tę wiadomość, ponieważ wyraziłeś(-aś) zgodę na otrzymywanie wiadomości od {projectName}. Jeśli nie chcesz już otrzymywać takich wiadomości, prosimy",
       "updatePreferences": "zaktualizuj swoje preferencje"
+    },
+    "optin": {
+      "subject": "Potwierdź subskrypcję {projectName}",
+      "text": "Dziękujemy za zapisanie się na e-maile od {projectName}.\n\nAby zacząć je otrzymywać, potwierdź, że to Twój adres:",
+      "button": "Potwierdzam subskrypcję",
+      "ignore": "Jeśli się nie zapisywałeś, zignoruj tę wiadomość: subskrypcja nie zostanie włączona."
     }
   }
 }

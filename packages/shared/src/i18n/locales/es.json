@@ -17,7 +17,19 @@
       "button": "Suscribirse",
       "buttonLoading": "Suscribiendo...",
       "successTitle": "¡Suscripción completada!",
-      "successDescription": "{email} recibirá ahora correos electrónicos de {projectName}."
+      "successDescription": "{email} recibirá ahora correos electrónicos de {projectName}.",
+      "pendingTitle": "Revisa tu correo",
+      "pendingDescription": "Hemos enviado un email a {email}. Haz clic en su enlace para confirmar tu suscripción a {projectName}."
+    },
+    "confirm": {
+      "title": "Confirma tu suscripción",
+      "description": "Confirma que quieres recibir emails de {projectName} en {email}.",
+      "button": "Confirmar suscripción",
+      "buttonLoading": "Confirmando...",
+      "successTitle": "¡Suscripción confirmada!",
+      "successDescription": "{email} recibirá ahora emails de {projectName}.",
+      "invalidTitle": "Este enlace ya no funciona",
+      "invalidDescription": "Lo ha sustituido un email más reciente, o la dirección ha cambiado. Vuelve a apuntarte para recibir un enlace nuevo."
     },
     "manage": {
       "title": "Gestionar preferencias",
@@ -50,6 +62,7 @@
       "error": "Error",
       "loadFailed": "No pudimos cargar tus preferencias de correo. Revisa el enlace e inténtalo de nuevo.",
       "actionFailed": "Algo salió mal. Inténtalo de nuevo.",
+      "resubscribeNeedsEmail": "Esta dirección no se puede volver a suscribir desde aquí. Usa el enlace de un email que hayas recibido de nosotros.",
       "sentWith": "Enviado con {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Has recibido este correo electrónico porque aceptaste recibir correos electrónicos de {projectName}. Si ya no deseas recibir correos electrónicos como este, por favor",
       "updatePreferences": "actualiza tus preferencias"
+    },
+    "optin": {
+      "subject": "Confirma tu suscripción a {projectName}",
+      "text": "Gracias por apuntarte a los emails de {projectName}.\n\nPara empezar a recibirlos, confirma que esta es tu dirección:",
+      "button": "Confirmar mi suscripción",
+      "ignore": "Si no te has apuntado, ignora este email: no quedarás suscrito."
     }
   }
 }

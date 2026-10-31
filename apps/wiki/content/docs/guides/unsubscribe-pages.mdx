@@ -78,7 +78,9 @@ The contact also carries a `snoozedUntil` timestamp. That is the only thing dist
 
 A background job resubscribes contacts whose window has elapsed, clears `snoozedUntil`, and fires `contact.subscribed` with `reason: "snooze_expired"`. Returns are processed within a few minutes of the window ending.
 
-A recipient can also come back early: the "resume" link on the preferences page, or any visit to `{{subscribeUrl}}`, ends the snooze immediately.
+A recipient can also come back early: the "resume" link on the preferences page, or any visit to `{{subscribeUrl}}` from an email they received, ends the snooze immediately. (With the [double opt-in](/concepts/double-opt-in) on, the subscribe page reached without such an email does not.)
+
+Only a subscribed contact can snooze (Plunk Lite): snoozing a contact that is not subscribed answers `409`, since the end of the snooze would subscribe it.
 
 ### What ends a snooze early
 
@@ -107,7 +109,7 @@ Snoozing reuses `contact.unsubscribed` and `contact.subscribed` rather than intr
 }
 ```
 
-A "sorry to see you go" workflow triggered on `contact.unsubscribed` should check for `reason` and skip the ones that are snoozes — those people have not gone anywhere.
+A "sorry to see you go" workflow triggered on `contact.unsubscribed` should check for `reason` and skip the ones that are snoozes — those people have not gone anywhere — and the bounces and complaints, whose address may not take mail.
 
 ### In campaign stats
 

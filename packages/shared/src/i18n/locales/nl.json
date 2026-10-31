@@ -17,7 +17,19 @@
       "button": "Aanmelden",
       "buttonLoading": "Bezig met aanmelden...",
       "successTitle": "Je bent aangemeld!",
-      "successDescription": "{email} ontvangt nu e-mails van {projectName}."
+      "successDescription": "{email} ontvangt nu e-mails van {projectName}.",
+      "pendingTitle": "Controleer je inbox",
+      "pendingDescription": "We hebben een e-mail gestuurd naar {email}. Klik op de link erin om je inschrijving bij {projectName} te bevestigen."
+    },
+    "confirm": {
+      "title": "Bevestig je inschrijving",
+      "description": "Bevestig dat je e-mails van {projectName} wilt ontvangen op {email}.",
+      "button": "Inschrijving bevestigen",
+      "buttonLoading": "Bevestigen...",
+      "successTitle": "Je bent ingeschreven!",
+      "successDescription": "{email} ontvangt nu e-mails van {projectName}.",
+      "invalidTitle": "Deze link werkt niet meer",
+      "invalidDescription": "Hij is vervangen door een nieuwere e-mail, of het adres is gewijzigd. Meld je opnieuw aan voor een nieuwe link."
     },
     "manage": {
       "title": "Voorkeuren beheren",
@@ -50,6 +62,7 @@
       "error": "Fout",
       "loadFailed": "We konden je e-mailvoorkeuren niet laden. Controleer de link en probeer het opnieuw.",
       "actionFailed": "Er is iets misgegaan. Probeer het opnieuw.",
+      "resubscribeNeedsEmail": "Dit adres kan hier niet opnieuw worden aangemeld. Gebruik de link in een e-mail die je van ons hebt ontvangen.",
       "sentWith": "Verzonden met {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Je ontvangt deze e-mail omdat je hebt ingestemd met het ontvangen van e-mails van {projectName}. Als je deze e-mails niet meer wilt ontvangen,",
       "updatePreferences": "werk je voorkeuren bij"
+    },
+    "optin": {
+      "subject": "Bevestig je inschrijving bij {projectName}",
+      "text": "Bedankt voor je aanmelding voor e-mails van {projectName}.\n\nBevestig dat dit je adres is om ze te ontvangen:",
+      "button": "Mijn inschrijving bevestigen",
+      "ignore": "Heb je je niet aangemeld? Negeer dan deze e-mail: je wordt niet ingeschreven."
     }
   }
 }

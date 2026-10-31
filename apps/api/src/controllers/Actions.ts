@@ -1,7 +1,7 @@
 import {Controller, Middleware, Post} from '@overnightjs/core';
 import {ActionSchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
-import {requirePublicKey, requireSecretKey} from '../middleware/auth.js';
+import {requireSecretKey, requireTrackKey} from '../middleware/auth.js';
 import {idempotency} from '../middleware/idempotency.js';
 import {sendRateLimit, trackRateLimit} from '../middleware/rateLimit.js';
 import {prisma} from '../database/prisma.js';
@@ -10,9 +10,12 @@ import {DomainService} from '../services/DomainService.js';
 import {EmailService} from '../services/EmailService.js';
 import {EmailVerificationService} from '../services/EmailVerificationService.js';
 import {EventService} from '../services/EventService.js';
-import {NotFound, ValidationError} from '../exceptions/index.js';
+import {OptInService} from '../services/OptInService.js';
+import {SegmentMembershipService} from '../services/SegmentMembershipService.js';
+import {describeError, ErrorCode, HttpException, NotAllowed, NotFound, ValidationError} from '../exceptions/index.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
-import {DASHBOARD_URI} from '../app/constants.js';
+import {logger} from '../utils/logger.js';
+import {DASHBOARD_URI, verifySignupsEnabled} from '../app/constants.js';
 
 /**
  * Public API Actions Controller
@@ -35,6 +38,7 @@ export class Actions {
    * - data: object (optional) - Event and contact data
    *   - Simple values are saved to contact (persistent)
    *   - {value: any, persistent: false} are only available to workflows (non-persistent)
+   * - segments: string[] (optional, Plunk Lite) - Static segments the contact joins, by id; secret key only
    *
    * Response:
    * - success: boolean
@@ -53,49 +57,61 @@ export class Actions {
    * }
    */
   @Post('track')
-  @Middleware([requirePublicKey, trackRateLimit, idempotency])
+  @Middleware([requireTrackKey, trackRateLimit, idempotency])
   @CatchAsync
   public async track(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
 
     // Zod validation - errors automatically handled by global error handler
-    const {event, email, subscribed, data} = ActionSchemas.track.parse(req.body);
+    const {event, email, subscribed, data, segments: segmentIds = []} = ActionSchemas.track.parse(req.body);
 
     // Prevent manual tracking of reserved system events
-    if (EventService.isReservedEvent(event)) {
-      throw new ValidationError(
-        [
-          {
-            field: 'event',
-            message: `Event name "${event}" is reserved for system use and cannot be manually tracked`,
-            code: 'reserved_event',
-            received: event,
-          },
-        ],
-        'Cannot track reserved system event',
-      );
+    EventService.assertTrackable(event, 'event');
+
+    // Plunk Lite: static segments to add the contact to, only with the secret key -- anyone can read
+    // the public key in a page, and would add any address to any segment and start its workflows.
+    // All of them are checked before anything is written.
+    if (segmentIds.length > 0 && auth.key !== 'secret') {
+      throw new NotAllowed('Adding contacts to segments needs the secret key (sk_*): call /v1/track from your server.');
     }
+    const segments = await SegmentMembershipService.resolveStaticSegments(auth.projectId, segmentIds);
 
     // Create or update contact with persistent data only
     // ContactService.upsert will filter out non-persistent fields
     // Event tracking should subscribe new contacts by default (subscribed=true in ContactService)
     // but preserve existing subscription state for existing contacts
-    const contact = await ContactService.upsert(
+    // Plunk Lite: a new contact whose address takes no email is refused (422) and the event is not
+    // stored, so the form can ask for the address again. With the double opt-in on, a sign-up waits
+    // for the contact to confirm, and joins its segments then.
+    const {contact, optIn} = await ContactService.upsertWithOptIn(
       auth.projectId,
       email,
       data as Record<string, unknown> | undefined,
       subscribed,
+      true,
+      {verifySignup: true, key: auth.key === 'secret' ? 'secret' : 'public', segmentIds: segments.map(s => s.id)},
     );
+
+    // Plunk Lite: into its segments before the event, so the workflows the event starts see it there
+    const entries = optIn ? [] : await SegmentMembershipService.enterSegments(auth.projectId, segments, [contact.id]);
 
     // Track the event with ALL data (persistent + non-persistent)
     // Non-persistent data flows to workflows via execution context
-    const eventRecord = await EventService.trackEvent(
-      auth.projectId,
-      event,
-      contact.id,
-      undefined,
-      data as Record<string, unknown> | undefined,
-    );
+    let eventRecord;
+    try {
+      eventRecord = await EventService.trackEvent(
+        auth.projectId,
+        event,
+        contact.id,
+        undefined,
+        data as Record<string, unknown> | undefined,
+      );
+    } finally {
+      // Plunk Lite: the segments' entry events after the event, so a workflow they start that waits
+      // for this very event never sees it happen first -- and also when it failed, as the contact
+      // is in the segments already
+      await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+    }
 
     return res.status(200).json({
       success: true,
@@ -103,6 +119,8 @@ export class Actions {
         contact: contact.id,
         event: eventRecord.id,
         timestamp: eventRecord.createdAt.toISOString(),
+        // Plunk Lite: the double opt-in kept the sign-up waiting; `optIn` says why when no email went
+        ...(optIn ? {pendingConfirmation: optIn !== 'held', optIn} : {}),
       },
     });
   }
@@ -130,6 +148,7 @@ export class Actions {
    * - data: object (optional) - Contact data and template variables
    *   - Simple values are saved to contact (persistent)
    *   - {value: any, persistent: false} are only used for this email (non-persistent)
+   * - segments: string[] (optional, Plunk Lite) - Static segments each recipient sent to joins, by id
    * - attachments: array (optional) - Email attachments (configurable via MAX_ATTACHMENTS_COUNT / MAX_ATTACHMENT_SIZE_MB, defaults: 10 / 10MB)
    *   - filename: string (required) - Attachment filename
    *   - content: string (required) - Base64 encoded file content
@@ -138,6 +157,10 @@ export class Actions {
    * Response:
    * - success: boolean
    * - data: object with emails array and timestamp
+   *   - failed (Plunk Lite): recipients that could not be sent, as {email, code, message}, when
+   *     some were; the status is then 207. A request that sent nothing answers with the error.
+   *   - segmentsError (Plunk Lite): when adding the recipients sent to to `segments` failed after
+   *     their emails were queued
    *
    * Examples:
    *
@@ -186,8 +209,23 @@ export class Actions {
     const auth = res.locals.auth;
 
     // Zod validation - errors automatically handled by global error handler
-    const {to, subject, body, subscribed, name, from, reply, headers, data, template, attachments} =
-      ActionSchemas.send.parse(req.body);
+    const {
+      to,
+      subject,
+      body,
+      subscribed,
+      name,
+      from,
+      reply,
+      headers,
+      data,
+      template,
+      attachments,
+      segments: segmentIds = [],
+    } = ActionSchemas.send.parse(req.body);
+
+    // Plunk Lite: the static segments each recipient sent to joins, all checked before anything else
+    const segments = await SegmentMembershipService.resolveStaticSegments(auth.projectId, segmentIds);
 
     // Inline subject/body are templates too, but they are deliberately NOT syntax
     // checked here. Transactional bodies are generated by whatever system calls us —
@@ -229,6 +267,7 @@ export class Actions {
     let emailBody = body;
     let emailReplyTo = reply;
     let templateId: string | undefined;
+    let templateType: string | undefined;
 
     if (template) {
       const templateRecord = await prisma.template.findUnique({
@@ -256,6 +295,7 @@ export class Actions {
 
       emailReplyTo = reply || templateRecord.replyTo || undefined;
       templateId = templateRecord.id;
+      templateType = templateRecord.type;
     }
 
     if (!emailFrom) {
@@ -273,83 +313,172 @@ export class Actions {
 
     await DomainService.verifyEmailDomain(emailFrom, auth.projectId);
 
+    // Plunk Lite: with the double opt-in on, a sign-up stays unsubscribed until confirmed, and a
+    // marketing template cannot go to an unsubscribed contact -- refused before anything is written
+    if (subscribed === true && templateType === 'MARKETING' && (await OptInService.isRequired(auth.projectId))) {
+      throw new HttpException(
+        422,
+        'With the double opt-in on, a sign-up through /v1/send waits for confirmation, so it cannot use a marketing template. Use a transactional template, or none.',
+        ErrorCode.OPT_IN_NEEDS_TRANSACTIONAL,
+      );
+    }
+
     const replyToEmail = emailReplyTo;
 
     const timestamp = new Date();
     const emailResults = [];
+    // Plunk Lite: one recipient's failure no longer drops the ones after it
+    const failed: {email: string; code: string; message: string; suggestedEmail?: string}[] = [];
+    // Plunk Lite: the contacts of the emails created, which join the request's segments
+    const sentContactIds: string[] = [];
+    let firstClientError: unknown;
+    let firstServerError: unknown;
 
-    // Process each recipient
-    for (const recipient of recipients) {
-      // Merge recipient name with data if provided
-      const recipientData = recipient.name
-        ? {...(data as Record<string, unknown> | undefined), name: recipient.name}
-        : (data as Record<string, unknown> | undefined);
-
-      // Create or update contact with metadata
-      // Transactional emails should not subscribe contacts by default
-      // New contacts default to unsubscribed unless explicitly opted in
-      // Existing contacts preserve their subscription state unless explicitly changed
-      const contact = await ContactService.upsert(auth.projectId, recipient.email, recipientData, subscribed, false);
-
-      // Get merged data including non-persistent fields for template rendering
-      const mergedData = ContactService.getMergedData(contact, data as Record<string, unknown> | undefined);
-
-      // Add system variables (email, unsubscribe URLs, etc.) to merged data
-      // These are always available for template rendering
-      const dataWithSystemVars = {
-        ...mergedData,
-        id: contact.id,
-        email: contact.email,
-        data: mergedData, // Also available as nested data for {{data.fieldName}} syntax
-        unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
-        subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
-        manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
-      };
-
-      // Render template placeholders against the contact/request data.
-      //
-      // This bakes in any non-persistent request data before the email is stored; the
-      // worker renders a second pass against the contact's persistent data at send time.
-      //
-      // SECURITY: variable names here originate from contact/event `data`, which on the
-      // public /v1/track endpoint is attacker-controlled free text. The shared renderer
-      // treats names as data (scope lookups) and never compiles them into a RegExp, so a
-      // hostile key such as `(` can no longer throw a SyntaxError (persistent 500 on every
-      // send to that contact) and `(.+)+$` can no longer drive catastrophic backtracking
-      // (event-loop DoS). It also never throws, and matches the worker's render pass.
-      const {subject: renderedSubject, body: renderedBody} = EmailService.format({
-        subject: emailSubject!,
-        body: emailBody!,
-        data: dataWithSystemVars,
-      });
-
-      const email = await EmailService.sendTransactionalEmail({
-        projectId: auth.projectId,
-        contactId: contact.id,
-        subject: renderedSubject,
-        body: renderedBody,
-        from: emailFrom,
-        fromName: emailFromName,
-        toName: recipient.name,
-        replyTo: replyToEmail,
-        headers: headers || undefined,
-        attachments: attachments || undefined,
-        templateId: templateId,
-      });
-
-      emailResults.push({
-        contact: {
-          id: contact.id,
-          email: contact.email,
-        },
-        email: email.id,
-      });
+    // Plunk Lite: new recipients' domains are checked as they become contacts; look them up at once
+    if (recipients.length > 1 && verifySignupsEnabled()) {
+      await EmailVerificationService.prefetchSignupDomains(recipients.map(recipient => recipient.email));
     }
 
-    return res.status(200).json({
+    // Process each recipient
+    for (const [index, recipient] of recipients.entries()) {
+      try {
+        // Merge recipient name with data if provided
+        const recipientData = recipient.name
+          ? {...(data as Record<string, unknown> | undefined), name: recipient.name}
+          : (data as Record<string, unknown> | undefined);
+
+        // Create or update contact with metadata
+        // Transactional emails should not subscribe contacts by default
+        // New contacts default to unsubscribed unless explicitly opted in
+        // Existing contacts preserve their subscription state unless explicitly changed
+        // Plunk Lite: a new recipient whose address takes no email fails with 422 INVALID_EMAIL
+        // With the double opt-in on, a sign-up waits for confirmation and joins the segments then
+        const {contact, optIn} = await ContactService.upsertWithOptIn(
+          auth.projectId,
+          recipient.email,
+          recipientData,
+          subscribed,
+          false,
+          {verifySignup: true, key: 'secret', segmentIds: segments.map(s => s.id)},
+        );
+
+        // Get merged data including non-persistent fields for template rendering
+        const mergedData = ContactService.getMergedData(contact, data as Record<string, unknown> | undefined);
+
+        // Add system variables (email, unsubscribe URLs, etc.) to merged data
+        // These are always available for template rendering
+        const dataWithSystemVars = {
+          ...mergedData,
+          id: contact.id,
+          email: contact.email,
+          data: mergedData, // Also available as nested data for {{data.fieldName}} syntax
+          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
+          subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
+          manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
+        };
+
+        // Render template placeholders against the contact/request data.
+        //
+        // This bakes in any non-persistent request data before the email is stored; the
+        // worker renders a second pass against the contact's persistent data at send time.
+        //
+        // SECURITY: variable names here originate from contact/event `data`, which on the
+        // public /v1/track endpoint is attacker-controlled free text. The shared renderer
+        // treats names as data (scope lookups) and never compiles them into a RegExp, so a
+        // hostile key such as `(` can no longer throw a SyntaxError (persistent 500 on every
+        // send to that contact) and `(.+)+$` can no longer drive catastrophic backtracking
+        // (event-loop DoS). It also never throws, and matches the worker's render pass.
+        const {subject: renderedSubject, body: renderedBody} = EmailService.format({
+          subject: emailSubject!,
+          body: emailBody!,
+          data: dataWithSystemVars,
+        });
+
+        const email = await EmailService.sendTransactionalEmail({
+          projectId: auth.projectId,
+          contactId: contact.id,
+          subject: renderedSubject,
+          body: renderedBody,
+          from: emailFrom,
+          fromName: emailFromName,
+          toName: recipient.name,
+          replyTo: replyToEmail,
+          headers: headers || undefined,
+          attachments: attachments || undefined,
+          templateId: templateId,
+        });
+
+        emailResults.push({
+          contact: {
+            id: contact.id,
+            email: contact.email,
+          },
+          email: email.id,
+        });
+        if (!optIn) {
+          sentContactIds.push(contact.id);
+        }
+      } catch (error) {
+        const {status, code, message} = describeError(error);
+        // An address refused at sign-up comes with its likely correction, kept out of the message
+        const suggestedEmail =
+          error instanceof HttpException && typeof error.details?.suggestedEmail === 'string'
+            ? error.details.suggestedEmail
+            : undefined;
+        failed.push({email: recipient.email, code, message, ...(suggestedEmail ? {suggestedEmail} : {})});
+        if (status < 500) {
+          firstClientError ??= error;
+          continue;
+        }
+        // Without a known client error the rest would hit the same fault (a database outage) one by one
+        firstServerError = error;
+        for (const skipped of recipients.slice(index + 1)) {
+          failed.push({
+            email: skipped.email,
+            code: 'NOT_ATTEMPTED',
+            message: 'Not attempted after an unexpected error with an earlier recipient',
+          });
+        }
+        break;
+      }
+    }
+
+    // Nothing sent: the same answer as one recipient would give. An unexpected error wins over a
+    // client error, so the idempotency key stays claimed when an email may already be queued.
+    if (emailResults.length === 0 && (firstServerError || firstClientError)) {
+      throw firstServerError ?? firstClientError;
+    }
+    // A 207 does not carry an unexpected error to the error handler, so it is logged here
+    if (firstServerError) {
+      logger.error(
+        'Unexpected error sending to one recipient of /v1/send',
+        firstServerError,
+        {code: describeError(firstServerError).code},
+        res,
+      );
+    }
+
+    // Plunk Lite: the recipients sent to join the segments, all at once. Their emails are queued, so
+    // a failure here is told in the answer, not as an error a retry would answer by sending again.
+    let segmentsError: string | undefined;
+    if (segments.length > 0 && sentContactIds.length > 0) {
+      try {
+        const entries = await SegmentMembershipService.enterSegments(auth.projectId, segments, sentContactIds);
+        await SegmentMembershipService.fireEntryEvents(auth.projectId, entries);
+      } catch (error) {
+        segmentsError = 'The emails were queued, but adding their contacts to some of the segments failed';
+        logger.error('Could not add the recipients of /v1/send to its segments', error, {}, res);
+      }
+    }
+
+    // Plunk Lite: a partial send is 207, with the recipients that failed; still 2xx, so its
+    // idempotency key stays claimed and a blind retry cannot send the others twice
+    return res.status(failed.length > 0 ? 207 : 200).json({
       success: true,
       data: {
         emails: emailResults,
+        ...(failed.length > 0 ? {failed} : {}),
+        ...(segmentsError ? {segmentsError} : {}),
         timestamp: timestamp.toISOString(),
       },
     });

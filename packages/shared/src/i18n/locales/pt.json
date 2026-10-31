@@ -17,7 +17,19 @@
       "button": "Inscrever-se",
       "buttonLoading": "Inscrevendo...",
       "successTitle": "Você está inscrito!",
-      "successDescription": "{email} agora receberá e-mails de {projectName}."
+      "successDescription": "{email} agora receberá e-mails de {projectName}.",
+      "pendingTitle": "Verifique sua caixa de entrada",
+      "pendingDescription": "Enviamos um e-mail para {email}. Clique no link dele para confirmar sua inscrição em {projectName}."
+    },
+    "confirm": {
+      "title": "Confirme sua inscrição",
+      "description": "Confirme que deseja receber e-mails de {projectName} em {email}.",
+      "button": "Confirmar inscrição",
+      "buttonLoading": "Confirmando...",
+      "successTitle": "Inscrição confirmada!",
+      "successDescription": "{email} agora receberá e-mails de {projectName}.",
+      "invalidTitle": "Este link não funciona mais",
+      "invalidDescription": "Ele foi substituído por um e-mail mais recente, ou o endereço mudou. Inscreva-se novamente para receber um novo link."
     },
     "manage": {
       "title": "Gerenciar Preferências",
@@ -50,6 +62,7 @@
       "error": "Erro",
       "loadFailed": "Não foi possível carregar suas preferências de e-mail. Verifique o link e tente novamente.",
       "actionFailed": "Algo deu errado. Tente novamente.",
+      "resubscribeNeedsEmail": "Este endereço não pode ser inscrito novamente a partir daqui. Use o link de um e-mail que recebeu de nós.",
       "sentWith": "Enviado com {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Você recebeu este e-mail porque concordou em receber e-mails de {projectName}. Se não deseja mais receber e-mails como este, por favor",
       "updatePreferences": "atualize suas preferências"
+    },
+    "optin": {
+      "subject": "Confirme sua inscrição em {projectName}",
+      "text": "Obrigado por se inscrever para receber e-mails de {projectName}.\n\nPara começar a recebê-los, confirme que este é o seu endereço:",
+      "button": "Confirmar minha inscrição",
+      "ignore": "Se você não se inscreveu, ignore este e-mail: você não será inscrito."
     }
   }
 }

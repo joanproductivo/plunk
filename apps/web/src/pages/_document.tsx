@@ -21,7 +21,6 @@ function Document({locale}: {locale: string}) {
           property="og:description"
           content="Manage your email campaigns, contacts, and analytics with Plunk, the open-source email platform."
         />
-        <meta property="og:image" content="https://next-app.useplunk.com/api/og?title=Email%20Platform%20Dashboard" />
 
         {/* Twitter */}
         <meta property="twitter:card" content="summary_large_image" />
@@ -30,7 +29,6 @@ function Document({locale}: {locale: string}) {
           property="twitter:description"
           content="Manage your email campaigns, contacts, and analytics with Plunk, the open-source email platform."
         />
-        <meta property="twitter:image" content="https://next-app.useplunk.com/api/og?title=Email%20Platform%20Dashboard" />
 
         {/* Fonts */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />

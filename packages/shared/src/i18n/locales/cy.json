@@ -17,7 +17,19 @@
       "button": "Tanysgrifio",
       "buttonLoading": "Yn tanysgrifio...",
       "successTitle": "Rwyt ti wedi tanysgrifio!",
-      "successDescription": "Bydd {email} yn derbyn negeseuon e-bost gan {projectName} o hyn ymlaen."
+      "successDescription": "Bydd {email} yn derbyn negeseuon e-bost gan {projectName} o hyn ymlaen.",
+      "pendingTitle": "Gwiriwch eich mewnflwch",
+      "pendingDescription": "Rydym wedi anfon e-bost i {email}. Cliciwch y ddolen ynddo i gadarnhau eich tanysgrifiad i {projectName}."
+    },
+    "confirm": {
+      "title": "Cadarnhewch eich tanysgrifiad",
+      "description": "Cadarnhewch eich bod am dderbyn e-byst gan {projectName} yn {email}.",
+      "button": "Cadarnhau'r tanysgrifiad",
+      "buttonLoading": "Yn cadarnhau...",
+      "successTitle": "Rydych wedi tanysgrifio!",
+      "successDescription": "Bydd {email} nawr yn derbyn e-byst gan {projectName}.",
+      "invalidTitle": "Nid yw'r ddolen hon yn gweithio mwyach",
+      "invalidDescription": "Mae e-bost mwy diweddar wedi cymryd ei lle, neu mae'r cyfeiriad wedi newid. Cofrestrwch eto i gael dolen newydd."
     },
     "manage": {
       "title": "Rheoli dewisiadau",
@@ -50,6 +62,7 @@
       "error": "Gwall",
       "loadFailed": "Doedden ni ddim yn gallu llwytho dy ddewisiadau e-bost. Gwna'n siŵr bod y ddolen yn gywir a thria eto.",
       "actionFailed": "Aeth rhywbeth o'i le. Tria eto.",
+      "resubscribeNeedsEmail": "Ni ellir ail-danysgrifio'r cyfeiriad hwn o'r fan hon. Defnyddiwch y ddolen mewn e-bost a gawsoch gennym.",
       "sentWith": "Anfonwyd drwy {provider}"
     }
   },
@@ -57,6 +70,12 @@
     "footer": {
       "unsubscribeText": "Rwyt ti wedi cael yr e-bost hwn oherwydd dy fod wedi cytuno i dderbyn negeseuon e-bost gan {projectName}. Os nad wyt ti am dderbyn negeseuon e-bost fel hyn mwyach, gelli di",
       "updatePreferences": "ddiweddaru dy ddewisiadau"
+    },
+    "optin": {
+      "subject": "Cadarnhewch eich tanysgrifiad i {projectName}",
+      "text": "Diolch am gofrestru i dderbyn e-byst gan {projectName}.\n\nI ddechrau eu derbyn, cadarnhewch mai hwn yw eich cyfeiriad:",
+      "button": "Cadarnhau fy nhanysgrifiad",
+      "ignore": "Os na wnaethoch gofrestru, anwybyddwch yr e-bost hwn: ni fyddwch yn cael eich tanysgrifio."
     }
   }
 }

@@ -24,13 +24,22 @@ interface FacetedFilterMenuProps {
    * replaces the prior one). Defaults to true (multi-select).
    */
   multiple?: boolean;
+  /** Capitalise the labels, for fixed values like statuses. Off for names people typed. */
+  capitalize?: boolean;
 }
 
 /**
  * The option list inside every `FilterPill`: checkbox rows, selection logic and the
  * "Clear filter" recovery, defined once so every filter in the app behaves the same.
  */
-export function FacetedFilterMenu({title, options, selected, onChange, multiple = true}: FacetedFilterMenuProps) {
+export function FacetedFilterMenu({
+  title,
+  options,
+  selected,
+  onChange,
+  multiple = true,
+  capitalize = true,
+}: FacetedFilterMenuProps) {
   const selectedSet = new Set(selected);
 
   const toggle = (value: string) => {
@@ -60,7 +69,7 @@ export function FacetedFilterMenu({title, options, selected, onChange, multiple 
                   <Check className="h-3 w-3" aria-hidden="true" />
                 </span>
                 {Icon ? <Icon className="mr-2 h-4 w-4 text-neutral-500" aria-hidden="true" /> : null}
-                <span className="capitalize">{option.label}</span>
+                <span className={capitalize ? 'capitalize' : undefined}>{option.label}</span>
               </CommandItem>
             );
           })}

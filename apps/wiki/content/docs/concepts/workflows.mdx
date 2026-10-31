@@ -35,11 +35,21 @@ A workflow always begins with a single auto-created `TRIGGER` step. You build th
 | `TRIGGER`         | Auto-created entry point. Holds the trigger configuration.                                             | `eventName` (for `EVENT` trigger)                                |
 | `SEND_EMAIL`      | Sends an email to the contact using a template. Template variables resolve from contact data + execution context. | `templateId`, optional `from` override                  |
 | `DELAY`           | Pauses the execution for a fixed duration before continuing.                                           | `amount`, `unit` (`minutes` / `hours` / `days`)                  |
-| `WAIT_FOR_EVENT`  | Pauses until a specified event is tracked on the contact, with a timeout fallback.                     | `eventName`, `timeout` (seconds)                                 |
-| `CONDITION`       | Branches the execution based on contact data or event data. Each `CONDITION` step has two outgoing transitions tagged `yes` / `no`. | A filter expression (same shape as segment filters) |
+| `WAIT_FOR_EVENT`  | Pauses until a specified event is tracked on the contact, with a timeout fallback.                     | `eventName`, `timeout` (seconds; `0` or omitted waits with no limit) |
+| `CONDITION`       | Branches the execution based on contact data, event data or segment membership. Each `CONDITION` step has two outgoing transitions tagged `yes` / `no`. | A filter expression (same shape as segment filters) |
 | `WEBHOOK`         | Calls an external HTTPS endpoint with contact + execution context as the JSON body. `url`, header values, and `body` support `{{variables}}`. | `url`, optional `method`, `headers`, `body`            |
-| `UPDATE_CONTACT`  | Patches contact data — useful for tagging contacts as they progress (`{ stage: "activated" }`).        | `data` object                                                    |
+| `UPDATE_CONTACT`  | Patches contact data — useful for tagging contacts as they progress (`{ stage: "activated" }`) — and can subscribe or unsubscribe the contact and add it to or remove it from static segments. With the [double opt-in](/concepts/double-opt-in) on, subscribing a contact that is not sends it a confirmation email instead. | `updates`, `subscriptionAction` and/or `segments: { add, remove }` (segment IDs) |
 | `EXIT`            | Terminates the execution. Optionally records an `exitReason` for analytics.                            | optional `reason`                                                |
+
+A `WAIT_FOR_EVENT` step on an email event resumes when that event comes from any email of the contact, including emails sent by campaigns or other workflows (`scope: "contact"`, the default). For the events a workflow email produces (`email.sent`, `email.delivery`, `email.open`, `email.click`, `email.bounce`, `email.softbounce`, `email.complaint`), set `scope: "execution"` in the step config (**Only emails from this execution** in the editor) to count only the emails this execution sent to the contact. Emails a step sends to a custom recipient are recorded under the contact but never count for a scoped wait. If the execution sent several emails, an event from any of them resumes the wait. Give a scoped wait a timeout: if its email is never sent (for example, to an unsubscribed contact) or never opened, the execution would otherwise wait forever.
+
+### Segments in workflows
+
+An `UPDATE_CONTACT` step can move a contact between static segments: it applies the data and subscription changes first, then the removals, then the additions. For segments that track membership, the `exit` and `entry` events fire before the step finishes, so a workflow they start runs straight away and already sees the new data. Adding a contact who is already in a segment counts as a new entry (see [Segments](/concepts/segments)). A segment that has been deleted or is dynamic is skipped, listed in the step's `skippedSegments`, and the workflow carries on.
+
+A `CONDITION` step can check `segment.<segmentId>`: `true` when the contact is in that segment as the step runs — a current member of a static segment, or a match for a dynamic segment's filter. In the dashboard these fields appear under **Segments**, by name, both in the field picker and on the condition step in the canvas.
+
+Workflows that add contacts to each other's trigger segments can loop; see [Segments](/concepts/segments#tracking-membership-changes) for when, and keep **Allow re-entry** off unless a workflow needs it.
 
 ## Transitions
 
@@ -57,16 +67,39 @@ Each contact entering the workflow creates a `WorkflowExecution`. Executions mov
 | `WAITING`   | Paused inside a `DELAY` or `WAIT_FOR_EVENT` step.                                             |
 | `COMPLETED` | Reached the end of the graph successfully.                                                    |
 | `EXITED`    | Hit an `EXIT` step. `exitReason` records why.                                                 |
-| `FAILED`    | An unrecoverable error occurred (e.g. webhook returned non-2xx after retries, template not found). |
-| `CANCELLED` | Cancelled manually via the API or dashboard.                                                  |
+| `FAILED`    | An unrecoverable error occurred (e.g. webhook returned non-2xx, template not found). |
+| `CANCELLED` | Cancelled manually via the API or dashboard. Pending delays and waits do not resume it; a step already running finishes, and an email it queued is still sent. |
 
 Each execution carries a `context` JSON object that's merged with the contact's `data` when rendering templates and evaluating conditions. When you start an execution manually with `POST /workflows/:id/executions`, you can pass an initial `context` — this is how you parameterise per-execution variables (a coupon code, a referrer name) without storing them on the contact.
+
+## When something fails
+
+The dashboard shows failures in a red banner on every page until someone marks them reviewed. They are grouped by where they come from: one line per workflow, campaign or domain, one for transactional emails, and one for each condition below. Failures:
+
+- an execution that fails in a step, for example a webhook to an address Plunk refuses to call, or one that answers with a status other than 2xx. The request is not retried;
+- an email of a workflow, a campaign or an API call that SES does not accept, or that SES rejects afterwards for its content. The workflow's execution still shows as completed, because its step only queues the email; the failure is listed under the workflow;
+- a campaign batch, or a workflow job, that runs out of attempts;
+- an execution nothing would move on any more, which a check every 5 minutes fails: one left in progress by a restart (after 30 minutes without progress), one waiting on a step that was deleted, or one whose wait never ended a week after it was due. The same check queues again the end of a delay, or a wait's timeout, that should have come over 30 minutes earlier, so the execution carries on.
+
+Conditions that need attention:
+
+- **A campaign or workflow stopped for its bounces or complaints.** After a burst of bounces or complaints, Plunk checks the campaigns and workflows they came from, once for the whole burst (about ten seconds after the first one). A campaign still sending is cancelled once it has 100 emails sent and reaches 5% bounces (with at least 10) or 0.1% complaints (with at least 3); to send it again, duplicate it, and the copy goes to its whole audience. A workflow is disabled when its emails of the last day, at least 50, reach the same rates; its runs that have not sent an email yet are cancelled, with the emails they had queued. If you enable it again, only the emails it sends from then on count.
+- **Sending reputation.** The project's bounce and complaint rates past a warning threshold, or past a critical one. These only alert: once an alert about some conditions goes out, they show up again after a day, and a new condition at once.
+- **The project disabled.** With `AUTO_PROJECT_DISABLE` on, a project is disabled, as a last resort, only past `PLUNK_LITE_DISABLE_BOUNCE_PERCENT` of bounces in 7 days (8% by default, with at least 25 bounces in 200 emails) or `PLUNK_LITE_DISABLE_COMPLAINT_PERCENT` of complaints (0.4%, with at least 5 complaints). The addresses that bounced or complained are already suppressed. An owner or admin can reactivate it from the banner or **Settings → Security**; for the next 7 days only the emails sent from then on count towards disabling it again. The reactivation is shown too.
+- **The reputation check could not run**, so nothing would stop the project if its rates were too high.
+- **A domain that SES stops verifying**, for example because its DNS records were removed. Emails from it fail until they are back.
+- **SES events**: bounces or complaints that match no email (the address is still suppressed), notifications that cannot be read, the webhook's subscription to the events topic removed, events that stop arriving for the emails SES accepted, and configuration sets that do not publish them.
+- **The AWS account's CloudWatch alarms**, in every project, disabled ones included, until the alarm is back to OK. They show only in the banner: AWS emails them itself. If the webhook's subscription to the alarms topic is removed, the banner says the alarms no longer reach it.
+
+Marking a source reviewed closes what the banner showed. If it fails again, it shows up again, counting from one, and its alert email goes out again.
+
+In **Settings → Alerts** you can list up to 10 addresses that get an email about it: the first time a source fails, then at most once an hour while it keeps failing, and no more than ten alerts an hour for the whole project. These addresses only get alerts; they are not contacts. The alerts are sent from an address on one of the project's verified domains, through the same SES account: if your account is in the SES sandbox, each address must be verified there, and if SES stops sending, only the banner remains. If the sender's domain stops being verified, alerts go from the same name on the project's oldest other verified domain; with none, only the banner shows them, and a test alert always uses the address you saved. A disabled project still sends the alerts about its suspension, its sending reputation, the campaigns and workflows stopped, and SES events; nothing else, and no test alert.
 
 ## Locking active workflows
 
 A workflow is **locked** for structural edits while it has active (`RUNNING` or `WAITING`) executions. To make breaking changes — adding/removing steps, changing the trigger event, switching trigger type — first either:
 
-- Disable the workflow and wait for active executions to complete, or
+- Disable the workflow and wait for active executions to complete (an execution waiting on a `WAIT_FOR_EVENT` step with no timeout only completes when its event arrives), or
 - `POST /workflows/:id/executions/cancel-all` to cancel everything in flight.
 
 Cosmetic changes (renaming, editing template content referenced by steps) don't require this.
@@ -75,7 +108,7 @@ Cosmetic changes (renaming, editing template content referenced by steps) don't 
 
 - **Welcome series** — `EVENT` trigger on `signed_up`, send welcome email, delay 2 days, send tips email, delay 5 days, send upgrade nudge.
 - **Inbound auto-reply** — `EVENT` trigger on `email.received`, `CONDITION` on `event.spamVerdict == "PASS"`, then `SEND_EMAIL` with an auto-reply template. See [Receiving emails](/guides/receiving-emails).
-- **Re-engagement** — Triggered by a segment exit (`segment.active-users.exit`), send a "we miss you" email, wait 7 days for any `email.opened` event, branch on whether the contact engaged.
+- **Re-engagement** — Triggered by a segment exit (`segment.active-users.exit`), send a "we miss you" email, then wait up to 7 days for an `email.open` event (an open of any email counts) before continuing.
 - **Webhook fan-out** — `EVENT` trigger on `purchase.completed`, `WEBHOOK` step to your CRM, `UPDATE_CONTACT` to tag `{ tier: "customer" }`, `SEND_EMAIL` with the receipt.
 
 ## API reference

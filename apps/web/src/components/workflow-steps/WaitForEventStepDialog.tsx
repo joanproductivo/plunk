@@ -1,4 +1,18 @@
-import {Command, CommandGroup, CommandItem, CommandList, Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from '@plunk/ui';
+import {canScopeWaitToExecution} from '@plunk/shared';
+import {
+  Command,
+  CommandGroup,
+  CommandItem,
+  CommandList,
+  Input,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Switch,
+} from '@plunk/ui';
 import {useState} from 'react';
 import {toast} from 'sonner';
 import useSWR from 'swr';
@@ -40,7 +54,8 @@ function deriveTimeoutAmountUnit(timeoutSeconds: number): {amount: string; unit:
 export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, onSuccess}: EditStepDialogProps) {
   const config = getStepConfig(step);
 
-  const initialTimeout = deriveTimeoutAmountUnit(Number(config.timeout) || 86400);
+  // A saved 0 means no time limit and stays 0; a new step still proposes one day
+  const initialTimeout = deriveTimeoutAmountUnit(config.timeout === 0 ? 0 : Number(config.timeout) || 86400);
   const initialUnit: TimeUnit = isTimeUnit(initialTimeout.unit) ? initialTimeout.unit : 'days';
 
   const [name, setName] = useState(step.name);
@@ -48,6 +63,7 @@ export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, on
   const [eventPopoverOpen, setEventPopoverOpen] = useState(false);
   const [timeoutAmount, setTimeoutAmount] = useState(initialTimeout.amount);
   const [timeoutUnit, setTimeoutUnit] = useState<TimeUnit>(initialUnit);
+  const [onlyThisExecution, setOnlyThisExecution] = useState(config.scope === 'execution');
 
   const {data: eventNamesData} = useSWR<{eventNames: string[]}>(open ? '/events/names' : null, {
     revalidateOnFocus: false,
@@ -71,9 +87,12 @@ export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, on
 
     const timeoutSeconds = amount > 0 ? amount * SECONDS_PER_UNIT[timeoutUnit] : 0;
 
+    // The scope only applies to email events an execution's own emails produce
+    const scoped = onlyThisExecution && canScopeWaitToExecution(eventName);
+
     const ok = await update({
       name,
-      config: {eventName, timeout: timeoutSeconds},
+      config: {eventName, timeout: timeoutSeconds, ...(scoped ? {scope: 'execution'} : {})},
     });
 
     if (ok) {
@@ -114,7 +133,7 @@ export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, on
                 setTimeout(() => setEventPopoverOpen(false), 150);
               }}
               required
-              placeholder="e.g., email.clicked, user.upgraded"
+              placeholder="e.g., email.click, user.upgraded"
               className="mt-1.5"
               autoComplete="off"
             />
@@ -155,6 +174,21 @@ export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, on
           </div>
         </div>
 
+        {canScopeWaitToExecution(eventName) && (
+          <div className="flex items-start gap-3 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
+            <Switch id="editEventScope" checked={onlyThisExecution} onCheckedChange={setOnlyThisExecution} />
+            <div className="flex-1">
+              <Label htmlFor="editEventScope" className="font-medium cursor-pointer">
+                Only emails from this execution
+              </Label>
+              <p className="text-xs text-neutral-500 mt-1">
+                Count the event only for emails this workflow sent to the contact in this execution. Otherwise any email
+                the contact receives counts. Set a timeout too, in case the email is never sent or opened.
+              </p>
+            </div>
+          </div>
+        )}
+
         <div>
           <Label htmlFor="editEventTimeoutAmount">Timeout (optional)</Label>
           <div className="flex gap-2 mt-1.5">
@@ -179,7 +213,10 @@ export function WaitForEventStepDialog({step, workflowId, open, onOpenChange, on
               </SelectContent>
             </Select>
           </div>
-          <p className="text-xs text-neutral-500 mt-1.5">If not received, the workflow continues after this time</p>
+          <p className="text-xs text-neutral-500 mt-1.5">
+            If not received, the workflow continues after this time. Set it to 0 to wait until the event arrives, with
+            no time limit; until then the execution stays active.
+          </p>
         </div>
       </div>
     </StepDialogShell>

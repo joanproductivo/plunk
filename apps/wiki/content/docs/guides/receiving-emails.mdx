@@ -179,7 +179,7 @@ You can set a per-project inbound cap under **Billing → Limits**. Once the cap
 
 - **Treat the body as untrusted user input.** Plunk sanitizes HTML to prevent the obvious script-injection paths, but the message can still contain phishing links, social-engineering content, and unicode lookalikes. Don't render the body verbatim in any UI you control without re-escaping it for that context.
 - **Authentication verdicts are advisory.** Plunk records SPF / DKIM / DMARC results on the event but does not enforce them. Build your own policy: dropping unauthenticated mail at the workflow's first `CONDITION` step is a sensible default for sensitive inboxes (billing, account changes).
-- **Senders are auto-subscribed.** Inbound senders enter your audience as subscribed contacts. If you don't want that, add an `UPDATE_CONTACT` step at the end of the inbound workflow to set `subscribed: false`.
+- **New senders are auto-subscribed.** A sender who is not a contact yet enters your audience subscribed (unsubscribed with the [double opt-in](/concepts/double-opt-in) on). An existing contact keeps its subscription: an email in never resubscribes someone who left (Plunk Lite). If you don't want new senders subscribed, add an `UPDATE_CONTACT` step at the end of the inbound workflow to set `subscribed: false`.
 - **Reply-loop risk.** If your auto-reply sends back to a domain you also receive on (or to a list address), you can create an infinite loop. Add a `CONDITION` that drops messages where `event.from` matches your own domain.
 
 ## Limitations

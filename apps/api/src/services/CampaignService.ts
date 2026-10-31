@@ -2,6 +2,7 @@ import type {Campaign, Contact} from '@plunk/db';
 import {CampaignAudienceType, CampaignStatus, EmailSourceType, EmailStatus, Prisma, TemplateType} from '@plunk/db';
 import {compileTemplate} from '@plunk/shared';
 import type {
+  CampaignBatchJobData,
   CampaignListResponse,
   CampaignRecipient,
   CampaignRecipientType,
@@ -16,21 +17,30 @@ import signale from 'signale';
 import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
+import {renderBody} from '../utils/emailBody.js';
+import {isInfrastructureError} from '../utils/infrastructureErrors.js';
 import type {ListSort} from '../utils/listSort.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
+import {uuidv5} from '../utils/uuid.js';
 
 import {BillingLimitService} from './BillingLimitService.js';
 import {DomainService} from './DomainService.js';
-import {buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
-import {EmailService} from './EmailService.js';
+import {buildEmailHeaders, classifyEmail, withSourceEmail} from './EmailHeaderService.js';
+import {EmailService, POSSIBLY_SENT_NOTE} from './EmailService.js';
+import {FailureAlertService} from './FailureAlertService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SegmentService} from './SegmentService.js';
 import {Keys} from './keys.js';
 import {DASHBOARD_URI, STRIPE_ENABLED} from '../app/constants.js';
-import {sendRawEmail} from './SESService.js';
+import {getDailyQuotaQuick, sendRawEmail} from './SESService.js';
 
 const BATCH_SIZE = 500; // Number of emails to process per batch (increased for better performance)
+/** Plunk Lite: the share of SES's 24-hour quota a campaign may use up when it starts */
+const DAILY_QUOTA_SHARE = 0.95;
+
+/** Namespace of the campaign email ids; fixed, and used for nothing else */
+const CAMPAIGN_EMAIL_ID_NAMESPACE = 'b438d7ec-4f8c-4929-b750-e677bcec6d06';
 
 /**
  * Statuses a campaign may be archived from.
@@ -587,15 +597,24 @@ export class CampaignService {
    * Start sending campaign (called immediately or when scheduled time arrives)
    * Now uses cursor-based pagination for better performance with large recipient lists
    */
-  public static async startSending(projectId: string, campaignId: string, recipientCount?: number): Promise<void> {
+  public static async startSending(
+    projectId: string,
+    campaignId: string,
+    recipientCount?: number,
+    // The statuses a send may start from. The scheduled send passes only SCHEDULED, so a
+    // campaign whose schedule was cancelled back to a draft as it fired does not go out.
+    from: CampaignStatus[] = [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED],
+  ): Promise<void> {
     const campaign = await this.get(projectId, campaignId);
 
+    // Another request started this send first -- see the transition below
+    if (campaign.status === CampaignStatus.SENDING) {
+      signale.warn(`[CAMPAIGN] Campaign ${campaignId} is already sending, not starting it again`);
+      return;
+    }
+
     // Validate status
-    if (
-      campaign.status !== CampaignStatus.DRAFT &&
-      campaign.status !== CampaignStatus.SCHEDULED &&
-      campaign.status !== CampaignStatus.SENDING
-    ) {
+    if (!from.includes(campaign.status)) {
       throw new HttpException(400, 'Campaign cannot be sent in its current status');
     }
 
@@ -604,28 +623,59 @@ export class CampaignService {
       recipientCount = await this.getRecipientCount(projectId, campaign);
     }
 
-    // Update campaign to SENDING status
-    const updatedCampaign = await prisma.campaign.update({
-      where: {id: campaignId},
+    // Plunk Lite: refuse a send that would not fit in what is left of SES's 24-hour quota, keeping
+    // 5 % of it for the day's transactional and workflow emails. The campaigns still sending, in any
+    // project (they share the SES account), count with what they have left. Without an answer from
+    // SES, or with no limit, the send goes on. Two sends at the same moment can both pass: what does
+    // not fit then waits for the quota in the email queue, without being lost.
+    const quota = await getDailyQuotaQuick();
+    if (quota && quota.max24HourSend >= 0) {
+      const allowed = Math.floor(DAILY_QUOTA_SHARE * quota.max24HourSend);
+      // What each one has sent is in its live progress (sentCount is only written as it finalizes),
+      // and SES already counts it in sentLast24Hours. Without Redis it reads 0: the cautious side
+      const sending = await prisma.campaign.findMany({
+        where: {status: CampaignStatus.SENDING},
+        select: {id: true, totalRecipients: true, sentCount: true},
+      });
+      let pending = 0;
+      for (const other of sending) {
+        const sent = other.sentCount + (await this.readSentProgress(other.id));
+        pending += Math.max(0, other.totalRecipients - sent);
+      }
+      if (quota.sentLast24Hours + pending + recipientCount > allowed) {
+        const others =
+          pending > 0
+            ? `, ${pending} more are on their way in ${sending.length === 1 ? 'a campaign' : `${sending.length} campaigns`} still sending`
+            : '';
+        throw new HttpException(
+          400,
+          `Not enough SES quota: ${quota.sentLast24Hours} of ${quota.max24HourSend} emails sent in the last 24 hours${others}, and this campaign needs ${recipientCount} more (up to ${allowed} are used for campaigns). Send it, or schedule it again, once the quota allows, or ask AWS for a higher one.`,
+        );
+      }
+    }
+
+    // Move to SENDING only from DRAFT or SCHEDULED, in one statement: of two sends that race
+    // (a double click, a manual send of a campaign whose schedule fires at the same moment),
+    // exactly one starts. Two would be two generations, and every recipient would get two
+    // emails with different ids.
+    const sentAt = new Date();
+    const started = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: {in: from}},
       data: {
         status: CampaignStatus.SENDING,
         totalRecipients: recipientCount,
-        sentAt: new Date(),
-      },
-      include: {
-        project: {
-          select: {name: true},
-        },
+        sentAt,
       },
     });
 
-    // Send notification about campaign sending started
-    await NtfyService.notifyCampaignSendingStarted(
-      updatedCampaign.name,
-      updatedCampaign.project.name,
-      projectId,
-      recipientCount,
-    );
+    if (started.count === 0) {
+      const current = await prisma.campaign.findUnique({where: {id: campaignId}, select: {status: true}});
+      if (current?.status === CampaignStatus.SENDING) {
+        signale.warn(`[CAMPAIGN] Campaign ${campaignId} was started by another request`);
+        return;
+      }
+      throw new HttpException(400, 'Campaign cannot be sent in its current status');
+    }
 
     // Queue first batch to start the cursor-based chain
     await QueueService.queueCampaignBatch({
@@ -633,20 +683,67 @@ export class CampaignService {
       batchNumber: 1,
       offset: 0,
       limit: BATCH_SIZE,
+      generation: sentAt.getTime(),
     });
+
+    // Never allowed to fail the send: the campaign is SENDING and its first batch is queued
+    try {
+      const project = await prisma.project.findUnique({where: {id: projectId}, select: {name: true}});
+      await NtfyService.notifyCampaignSendingStarted(
+        campaign.name,
+        project?.name ?? projectId,
+        projectId,
+        recipientCount,
+      );
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to notify that campaign ${campaignId} started sending:`, error);
+    }
+  }
+
+  /**
+   * The id of the email a send of a campaign creates for a contact. Derived rather than random,
+   * so a batch that runs twice (a worker killed mid-batch, a retry after its last step failed)
+   * finds the rows it already created instead of creating -- and sending -- a second email.
+   */
+  public static emailIdFor(campaignId: string, generation: number, contactId: string): string {
+    return uuidv5(`${campaignId}:${generation}:${contactId}`, CAMPAIGN_EMAIL_ID_NAMESPACE);
+  }
+
+  /**
+   * Lock the campaign row for the rest of the transaction, and say whether it is still sending
+   * the send `generation` stands for.
+   *
+   * FOR SHARE, so batches do not wait on each other, while every UPDATE of the campaign (cancel,
+   * a new send, finalization) waits for the transaction to end. The row is read again after the
+   * lock rather than by the locking statement, so the comparison of `sentAt` is Prisma's, not a
+   * raw timestamp's.
+   *
+   * This relies on a campaign's batches running one after the other. Postgres lets a new FOR
+   * SHARE in ahead of an UPDATE already waiting for the row, so many guards overlapping on one
+   * campaign can hold a cancel off for seconds (measured: about 5 s with ten at once). Running a
+   * campaign's batches in parallel means revisiting this lock.
+   */
+  private static async holdsCurrentSend(
+    tx: Prisma.TransactionClient,
+    campaignId: string,
+    generation: number,
+  ): Promise<boolean> {
+    await tx.$queryRaw`SELECT 1 FROM "campaigns" WHERE "id" = ${campaignId} FOR SHARE`;
+    const campaign = await tx.campaign.findUnique({where: {id: campaignId}, select: {status: true, sentAt: true}});
+    return campaign?.status === CampaignStatus.SENDING && campaign.sentAt?.getTime() === generation;
   }
 
   /**
    * Process a single batch of campaign emails
    * Now uses cursor-based pagination for better performance
    */
-  public static async processBatch(
-    campaignId: string,
-    batchNumber: number,
-    offset: number,
-    limit: number,
-    cursor?: string,
-  ): Promise<void> {
+  public static async processBatch({
+    campaignId,
+    batchNumber,
+    limit,
+    cursor,
+    generation,
+  }: CampaignBatchJobData): Promise<void> {
     const campaign = await prisma.campaign.findUnique({
       where: {id: campaignId},
       include: {
@@ -663,6 +760,13 @@ export class CampaignService {
       return;
     }
 
+    // A batch of an earlier send of this campaign, or one queued before batches carried their
+    // send: creating its emails now would mail the audience a second time
+    if (!campaign.sentAt || campaign.sentAt.getTime() !== generation) {
+      signale.warn(`[CAMPAIGN] Batch ${batchNumber} of campaign ${campaignId} belongs to another send, skipping it`);
+      return;
+    }
+
     // Get batch of recipients using cursor-based pagination
     const {contacts, nextCursor, hasMore} = await this.getRecipientsCursor(campaign.projectId, campaign, limit, cursor);
 
@@ -674,7 +778,9 @@ export class CampaignService {
     // Queue emails for each contact
     for (const contact of contacts) {
       try {
-        // Render template with contact data
+        // Render template with contact data. Plunk Lite: this is the only render of a campaign
+        // email (the worker sends it as it is), so its links carry the email's id here
+        const id = this.emailIdFor(campaign.id, generation, contact.id);
         const contactData =
           contact.data && typeof contact.data === 'object' && !Array.isArray(contact.data) ? contact.data : {};
         const variables = {
@@ -682,29 +788,56 @@ export class CampaignService {
           email: contact.email,
           ...contactData,
           data: contactData,
-          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${contact.id}`,
-          subscribeUrl: `${DASHBOARD_URI}/subscribe/${contact.id}`,
-          manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
+          unsubscribeUrl: withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, id),
+          subscribeUrl: withSourceEmail(`${DASHBOARD_URI}/subscribe/${contact.id}`, id),
+          manageUrl: withSourceEmail(`${DASHBOARD_URI}/manage/${contact.id}`, id),
         };
 
         const renderedSubject = subjectTemplate.render(variables);
         const renderedBody = bodyTemplate.render(variables);
 
-        await EmailService.sendCampaignEmail({
-          projectId: campaign.projectId,
-          contactId: contact.id,
-          campaignId: campaign.id,
-          templateId: undefined,
-          subject: renderedSubject,
-          body: renderedBody,
-          from: campaign.from,
-          fromName: campaign.fromName || undefined,
-          replyTo: campaign.replyTo || undefined,
-          isTransactional: campaign.type === TemplateType.TRANSACTIONAL,
-        });
+        // The check at the top of the batch is long gone by now: the campaign may have been
+        // cancelled, or cancelled and sent again, since. Each email is created under a lock on the
+        // campaign row that re-checks the send, so once a cancel has changed the row no email of
+        // this send is created any more -- and every one created before it is there for the
+        // cancel and its cleanup to find. This is the only path that creates campaign emails.
+        const email = await EmailService.sendCampaignEmail(
+          {
+            id,
+            projectId: campaign.projectId,
+            contactId: contact.id,
+            campaignId: campaign.id,
+            templateId: undefined,
+            subject: renderedSubject,
+            body: renderedBody,
+            from: campaign.from,
+            fromName: campaign.fromName || undefined,
+            replyTo: campaign.replyTo || undefined,
+            isTransactional: campaign.type === TemplateType.TRANSACTIONAL,
+          },
+          tx => this.holdsCurrentSend(tx, campaign.id, generation),
+        );
+
+        if (!email) {
+          signale.warn(
+            `[CAMPAIGN] Batch ${batchNumber} of campaign ${campaignId} belongs to another send, stopping it`,
+          );
+          return;
+        }
       } catch (error) {
+        // A database or Redis outage would fail every contact after this one too, and they
+        // would be skipped for good. BullMQ retries the batch instead, which finds the emails
+        // it already created by their ids.
+        if (isInfrastructureError(error)) {
+          throw error;
+        }
+
+        // Anything else is about this contact (a billing limit, its data): skip it, and say so
         signale.error(`[CAMPAIGN] Failed to queue email for contact ${contact.id}:`, error);
-        // Continue with other contacts even if one fails
+        await FailureAlertService.recordCampaignJob(
+          campaignId,
+          `Could not queue the email to ${contact.email}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -716,6 +849,7 @@ export class CampaignService {
         offset: 0, // Not used with cursor pagination
         limit,
         cursor: nextCursor,
+        generation,
       });
     } else {
       // Last batch: reconcile totalRecipients to the actual number of emails created.
@@ -725,12 +859,17 @@ export class CampaignService {
       // campaign remains stuck in SENDING forever.
       const actualEmailCount = await prisma.email.count({where: {campaignId}});
 
-      await prisma.campaign.update({
-        where: {id: campaignId},
+      // Only while this is still the campaign's send: the last batch of a send that was
+      // cancelled and sent again would otherwise rewrite the new send's total, and finalize it
+      // before it has created a single email.
+      const reconciled = await prisma.campaign.updateMany({
+        where: {id: campaignId, sentAt: new Date(generation)},
         data: {totalRecipients: actualEmailCount},
       });
 
-      await this.finalizeIfDone(campaignId);
+      if (reconciled.count > 0) {
+        await this.finalizeIfDone(campaignId);
+      }
     }
   }
 
@@ -758,8 +897,9 @@ export class CampaignService {
    * count it twice.
    *
    * Never allowed to fail the send that triggered it: the message is already away
-   * by the time this runs, and throwing here would retry the job and send it again.
-   * A lost increment is corrected by `reconcileStats` at finalization.
+   * by the time this runs, and a failure here would hold back the rest of recording
+   * it (billing, `email.sent`) until the job's retry. A lost increment is corrected
+   * by `reconcileStats` at finalization.
    */
   public static async countCampaignSent(campaignId: string): Promise<void> {
     try {
@@ -858,8 +998,9 @@ export class CampaignService {
    *
    * One grouped pass over the campaign's emails, so the cost is O(campaign size)
    * and paid once. `unsubscribedCount` is deliberately absent: it is written together
-   * with `Email.unsubscribedAt`, in one transaction, by
-   * ContactService.recordCampaignUnsubscribe, so it is already exact, and recounting it
+   * with `Email.unsubscribedAt`, in one statement, by
+   * ContactService.recordCampaignUnsubscribe (the unsubscribe page, and in Plunk Lite the
+   * SES webhook), so it is already exact, and recounting it
    * here would also count rows the backfill stamped for opt-outs older than that write.
    *
    * `foldSentProgress` folds `sentCount` in as well and drops the Redis delta that
@@ -975,10 +1116,15 @@ export class CampaignService {
       return;
     }
 
-    await prisma.campaign.update({
-      where: {id: campaignId},
+    // Plunk Lite: only a send still going on -- one cancelled (or closed by another run) between the
+    // read above and here keeps its status, and is not reconciled or announced twice
+    const closed = await prisma.campaign.updateMany({
+      where: {id: campaignId, status: CampaignStatus.SENDING},
       data: {status: CampaignStatus.SENT, sentCount},
     });
+    if (closed.count === 0) {
+      return;
+    }
 
     // Fold every counter back to what the emails actually say, now that the send is
     // over, and settle `sentCount` against the live Redis delta. Events that arrive
@@ -1023,6 +1169,10 @@ export class CampaignService {
    * marks an email FAILED without clearing `sentAt`, so an email that SES accepted
    * before a later step threw is FAILED *and* sent. Testing status alone would read
    * that as never-sent and delete the only record of a message a recipient received.
+   * The same goes for a FAILED email SES may have accepted without the send learning
+   * so: one with the message id SES gave it, or whose error says it may have been
+   * sent. The cancel cleanup (`deleteUnsentCampaignEmails`) keeps exactly these rows,
+   * in SQL; the two must agree.
    */
   private static async hasDepartedEmail(campaignId: string): Promise<boolean> {
     const departed = await prisma.email.findFirst({
@@ -1030,7 +1180,10 @@ export class CampaignService {
         campaignId,
         OR: [
           {status: {in: this.DEPARTED_EMAIL_STATUSES}},
-          {status: EmailStatus.FAILED, sentAt: {not: null}},
+          {
+            status: EmailStatus.FAILED,
+            OR: [{sentAt: {not: null}}, {messageId: {not: null}}, {error: {contains: POSSIBLY_SENT_NOTE}}],
+          },
         ],
       },
       select: {id: true},
@@ -1064,7 +1217,8 @@ export class CampaignService {
    * mid-send owns up to a row per recipient, far too many to delete in a request, so
    * it comes back CANCELLED with `revertPending` set and is promoted by the cleanup
    * worker. Re-running cancel on a campaign already CANCELLED is the repair path for
-   * a cleanup that died: it re-queues the job rather than erroring.
+   * a cleanup that died: it queues the job again rather than erroring (and re-uses one
+   * still pending or running).
    */
   public static async cancel(
     projectId: string,
@@ -1089,11 +1243,19 @@ export class CampaignService {
 
     // Stop the send first -- see the ordering note above. Already CANCELLED on the
     // repair path, but the write is idempotent and keeps the timestamp fresh.
-    const cancelledCampaign = await prisma.campaign.update({
-      where: {id: campaignId},
-      data: {
-        status: CampaignStatus.CANCELLED,
+    // Plunk Lite: only from the statuses read above -- a send that finished meanwhile stays SENT
+    const stopped = await prisma.campaign.updateMany({
+      where: {
+        id: campaignId,
+        status: {in: [CampaignStatus.SCHEDULED, CampaignStatus.SENDING, CampaignStatus.CANCELLED]},
       },
+      data: {status: CampaignStatus.CANCELLED},
+    });
+    if (stopped.count === 0) {
+      throw new HttpException(400, 'Can only cancel scheduled or sending campaigns');
+    }
+    const cancelledCampaign = await prisma.campaign.findUniqueOrThrow({
+      where: {id: campaignId},
       include: {
         project: {
           select: {name: true},
@@ -1132,6 +1294,12 @@ export class CampaignService {
    * campaign was cancelled can stamp an email in that window. If one did, the
    * campaign stays CANCELLED and keeps the rows that prove it.
    *
+   * Nor does it revert while any row is left. An email that was mid-send when the
+   * cleanup passed it and failed afterwards is neither departed nor deleted, and a
+   * draft holding it would have it counted by its next send -- in the total the last
+   * batch reconciles and in what finalization counts as processed. Throwing has the
+   * cleanup job run again, and that pass deletes it.
+   *
    * Returns the status the campaign ended on, for the worker to log.
    */
   public static async completeCancelRevert(projectId: string, campaignId: string): Promise<CampaignStatus> {
@@ -1155,6 +1323,10 @@ export class CampaignService {
         `[CAMPAIGN] Campaign ${campaignId} sent an email while its cancellation was being cleaned up, staying cancelled`,
       );
       return CampaignStatus.CANCELLED;
+    }
+
+    if (await prisma.email.findFirst({where: {campaignId}, select: {id: true}})) {
+      throw new Error(`Campaign ${campaignId} still has unsent emails after its cleanup`);
     }
 
     await this.finishRevertToDraft(projectId, campaignId);
@@ -1225,22 +1397,25 @@ export class CampaignService {
    *
    * Reads the counters off the campaign row rather than recomputing them.
    * `sentCount` is maintained by the send paths and `unsubscribedCount` by
-   * ContactService.unsubscribe; delivered/opened/clicked/bounced/complained are
-   * written by `reconcileStats`, which runs when the send finalizes and then
-   * whenever the sweep finds the campaign in the dirty set -- so they trail an
-   * event by up to the sweep interval. Recomputing here instead would re-derive
-   * numbers that are already correct, at a cost that grows with the campaign --
-   * and, in the case of unsubscribes, with the size of the whole events table,
-   * since no index serves a predicate on Event.name alone. This endpoint is polled
-   * every 15s while a campaign is sending, so it has to stay a single indexed row
-   * lookup.
+   * ContactService.recordCampaignUnsubscribe (the unsubscribe page, and in Plunk Lite
+   * the SES webhook for the unsubscribe a bounce or complaint causes);
+   * delivered/opened/clicked/bounced/complained are written by `reconcileStats`, which
+   * runs when the send finalizes and then whenever the sweep finds the campaign in the
+   * dirty set -- so they trail an event by up to the sweep interval. Recomputing
+   * here instead would re-derive numbers that are already correct, at a cost that
+   * grows with the campaign -- and, in the case of unsubscribes, with the size of the
+   * whole events table, since no index serves a predicate on Event.name alone. This
+   * endpoint is polled every 15s while a campaign is sending, so it has to stay a
+   * single indexed row lookup (Plunk Lite: plus the small `lostCount` count below,
+   * over the opt-outs alone).
    *
    * Note what this means for a campaign that finalized before the counters were
    * written by anything: the row is authoritative, so a zero here is reported as a
    * zero no matter what the emails say. That is what the
    * 20260824120000_backfill_campaign_engagement_counters migration repairs.
    *
-   * `this.get` has already fetched the row, so the stats cost no further queries.
+   * `this.get` has already fetched the row, so the stats cost no further queries -- save one
+   * for `lostCount` (Plunk Lite), and only when it can differ from the plain sum.
    */
   public static async getStats(projectId: string, campaignId: string) {
     const campaign = await this.get(projectId, campaignId);
@@ -1263,6 +1438,24 @@ export class CampaignService {
         ? campaign.sentCount + (await this.readSentProgress(campaignId))
         : campaign.sentCount;
 
+    // Plunk Lite: the recipients lost to a bounce, a complaint or an opt-out, each once. A bounce
+    // or complaint that unsubscribes the contact counts as an opt-out too, so the plain sum counts
+    // them twice. The emails that carry both are few -- the partial index on `unsubscribedAt`
+    // holds only the opt-outs -- and what is taken off is bounded by either side, which keeps the
+    // figure sane while the bounce counters trail the sweep.
+    const suppressedCount = bouncedCount + complainedCount;
+    const both =
+      unsubscribedCount > 0 && suppressedCount > 0
+        ? await prisma.email.count({
+            where: {
+              campaignId,
+              unsubscribedAt: {not: null},
+              OR: [{bouncedAt: {not: null}}, {complainedAt: {not: null}}],
+            },
+          })
+        : 0;
+    const lostCount = suppressedCount + unsubscribedCount - Math.min(both, suppressedCount, unsubscribedCount);
+
     return {
       totalRecipients,
       sentCount,
@@ -1272,6 +1465,7 @@ export class CampaignService {
       bouncedCount,
       complainedCount,
       unsubscribedCount,
+      lostCount,
       openRate: sentCount > 0 ? (openedCount / sentCount) * 100 : 0,
       clickRate: sentCount > 0 ? (clickedCount / sentCount) * 100 : 0,
       bounceRate: sentCount > 0 ? (bouncedCount / sentCount) * 100 : 0,
@@ -1445,7 +1639,7 @@ export class CampaignService {
     }
 
     // Mirror the production classification so the test send carries the same
-    // headers real recipients would get. Test emails use the raw body without the
+    // headers real recipients would get. Test emails use the rendered body without the
     // unsubscribe footer, so there is no unsubscribe URL to advertise. A
     // transactional campaign resolves to a TRANSACTIONAL source upstream, so map it
     // here too.
@@ -1455,7 +1649,7 @@ export class CampaignService {
       campaignType: campaign.type,
     });
 
-    // Prepare the email content (no variable replacement for test emails)
+    // Styled like a real send, but without variable replacement: there is no contact to render for
     await sendRawEmail({
       from: {
         name: campaign.fromName || project.name || 'Plunk',
@@ -1464,7 +1658,7 @@ export class CampaignService {
       to: [testEmail],
       content: {
         subject: `[TEST] ${campaign.subject}`,
-        html: campaign.body,
+        html: renderBody(campaign.body),
       },
       reply: campaign.replyTo || undefined,
       headers: buildEmailHeaders({
@@ -1473,7 +1667,24 @@ export class CampaignService {
         customHeaders: {'X-Plunk-Test': 'true'},
       }),
       tracking: false, // Disable tracking for test emails
+      tags: {projectId, kind: 'test'},
     });
+  }
+
+  /**
+   * Plunk Lite: how many unsubscribed contacts a send of the campaign would reach now. Only a
+   * TRANSACTIONAL campaign reaches them (0 otherwise), so its send dialogs say so. Suppressed
+   * addresses are not left out of the count (their table has no relation to contacts); the send
+   * still skips them.
+   */
+  public static async getSendAudience(projectId: string, campaignId: string): Promise<{unsubscribed: number}> {
+    const campaign = await this.get(projectId, campaignId);
+    if (campaign.type !== TemplateType.TRANSACTIONAL) {
+      return {unsubscribed: 0};
+    }
+    const where = await this.buildRecipientWhereAsync(projectId, campaign);
+    // In an AND, so no key of the audience's own filter can override it
+    return {unsubscribed: await prisma.contact.count({where: {AND: [where, {subscribed: false}]}})};
   }
 
   /**
@@ -1495,12 +1706,12 @@ export class CampaignService {
   ): Promise<{contacts: Contact[]; nextCursor?: string; hasMore: boolean}> {
     const where = await this.buildRecipientWhereAsync(projectId, campaign);
 
-    // Fetch one extra to determine if there are more results
+    // Fetch one extra to determine if there are more results. Plunk Lite: the contacts after the
+    // cursor by id, rather than Prisma's cursor, which starts from the cursor's row -- and skipped
+    // one, or failed, when that contact had been deleted or had left the audience since
     const contacts = await prisma.contact.findMany({
-      where,
+      where: cursor ? {AND: [where, {id: {gt: cursor}}]} : where,
       take: limit + 1,
-      skip: cursor ? 1 : 0,
-      cursor: cursor ? {id: cursor} : undefined,
       orderBy: {id: 'asc'}, // Use ID for consistent cursor ordering
     });
 
@@ -1547,7 +1758,7 @@ export class CampaignService {
         }
 
         // Use the SegmentService to build the where clause from the condition
-        const segmentWhere = await SegmentService.buildConditionClause(condition);
+        const segmentWhere = await SegmentService.buildConditionClause(projectId, condition);
 
         return {
           ...baseWhere,
@@ -1590,7 +1801,7 @@ export class CampaignService {
     }
 
     const condition = fromPrismaJson<FilterCondition>(segment.condition);
-    const segmentWhere = await SegmentService.buildConditionClause(condition);
+    const segmentWhere = await SegmentService.buildConditionClause(projectId, condition);
 
     return {
       ...baseWhere,

@@ -3,21 +3,15 @@ import * as z from 'zod';
 import type {PlunkClient} from '../client.js';
 import {EMAIL_TYPES, FILTER_HELP, filterCondition} from '../schemas.js';
 
-import {
-  errorResult,
-  jsonResult,
-  paginationHint,
-  register,
-  requireConfirmation,
-  runTool,
-  type ToolContext,
-} from './shared.js';
+import {errorResult, jsonResult, pageHint, register, requireConfirmation, runTool, type ToolContext} from './shared.js';
 
+/** `GET /campaigns` is page-based, like `GET /workflows`. */
 interface CampaignList {
   data: unknown[];
-  cursor: string | null;
-  hasMore: boolean;
   total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
 interface Campaign {
@@ -29,6 +23,27 @@ interface Campaign {
   /** What the API actually returns. `recipientCount` is accepted as a fallback. */
   totalRecipients?: number;
   recipientCount?: number;
+  type?: string;
+}
+
+/**
+ * Plunk Lite: how many of a TRANSACTIONAL campaign's recipients are unsubscribed -- such a campaign
+ * reaches them too -- or undefined when the API cannot say. 0 for any other campaign.
+ */
+async function unsubscribedRecipients(client: PlunkClient, campaign: Campaign): Promise<number | undefined> {
+  if (campaign.type !== 'TRANSACTIONAL') {
+    return 0;
+  }
+  try {
+    const audience = unwrap(
+      await client.request<{unsubscribed: number} | {success: boolean; data: {unsubscribed: number}}>({
+        path: `/campaigns/${encodeURIComponent(campaign.id)}/audience`,
+      }),
+    );
+    return typeof audience?.unsubscribed === 'number' ? audience.unsubscribed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -75,19 +90,20 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
         search: z.string().optional().describe('Substring match on campaign name.'),
         status: z.string().optional().describe('Filter by status, e.g. DRAFT or SENT.'),
         limit: z.number().int().min(1).max(100).default(20).describe('Items per page (max 100).'),
-        cursor: z.string().optional().describe('Cursor from a previous page.'),
+        page: z.number().int().min(1).default(1).describe('Page number, starting at 1.'),
       }),
       annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true},
     },
-    async ({search, status, limit, cursor}) =>
+    async ({search, status, limit, page}) =>
       runTool(async () => {
         const result = await client.request<CampaignList>({
           path: '/campaigns',
-          query: {search, status, limit, cursor},
+          query: {search, status, page, pageSize: limit},
         });
 
         return jsonResult(
-          `Found ${result.data.length} campaign(s).${paginationHint(result.hasMore, result.cursor)}`,
+          `Found ${result.total} campaign(s); showing ${result.data.length}.` +
+            pageHint(result.page, result.totalPages),
           result,
         );
       }),
@@ -177,6 +193,9 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
         '',
         '**Returns:** The campaign with its updated status and recipient count.',
         '',
+        "Addresses on the project's suppression list (permanent bounces and spam complaints) are",
+        'unsubscribed and never emailed, so they are left out even if the audience matches them.',
+        '',
         '**This is irreversible.** Once sending starts the email cannot be recalled. This tool always',
         'asks the user to confirm before it proceeds, and will report the recipient count in that prompt.',
         '',
@@ -188,10 +207,17 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
           .string()
           .optional()
           .describe('ISO 8601 timestamp to schedule the send. Omit to send immediately.'),
+        includeUnsubscribed: z
+          .boolean()
+          .optional()
+          .describe(
+            'Only for a TRANSACTIONAL campaign, which reaches unsubscribed contacts too: set true to send it ' +
+              'when the number of them cannot be checked, and only once the user has said to.',
+          ),
       }),
       annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true},
     },
-    async ({id, scheduledFor}, context) =>
+    async ({id, scheduledFor, includeUnsubscribed}, context) =>
       runTool(async () => {
         // Read the campaign first so the confirmation names the real audience
         // size — "send to 43,812 people" is a very different decision from
@@ -207,11 +233,25 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
 
         const when = scheduledFor ? `scheduled for ${scheduledFor}` : 'sent immediately';
 
+        // Plunk Lite: a TRANSACTIONAL campaign also reaches whoever asked to receive nothing, so the
+        // confirmation says how many; without the number, the user has to say so explicitly
+        const unsubscribed = await unsubscribedRecipients(client, campaign);
+        if (unsubscribed === undefined && !includeUnsubscribed) {
+          return errorResult(
+            'This is a TRANSACTIONAL campaign, which reaches unsubscribed contacts too, and how many of them it ' +
+              'includes could not be checked. Ask the user first; only if they say to send it anyway, call again ' +
+              'with includeUnsubscribed: true.',
+          );
+        }
+        const unsubscribedNote = unsubscribed
+          ? ` It includes ${unsubscribed.toLocaleString()} unsubscribed contacts, since a TRANSACTIONAL campaign reaches them too.`
+          : '';
+
         const pending = requireConfirmation(
           context as {mcpReq?: {inputResponses?: unknown}},
           'confirm_campaign_send',
           `Send campaign "${campaign.name ?? id}" (subject: "${campaign.subject ?? '—'}") to ${audience}? ` +
-            `It will be ${when}. This cannot be undone.`,
+            `It will be ${when}.${unsubscribedNote} This cannot be undone.`,
         );
 
         if (pending) {
@@ -358,14 +398,16 @@ export function registerCampaignTools(ctx: ToolContext, client: PlunkClient): vo
         '**NOT for:** Project-wide reporting across campaigns — this covers one campaign only.',
         '',
         '**Returns:** `totalRecipients`, `sentCount`, `deliveredCount`, `openedCount`, `clickedCount`,',
-        '`bouncedCount`, `complainedCount`, `unsubscribedCount`, plus `openRate`, `clickRate`,',
+        '`bouncedCount`, `complainedCount`, `unsubscribedCount`, `lostCount`, plus `openRate`, `clickRate`,',
         '`bounceRate`, `deliveryRate`, `complaintRate` and `unsubscribeRate` as percentages.',
         '',
         '**Interpreting it:** rates are percentages of `sentCount`, not of `totalRecipients`, so a',
         'campaign still sending will show rates against the portion sent so far. A campaign that has',
-        'not been sent returns zeroes rather than an error. `unsubscribedCount` counts deliberate',
-        'opt-outs traced to this campaign, excluding the suppression that bounces and complaints',
-        'cause; those are reported by `bouncedCount` and `complainedCount`.',
+        'not been sent returns zeroes rather than an error. `unsubscribedCount` counts the opt-outs',
+        'traced to this campaign, including the unsubscribe a bounce or complaint causes when the',
+        'contact was subscribed or snoozed, which `bouncedCount` or `complainedCount` count as well.',
+        '`lostCount` is the recipients lost to any of the three, each counted once: use it, not the',
+        'sum, for how many the campaign lost.',
         '',
         '**Key trigger phrases:** "how did it do", "open rate", "did it bounce", "campaign performance"',
       ].join('\n'),

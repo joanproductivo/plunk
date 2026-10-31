@@ -8,9 +8,9 @@ Plunk supports bulk-importing contacts from a CSV file — useful for migrating 
 
 ## CSV format
 
-The CSV must have a header row. The only required column is `email`. Every other column becomes a custom field on the contact under `data.<columnname>`.
+The CSV must have a header row. The only required column is `email`. Every other column becomes a custom field on the contact under `data.<columnname>`, except the special and reserved columns listed below.
 
-Headers are lowercased on import, so a `firstName` column becomes the field `firstname`. Use lowercase names in your templates and segment filters, like `{{firstname}}`, or name the columns in lowercase to begin with.
+Headers are lowercased on import, so a `firstName` column becomes the field `firstname`. Use lowercase names in your templates and segment filters, like `{{firstname}}`, or name the columns in lowercase to begin with. Segment filters, workflow conditions and templates read a dot in a field name as nesting, so a dot in a column name is stored as `_` (`metafields.lastOpen` becomes `metafields_lastopen`), and a leading `data.` is dropped (`data.plan` fills `plan`).
 
 A minimal file:
 
@@ -37,8 +37,12 @@ In this example, every imported contact ends up with `data.firstname`, `data.pla
 - **File size**: up to 5 MB per upload. For larger lists, split the file and run multiple imports.
 - **Encoding**: UTF-8. Non-UTF-8 files may produce garbled custom field values.
 - **Email column**: must be present and valid. Rows with missing or invalid emails are reported back as errors.
-- **Reserved column names**: `id`, `createdAt`, `updatedAt`, and the auto-generated URL variables (`unsubscribeUrl`, etc.) are silently filtered out. Don't include them as columns.
-- **Subscription status**: an optional `subscribed` column sets whether each contact can receive marketing email. `true`, `1` and `yes` subscribe the contact; any other value, such as `false` or `no`, unsubscribes it. Leave the cell empty, or omit the column, to keep an existing contact's status unchanged. New contacts without a value are created subscribed.
+- **Reserved column names**: `id`, `updatedAt`, `dynamicSegments` and the auto-generated URL variables (`unsubscribeUrl`, etc.) are silently filtered out, and `createdAt` and `status` are read as described below. Don't use any of them for custom fields. This is what lets a file from **Export CSV** be imported back as it is.
+- **Segments**: an optional `segments` column adds each contact to the static segments it names, separated by `;` (`Club; VIP`), or by `,` when the cell has no `;` (`Club, VIP`, as Flodesk exports them). A file from **Export CSV** (it has a `dynamicSegments` column) is always read with `;`, so a single name with a comma comes back whole. Otherwise, a name that contains the separator stays whole when a segment already has it; in a cell without `;`, a new name with a comma is split. Names match regardless of case and surrounding spaces, and a name no segment has yet creates a static segment (up to 25 per import). The import only adds: a blank cell never removes anyone from a segment. It is not an entry either: contacts already in a segment are left as they are, and the segments it fills fire no `segment.<slug>.entry` event. Other events still can: a `subscribed` or `status` column that changes a contact's status fires `contact.subscribed` / `contact.unsubscribed`, and a dynamic segment that tracks membership fires its own entry on its next recomputation for imported contacts that match its filter (including membership of a static segment the import filled). Names of dynamic segments, or names shared by several static segments, are reported in the import summary and not assigned.
+- **Snoozed contacts**: a row exported with `status` `snoozed` and `subscribed` `false` keeps the contact snoozed instead of unsubscribing it.
+- **Subscription status**: an optional `subscribed` column sets whether each contact can receive marketing email. `true`, `1` and `yes` subscribe the contact; any other value, such as `false` or `no`, unsubscribes it. Leave the cell empty, or omit the column, to keep an existing contact's status unchanged, unless a `status` column says the contact opted out (below). With the [double opt-in](/concepts/double-opt-in) on (Plunk Lite), an import subscribes new contacts only: an existing contact that is unsubscribed stays so, and the import summary counts those rows.
+- **Status column**: without a `subscribed` value, a `status` column decides instead (case-insensitive). `subscribed`, `confirmed` and `active` subscribe new contacts. `unsubscribed` and `complained` are opt-outs: they unsubscribe new and existing contacts alike. `bounced`, `cleaned` and `complained` also put the address on the project's suppression list (Plunk Lite), and unsubscribe the contact even if it was subscribed: the address bounced or complained at the source, and is not mailed again until the suppression is removed on its contact page. `snoozed`, `inactive`, `unconfirmed`, `pending` and `cancelled` create new contacts unsubscribed and leave existing ones as they are, since they are not the person's decision. A status never resubscribes an existing contact. Any other status, or an empty one in a file with a `status` column and no `subscribed` column, leaves new contacts unsubscribed and existing ones unchanged, and is reported as a warning. New contacts in a file with neither column are created subscribed.
+- **Sign-up date**: a `createdAt` column in ISO 8601 (`2024-03-04T10:30:00Z`, `2024-03-04 10:30` or `2024-03-04`) sets when new contacts were created, so they count on their original date in analytics, in the contacts list and in `within` / `olderThan` segment filters on `createdAt`. A date without a zone is read as UTC, and one up to a day ahead is taken as now. Existing contacts keep their own date. A date that is not ISO 8601, is before 1990 or is more than a day ahead is reported as a warning, and the contact is dated today. It accepts more forms than custom date columns, which are typed as dates only when written as `2026-05-06` or `2026-05-06T12:00:00Z` (with no space and no offset). A dynamic segment that tracks membership with an `olderThan` filter on `createdAt` lets the imported contacts in on its next recomputation, firing its `segment.<slug>.entry` event for each of them.
 - **Date columns**: use ISO 8601 (`2026-05-06T12:00:00Z`) so they're typed as dates and become usable with `within` / `olderThan` segment operators.
 - **Boolean columns**: `true`, `false`, `yes`, `no` (case-insensitive) are stored as booleans and get the boolean toggle in segment filters.
 - **Numeric columns**: plain integers and decimals (`42`, `3.14`) are stored as numbers and become usable with `gt` / `lt` segment operators. Leading-zero values (`01234`), `+`-prefixed numbers, and scientific notation stay strings so IDs, zip codes, and phone numbers aren't corrupted.
@@ -101,7 +105,7 @@ Poll every few seconds until `status` is `completed` or `failed`. The response i
 }
 ```
 
-`imported` counts new contacts created. `updated` counts existing contacts whose `data` was patched. `errors` lists per-row issues with row number and reason so you can fix and re-upload.
+`imported` counts new contacts created. `updated` counts existing contacts whose `data` was patched. `errors` lists per-row issues with row number and reason so you can fix and re-upload. When the file has a `segments` column, `segmentsCreated` lists the static segments the import created, `segmentAssignments` counts contacts added to segments, and segment names that could not be assigned appear in `errors` with row `0`. `warnings` lists rows that were imported, but not quite as the file said: a `createdAt` that is not a usable date, or a `status` the import does not know.
 
 </Tab>
 
@@ -109,11 +113,11 @@ Poll every few seconds until `status` is `completed` or `failed`. The response i
 
 ## Tips
 
-- **Migrating unsubscribes**: when moving from another platform, export unsubscribed, bounced and complained contacts too, and import them with `subscribed` set to `false`. They stay on file for their history but are never sent marketing email.
+- **Migrating unsubscribes**: when moving from another platform, export unsubscribed, bounced and complained contacts too. With their `status` column, bounced and complained addresses are suppressed and never emailed again; with `subscribed` set to `false` they stay on file for their history but are never sent marketing email.
 - **Custom fields appear in segments immediately**: as soon as the import finishes, you can build dynamic segments on any of the imported columns.
 - **Idempotent reruns**: re-running the same CSV updates contacts in place rather than creating duplicates. If you fix a column and re-upload, all matching rows get the corrected value.
 
 ## Related
 
 - [Custom fields](/guides/custom-fields) — how the `data.<column>` fields you import are typed and used.
-- [Bulk operations](/api-reference/overview#contacts) — `bulk-subscribe`, `bulk-unsubscribe`, `bulk-delete` for mass actions on existing contacts (max 1,000 per call).
+- [Bulk operations](/api-reference/overview#contacts) — `bulk-subscribe`, `bulk-unsubscribe`, `bulk-delete`, `bulk-add-to-segment` and `bulk-remove-from-segment` for mass actions on existing contacts (max 1,000 ids per call, or every contact matching the list filters).

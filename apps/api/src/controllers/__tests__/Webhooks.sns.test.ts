@@ -1,16 +1,33 @@
-import type {Request, Response} from 'express';
+import {randomUUID} from 'node:crypto';
+
+import type {EventTrackingJobData} from '@plunk/types';
+import type {Job} from 'bullmq';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {EmailStatus} from '@plunk/db';
 
+import {prisma as appPrisma} from '../../database/prisma';
 import {redis} from '../../database/redis';
 import {CampaignService} from '../../services/CampaignService';
 import {ContactService} from '../../services/ContactService';
+import {EventService} from '../../services/EventService';
 import {Keys} from '../../services/keys';
 import {NtfyService} from '../../services/NtfyService';
+import {eventTrackingQueue, QueueService} from '../../services/QueueService';
+import {ReputationCheck} from '../../services/ReputationCheck';
 import {SecurityService} from '../../services/SecurityService';
-import {Webhooks} from '../Webhooks';
+import {affectedAddresses} from '../../services/SesEventMatch';
+import {getAwsAccountId} from '../../services/SESService';
+import {SnsSignature} from '../../services/SnsSignature';
+import {processEventTracking} from '../../jobs/event-tracking-processor';
+import {FOREIGN_TOPIC, notification, OWN_TOPIC, post, postSns} from './snsWebhook';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
+
+// The account the SES credentials belong to, normally looked up through STS
+vi.mock('../../services/SESService', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../services/SESService')>()),
+  getAwsAccountId: vi.fn(),
+}));
 
 /**
  * The SES event webhook, which is the only path that records delivery, opens, clicks, bounces
@@ -35,62 +52,19 @@ describe('Webhooks - SES event notifications', () => {
 
     // The signature is AWS's to produce; every test here is about what happens after it checks
     // out. The rejection path is covered separately below.
-    vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue(true);
+    vi.spyOn(SnsSignature, 'verify').mockResolvedValue('valid');
+    vi.mocked(getAwsAccountId).mockResolvedValue('111111111111');
+
+    // The event is tracked by the worker; here it runs as soon as it is queued, so the tests can
+    // read the events and workflows it leads to. The queue itself is covered further down.
+    vi.spyOn(QueueService, 'queueEventTracking').mockImplementation(async data => {
+      await processEventTracking({data} as Job<EventTrackingJobData>);
+      return {} as Job<EventTrackingJobData>;
+    });
 
     // One Redis key holds the dirty set for the whole worker, so an id left behind by an
     // earlier test would be swept by a later one and make its count wrong.
     await redis.del(Keys.Campaign.statsDirty());
-  });
-
-  /**
-   * Minimal Express response double.
-   *
-   * `sent` is the completion signal and tests must await it rather than the handler call: the
-   * `CatchAsync` decorator does not return the promise it creates, so awaiting a decorated
-   * method resolves before any of its async work has run.
-   */
-  function mockResponse() {
-    const captured = {status: 200, body: undefined as unknown};
-
-    let markSent: () => void;
-    const sent = new Promise<void>(resolve => {
-      markSent = resolve;
-    });
-
-    const res = {
-      status(code: number) {
-        captured.status = code;
-        return this;
-      },
-      json(body: unknown) {
-        captured.body = body;
-        markSent();
-        return this;
-      },
-    } as unknown as Response;
-
-    return {res, captured, sent};
-  }
-
-  /** Deliver one SES event notification, shaped the way SNS posts it. */
-  async function post(event: Record<string, unknown>) {
-    const {res, captured, sent} = mockResponse();
-    const req = {
-      body: {Type: 'Notification', Message: JSON.stringify(event)},
-      get: () => undefined,
-      headers: {},
-    } as unknown as Request;
-
-    await new Webhooks().receiveSNSWebhook(req, res);
-    await sent;
-
-    return captured;
-  }
-
-  const notification = (eventType: string, messageId: string, extra: Record<string, unknown> = {}) => ({
-    eventType,
-    mail: {messageId, timestamp: new Date().toISOString()},
-    ...extra,
   });
 
   async function sentEmail(messageId: string, campaignId?: string) {
@@ -223,6 +197,29 @@ describe('Webhooks - SES event notifications', () => {
 
       const contact = await prisma.contact.findUnique({where: {id: contactId}});
       expect(contact?.subscribed).toBe(true);
+
+      // Tracked under its own name, which no workflow listening for email.bounce hears
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(0);
+      const event = await prisma.event.findFirst({where: {emailId: email.id, name: 'email.softbounce'}});
+      expect(event?.data).toMatchObject({bounceType: 'Transient', transientBounce: true});
+    });
+
+    it('does not start a workflow triggered by email.bounce on a transient bounce', async () => {
+      const workflow = await factories.createWorkflow({
+        projectId,
+        enabled: true,
+        triggerConfig: {eventName: 'email.bounce'},
+      });
+      await sentEmail('ses-bounce-soft-workflow');
+
+      await post(notification('Bounce', 'ses-bounce-soft-workflow', {bounce: {bounceType: 'Transient'}}));
+
+      expect(await prisma.workflowExecution.count({where: {workflowId: workflow.id}})).toBe(0);
+
+      // The permanent bounce that follows does
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      await post(notification('Bounce', 'ses-bounce-soft-workflow', {bounce: {bounceType: 'Permanent'}}));
+      expect(await prisma.workflowExecution.count({where: {workflowId: workflow.id}})).toBe(1);
     });
 
     it('records a complaint and unsubscribes the contact', async () => {
@@ -295,9 +292,123 @@ describe('Webhooks - SES event notifications', () => {
     });
   });
 
+  /**
+   * A valid signature only proves AWS delivered a message. Anyone can create a topic in their
+   * own AWS account, subscribe this webhook to it and publish SES-shaped events, which AWS then
+   * signs. Only topics in the account Plunk sends from may be trusted.
+   */
+  describe('SNS topic origin', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const inbound = (sender: string, recipient: string) => ({
+      notificationType: 'Received',
+      mail: {source: sender, messageId: 'inbound-1', commonHeaders: {subject: 'Hello'}},
+      receipt: {recipients: [recipient]},
+    });
+
+    it('rejects an event from a topic in another AWS account', async () => {
+      const email = await sentEmail('ses-foreign-1');
+
+      const captured = await post(notification('Complaint', 'ses-foreign-1'), FOREIGN_TOPIC);
+
+      expect(captured.status).toBe(403);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.complainedAt).toBeNull();
+      const contact = await prisma.contact.findUnique({where: {id: contactId}});
+      expect(contact?.subscribed).toBe(true);
+      expect(await prisma.event.count({where: {emailId: email.id}})).toBe(0);
+    });
+
+    it('rejects a forged inbound email from another account, so no contact is created or resubscribed', async () => {
+      await factories.createDomain({projectId, domain: 'acme-inbound.test'});
+      const unsubscribed = await factories.createContact({
+        projectId,
+        email: 'opted-out@example.test',
+        subscribed: false,
+      });
+
+      const forged = await post(inbound('injected@example.test', 'hello@acme-inbound.test'), FOREIGN_TOPIC);
+      const resubscribe = await post(inbound(unsubscribed.email, 'hello@acme-inbound.test'), FOREIGN_TOPIC);
+
+      expect(forged.status).toBe(403);
+      expect(resubscribe.status).toBe(403);
+      expect(await prisma.contact.findFirst({where: {projectId, email: 'injected@example.test'}})).toBeNull();
+      expect((await prisma.contact.findUnique({where: {id: unsubscribed.id}}))?.subscribed).toBe(false);
+      expect(await prisma.email.count({where: {projectId, sourceType: 'INBOUND'}})).toBe(0);
+    });
+
+    it('still processes an inbound email from its own account', async () => {
+      await factories.createDomain({projectId, domain: 'acme-inbound.test'});
+
+      const captured = await post(inbound('customer@example.test', 'hello@acme-inbound.test'));
+
+      expect(captured.status).toBe(200);
+      expect(await prisma.contact.findFirst({where: {projectId, email: 'customer@example.test'}})).not.toBeNull();
+      expect(await prisma.email.count({where: {projectId, sourceType: 'INBOUND'}})).toBe(1);
+    });
+
+    it('does not confirm a subscription to a topic in another account', async () => {
+      const confirm = vi.fn().mockResolvedValue({ok: true});
+      vi.stubGlobal('fetch', confirm);
+
+      const captured = await postSns({
+        Type: 'SubscriptionConfirmation',
+        TopicArn: FOREIGN_TOPIC,
+        SubscribeURL: 'https://sns.eu-north-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc',
+      });
+
+      expect(captured.status).toBe(403);
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it('confirms a subscription to a topic in its own account', async () => {
+      const confirm = vi.fn().mockResolvedValue({ok: true});
+      vi.stubGlobal('fetch', confirm);
+
+      const captured = await postSns({
+        Type: 'SubscriptionConfirmation',
+        TopicArn: OWN_TOPIC,
+        SubscribeURL: 'https://sns.eu-north-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc',
+      });
+
+      expect(captured.status).toBe(200);
+      expect(confirm).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a message without a topic ARN', async () => {
+      const email = await sentEmail('ses-no-topic-1');
+
+      const captured = await postSns({
+        Type: 'Notification',
+        Message: JSON.stringify(notification('Delivery', 'ses-no-topic-1')),
+      });
+
+      expect(captured.status).toBe(403);
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.deliveredAt).toBeNull();
+    });
+
+    it('asks SNS to retry when the account cannot be looked up, then processes the redelivery', async () => {
+      const email = await sentEmail('ses-lookup-down-1');
+      vi.mocked(getAwsAccountId).mockRejectedValueOnce(new Error('STS unreachable'));
+
+      const failed = await post(notification('Delivery', 'ses-lookup-down-1'));
+
+      // 5xx, not 4xx: SNS retries server errors, so the genuine event is not lost
+      expect(failed.status).toBe(503);
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.deliveredAt).toBeNull();
+
+      const redelivered = await post(notification('Delivery', 'ses-lookup-down-1'));
+
+      expect(redelivered.status).toBe(200);
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.deliveredAt).not.toBeNull();
+    });
+  });
+
   describe('rejected and unmatched events', () => {
     it('rejects a notification whose signature does not verify', async () => {
-      vi.spyOn(SecurityService, 'verifySnsSignature').mockResolvedValue(false);
+      vi.spyOn(SnsSignature, 'verify').mockResolvedValue('invalid');
       const email = await sentEmail('ses-unsigned-1');
 
       const captured = await post(notification('Delivery', 'ses-unsigned-1'));
@@ -307,10 +418,18 @@ describe('Webhooks - SES event notifications', () => {
       expect(updated?.deliveredAt).toBeNull();
     });
 
-    it('404s an event for a messageId it does not know', async () => {
-      const captured = await post(notification('Delivery', 'ses-never-sent'));
+    it('asks SNS to retry an event for an email sent moments ago whose messageId is not stored yet', async () => {
+      const captured = await post(notification('Bounce', 'ses-not-stamped-yet', {bounce: {bounceType: 'Permanent'}}));
 
-      expect(captured.status).toBe(404);
+      expect(captured.status).toBe(503);
+    });
+
+    it("asks SNS to retry when AWS's signing certificate cannot be fetched", async () => {
+      vi.spyOn(SnsSignature, 'verify').mockResolvedValueOnce('unavailable');
+
+      const captured = await post(notification('Delivery', 'ses-cert-down'));
+
+      expect(captured.status).toBe(503);
     });
   });
   /**
@@ -324,7 +443,7 @@ describe('Webhooks - SES event notifications', () => {
   describe('SES mailbox simulator', () => {
     // These tests spy on the two services the handler is supposed to *not* call, and the
     // suite configures no automatic mock restoration -- so without this, a later test in
-    // this file would inherit a SecurityService whose enforcement is a no-op and would
+    // this file would inherit a ReputationCheck whose enforcement is a no-op and would
     // pass whether or not the handler still enforces.
     afterEach(() => {
       vi.restoreAllMocks();
@@ -336,7 +455,7 @@ describe('Webhooks - SES event notifications', () => {
     }
 
     it('processes a simulated bounce without enforcing security limits', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailBounce').mockResolvedValue(undefined);
       const email = await simulatedEmail('ses-simulated-bounce');
 
@@ -359,7 +478,7 @@ describe('Webhooks - SES event notifications', () => {
     });
 
     it('processes a simulated complaint without enforcing security limits', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailComplaint').mockResolvedValue(undefined);
       const email = await simulatedEmail('ses-simulated-complaint');
 
@@ -377,30 +496,30 @@ describe('Webhooks - SES event notifications', () => {
     });
 
     it('still enforces on a real bounce', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       await sentEmail('ses-real-bounce');
 
       await post(notification('Bounce', 'ses-real-bounce', {bounce: {bounceType: 'Permanent'}}));
 
-      expect(enforce).toHaveBeenCalledWith(projectId, 'bounce');
+      expect(enforce).toHaveBeenCalledWith(expect.objectContaining({projectId}), 'bounce');
     });
   });
 
   /**
    * SNS delivers at least once, so the same bounce or complaint notification arrives again
    * hours or days later. Reputation enforcement reads the rates by counting `bouncedAt` and
-   * `complainedAt` rows, so a second copy of an old event leaves every number unchanged --
-   * running the check on it could only re-disable a project over history it had already been
-   * judged against. That is what re-disabled a manually re-enabled project whose complaint
-   * count had not moved.
+   * `complainedAt` rows, so a second copy of an old event leaves every number unchanged: the
+   * copy records nothing and alerts no one. It does have the rates checked again (Plunk Lite),
+   * in case the first copy stopped before queueing the check; a project reactivated from the
+   * dashboard only counts what it sent since.
    */
   describe('duplicate SNS deliveries', () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });
 
-    it('does not re-enforce or re-alert on a redelivered complaint', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+    it('does not re-alert on a redelivered complaint, and checks the rates again', async () => {
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailComplaint').mockResolvedValue(undefined);
       const email = await sentEmail('ses-dup-complaint');
 
@@ -410,15 +529,17 @@ describe('Webhooks - SES event notifications', () => {
       await post(notification('Complaint', 'ses-dup-complaint'));
       const second = await prisma.email.findUnique({where: {id: email.id}});
 
-      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(enforce).toHaveBeenCalledTimes(2);
+      expect(enforce).toHaveBeenNthCalledWith(2, expect.objectContaining({projectId}), 'complaint');
       expect(notify).toHaveBeenCalledTimes(1);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.complaint'}})).toBe(1);
       // The complaint happened once; the timestamp must not walk forward into a window it
       // does not belong to, or the 24-hour and 7-day rates count it again later.
       expect(second?.complainedAt).toEqual(first?.complainedAt);
     });
 
-    it('does not re-enforce or re-alert on a redelivered permanent bounce', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+    it('does not re-alert on a redelivered permanent bounce, and checks the rates again', async () => {
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const notify = vi.spyOn(NtfyService, 'notifyEmailBounce').mockResolvedValue(undefined);
       const email = await sentEmail('ses-dup-bounce');
       const bounce = {bounce: {bounceType: 'Permanent'}};
@@ -429,13 +550,13 @@ describe('Webhooks - SES event notifications', () => {
       await post(notification('Bounce', 'ses-dup-bounce', bounce));
       const second = await prisma.email.findUnique({where: {id: email.id}});
 
-      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(enforce).toHaveBeenCalledTimes(2);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(second?.bouncedAt).toEqual(first?.bouncedAt);
     });
 
     it('enforces on a complaint for an email that had already hard bounced', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       await sentEmail('ses-bounce-then-complaint');
 
       await post(notification('Bounce', 'ses-bounce-then-complaint', {bounce: {bounceType: 'Permanent'}}));
@@ -444,12 +565,12 @@ describe('Webhooks - SES event notifications', () => {
       // Two distinct suppressions on one email. The complaint is new even though the bounce
       // was not, so it has to be counted -- and judged as a complaint, not as a bounce.
       expect(enforce).toHaveBeenCalledTimes(2);
-      expect(enforce).toHaveBeenNthCalledWith(1, projectId, 'bounce');
-      expect(enforce).toHaveBeenNthCalledWith(2, projectId, 'complaint');
+      expect(enforce).toHaveBeenNthCalledWith(1, expect.objectContaining({projectId}), 'bounce');
+      expect(enforce).toHaveBeenNthCalledWith(2, expect.objectContaining({projectId}), 'complaint');
     });
 
     it('suppresses an unknown bounce type without enforcing on it', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       const email = await sentEmail('ses-unknown-bounce');
 
       await post(notification('Bounce', 'ses-unknown-bounce', {bounce: {bounceType: 'Undetermined'}}));
@@ -462,12 +583,433 @@ describe('Webhooks - SES event notifications', () => {
     });
 
     it('does not enforce on a transient bounce', async () => {
-      const enforce = vi.spyOn(SecurityService, 'checkAndEnforceSecurityLimits').mockResolvedValue();
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
       await sentEmail('ses-transient-bounce');
 
       await post(notification('Bounce', 'ses-transient-bounce', {bounce: {bounceType: 'Transient'}}));
 
       expect(enforce).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Mail providers fetch the tracking pixel on their own, and SES marks those fetches. These are
+   * the fetches measured against a Gmail inbox: Gmail's servers took the pixel about two seconds
+   * after sending ("Likely"), and the reader's open came later through Google's image proxy, or
+   * Apple's when reading in Apple Mail ("Unlikely").
+   */
+  describe('automatic opens', () => {
+    const AUTOMATIC = {
+      isBotEvent: 'Likely',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0',
+    };
+    const PEOPLE = {
+      'Gmail web': {
+        isBotEvent: 'Unlikely',
+        userAgent: 'Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)',
+      },
+      'Apple Mail': {isBotEvent: 'Unlikely', userAgent: 'Mozilla/5.0'},
+    };
+    const HUMAN = PEOPLE['Gmail web'];
+
+    const open = (messageId: string, mark: typeof AUTOMATIC) =>
+      notification('Open', messageId, {open: {...mark, timestamp: new Date().toISOString()}});
+
+    it('writes nothing for an open SES marks as automated', async () => {
+      const campaign = await factories.createCampaign({projectId, name: 'Gmail', status: 'SENT'});
+      const email = await sentEmail('ses-automatic-1', campaign.id);
+
+      const captured = await post(open('ses-automatic-1', AUTOMATIC));
+      expect(captured.status).toBe(200);
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.status).toBe(EmailStatus.SENT);
+      expect(updated?.openedAt).toBeNull();
+      expect(updated?.opens).toBe(0);
+      expect(await prisma.event.findFirst({where: {emailId: email.id, name: 'email.open'}})).toBeNull();
+      expect(await CampaignService.sweepDirtyStats(100)).toBe(0);
+    });
+
+    it.each(Object.entries(PEOPLE))('counts an open SES marks as made by a person (%s)', async (client, mark) => {
+      const messageId = `ses-human-${client.replace(' ', '-')}`;
+      const email = await sentEmail(messageId);
+
+      await post(open(messageId, mark));
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.status).toBe(EmailStatus.OPENED);
+      expect(updated?.openedAt).not.toBeNull();
+      expect(updated?.opens).toBe(1);
+      const events = await prisma.event.findMany({where: {emailId: email.id, name: 'email.open'}});
+      expect(events).toHaveLength(1);
+      expect((events[0]?.data as {isFirstOpen?: boolean} | null)?.isFirstOpen).toBe(true);
+    });
+
+    it("counts the reader's open after the automatic fetch as the first one", async () => {
+      const email = await sentEmail('ses-automatic-2');
+
+      await post(open('ses-automatic-2', AUTOMATIC));
+      await post(open('ses-automatic-2', HUMAN));
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.opens).toBe(1);
+      const events = await prisma.event.findMany({where: {emailId: email.id, name: 'email.open'}});
+      expect(events).toHaveLength(1);
+      expect((events[0]?.data as {isFirstOpen?: boolean} | null)?.isFirstOpen).toBe(true);
+    });
+
+    it('ignores a redelivered automatic open as well', async () => {
+      const email = await sentEmail('ses-automatic-3');
+
+      await post(open('ses-automatic-3', AUTOMATIC));
+      await post(open('ses-automatic-3', AUTOMATIC));
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.status).toBe(EmailStatus.SENT);
+      expect(updated?.openedAt).toBeNull();
+      expect(updated?.opens).toBe(0);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.open'}})).toBe(0);
+    });
+  });
+
+  /**
+   * What SNS is told when processing fails. SNS only delivers again on a 5xx, so a 200 after a
+   * failure loses the event for good -- for a bounce or complaint, the suppression the
+   * reputation depends on. A 5xx after the suppression is recorded is wrong the other way: the
+   * redelivery records the event again and starts the workflows listening for it again.
+   */
+  describe('failures', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('asks SNS to deliver again when the suppression could not be recorded', async () => {
+      await sentEmail('ses-fail-before');
+      vi.spyOn(appPrisma, '$transaction').mockRejectedValueOnce(new Error('database down'));
+
+      const response = await post(notification('Bounce', 'ses-fail-before', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(response.status).toBe(500);
+    });
+
+    it('records the suppression and answers 200 when queueing the event fails', async () => {
+      const email = await sentEmail('ses-fail-track');
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      vi.mocked(QueueService.queueEventTracking).mockRejectedValue(new Error('redis down'));
+
+      const response = await post(notification('Bounce', 'ses-fail-track', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(response.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).not.toBeNull();
+      const contact = await prisma.contact.findUnique({where: {id: contactId}});
+      expect(contact?.subscribed).toBe(false);
+      // Enforcement runs before the event is queued, so a failure there cannot skip it
+      expect(enforce).toHaveBeenCalledWith(expect.objectContaining({projectId}), 'bounce');
+    });
+
+    it('answers 200 when the operator notification fails', async () => {
+      const email = await sentEmail('ses-fail-notify');
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      vi.spyOn(NtfyService, 'notifyEmailComplaint').mockRejectedValue(new Error('redis down'));
+
+      const response = await post(notification('Complaint', 'ses-fail-notify'));
+
+      expect(response.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.complainedAt).not.toBeNull();
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.complaint'}})).toBe(1);
+    });
+
+    it('records the suppression and enforces on the redelivery after a 500', async () => {
+      const email = await sentEmail('ses-fail-redeliver');
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      vi.spyOn(appPrisma, '$transaction').mockRejectedValueOnce(new Error('database down'));
+
+      const first = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
+      const second = await post(notification('Bounce', 'ses-fail-redeliver', {bounce: {bounceType: 'Permanent'}}));
+
+      expect(first.status).toBe(500);
+      expect(second.status).toBe(200);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).not.toBeNull();
+      // Nothing was recorded by the failed attempt, so the redelivery is the new suppression,
+      // with its tracked event
+      expect(enforce).toHaveBeenCalledTimes(1);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+
+    it('records one suppression when copies of the same bounce arrive together', async () => {
+      const email = await sentEmail('ses-bounce-copies');
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      const bounce = notification('Bounce', 'ses-bounce-copies', {bounce: {bounceType: 'Permanent'}});
+
+      const responses = await Promise.all([post(bounce), post(bounce), post(bounce)]);
+
+      expect(responses.map(response => response.status)).toEqual([200, 200, 200]);
+      // Each copy has the rates checked, which counts nothing twice; the event is tracked once
+      expect(enforce).toHaveBeenCalledTimes(3);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+  });
+
+  /**
+   * A bounce or complaint is about an address. The contact is only taken off the list when
+   * that address is theirs, and an address the account's suppression list already held is not
+   * a new bounce for the rate: SES never attempted it, and leaves it out of its own rate.
+   */
+  describe('which address bounced', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('does not unsubscribe the contact when a workflow email to a custom recipient bounces', async () => {
+      const email = await sentEmail('ses-override-bounce');
+      await prisma.email.update({
+        where: {id: email.id},
+        data: {headers: {'X-Plunk-Recipient-Override': 'someone@else.test'}},
+      });
+
+      await post(
+        notification('Bounce', 'ses-override-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'someone@else.test'}]},
+        }),
+      );
+
+      const contact = await prisma.contact.findUnique({where: {id: contactId}});
+      expect(contact?.subscribed).toBe(true);
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.status).toBe(EmailStatus.BOUNCED);
+      // Nor is the bounce tracked as the contact's: their workflows and webhooks would read it so
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(0);
+    });
+
+    it('suppresses the address the email went to, not the one the contact moved to since', async () => {
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      const email = await sentEmail('ses-moved-bounce');
+      const old = (await prisma.contact.findUniqueOrThrow({where: {id: contactId}})).email;
+      await prisma.contact.update({where: {id: contactId}, data: {email: 'moved@example.com'}});
+
+      await post({
+        ...notification('Bounce', 'ses-moved-bounce', {bounce: {bounceType: 'Permanent'}}),
+        mail: {messageId: 'ses-moved-bounce', timestamp: new Date().toISOString(), destination: [old]},
+      });
+
+      expect((await prisma.email.findUniqueOrThrow({where: {id: email.id}})).bouncedAt).not.toBeNull();
+      expect((await prisma.contact.findUniqueOrThrow({where: {id: contactId}})).subscribed).toBe(true);
+      const suppressed = await prisma.plunkLiteSuppression.findMany({where: {projectId}});
+      expect(suppressed.map(row => row.email)).toEqual([old.toLowerCase()]);
+    });
+
+    it('unsubscribes the contact when the bounced address listed by SES is theirs', async () => {
+      await sentEmail('ses-listed-bounce');
+      const contact = await prisma.contact.findUniqueOrThrow({where: {id: contactId}});
+
+      await post(
+        notification('Bounce', 'ses-listed-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: contact.email.toUpperCase()}]},
+        }),
+      );
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+    });
+
+    it('unsubscribes the contact when SES names the address their alias forwarded to', async () => {
+      const email = await sentEmail('ses-forwarded-bounce');
+
+      // SES reports the DSN's Final-Recipient: the mailbox the contact's address forwards to
+      await post(
+        notification('Bounce', 'ses-forwarded-bounce', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'gone@forwarded.test'}]},
+        }),
+      );
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+
+    it('does not unsubscribe again a contact who subscribed after the bounce was recorded', async () => {
+      await sentEmail('ses-bounce-redelivered');
+      const bounce = notification('Bounce', 'ses-bounce-redelivered', {bounce: {bounceType: 'Permanent'}});
+
+      await post(bounce);
+      await prisma.contact.update({where: {id: contactId}, data: {subscribed: true}});
+      // The same bounce again, as a replay from the dead-letter queue would deliver it
+      await post(bounce);
+
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(true);
+    });
+
+    it.each([
+      ['Bounce', {bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'}}],
+      ['Complaint', {complaint: {complaintSubType: 'OnAccountSuppressionList'}}],
+    ])('leaves a %s for an address already on the suppression list out of the rate', async (eventType, extra) => {
+      const enforce = vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      const email = await sentEmail(`ses-suppressed-${eventType}`);
+
+      await post(notification(eventType, `ses-suppressed-${eventType}`, extra));
+
+      const updated = await prisma.email.findUnique({where: {id: email.id}});
+      expect(updated?.bouncedAt).toBeNull();
+      expect(updated?.complainedAt).toBeNull();
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(enforce).not.toHaveBeenCalled();
+      const status = await SecurityService.getSecurityStatus(projectId);
+      expect(status.allTime.bounces + status.allTime.complaints).toBe(0);
+    });
+
+    it('tracks a bounce for an address already on the suppression list once, however many copies arrive', async () => {
+      const email = await sentEmail('ses-suppressed-copies');
+      const bounce = notification('Bounce', 'ses-suppressed-copies', {
+        bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'},
+      });
+
+      await Promise.all([post(bounce), post(bounce)]);
+
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.bounce'}})).toBe(1);
+    });
+
+    it('counts opens that arrive together', async () => {
+      const email = await sentEmail('ses-opens-together');
+      const open = notification('Open', 'ses-opens-together', {open: {}});
+
+      await Promise.all([post(open), post(open), post(open)]);
+
+      expect((await prisma.email.findUnique({where: {id: email.id}}))?.opens).toBe(3);
+    });
+  });
+
+  /**
+   * A permanent bounce or a complaint of the contact's address puts it on the project's own
+   * suppression list, so nothing that resubscribes the contact in passing mails it again
+   */
+  describe('suppression list', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const suppressionOf = async () => {
+      const contact = await prisma.contact.findUniqueOrThrow({where: {id: contactId}});
+      return prisma.plunkLiteSuppression.findUnique({where: {projectId_email: {projectId, email: contact.email}}});
+    };
+
+    it('records a permanent bounce, and then a complaint over it', async () => {
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      await sentEmail('ses-suppress-bounce');
+      await sentEmail('ses-suppress-complaint');
+
+      await post(notification('Bounce', 'ses-suppress-bounce', {bounce: {bounceType: 'Permanent'}}));
+      expect((await suppressionOf())?.reason).toBe('BOUNCE');
+
+      await post(notification('Complaint', 'ses-suppress-complaint', {complaint: {}}));
+      expect((await suppressionOf())?.reason).toBe('COMPLAINT');
+    });
+
+    it('records an address SES already had on its account suppression list', async () => {
+      await sentEmail('ses-suppress-account');
+
+      await post(
+        notification('Bounce', 'ses-suppress-account', {
+          bounce: {bounceType: 'Permanent', bounceSubType: 'OnAccountSuppressionList'},
+        }),
+      );
+
+      expect((await suppressionOf())?.reason).toBe('BOUNCE');
+    });
+
+    it('does not record a bounce SES could not classify', async () => {
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      await sentEmail('ses-suppress-undetermined');
+
+      await post(notification('Bounce', 'ses-suppress-undetermined', {bounce: {bounceType: 'Undetermined'}}));
+
+      // Unsubscribed as before, but the address may well be fine: it is not kept off every send
+      expect((await prisma.contact.findUnique({where: {id: contactId}}))?.subscribed).toBe(false);
+      expect(await suppressionOf()).toBeNull();
+    });
+
+    it('does not record a transient bounce, a simulated one or a custom recipient', async () => {
+      vi.spyOn(ReputationCheck, 'afterEvent').mockResolvedValue();
+      await sentEmail('ses-suppress-transient');
+      const simulated = await sentEmail('ses-suppress-simulated');
+      await prisma.email.update({where: {id: simulated.id}, data: {simulated: true}});
+      const custom = await sentEmail('ses-suppress-custom');
+      await prisma.email.update({
+        where: {id: custom.id},
+        data: {headers: {'X-Plunk-Recipient-Override': 'team@else.test'}},
+      });
+
+      await post(notification('Bounce', 'ses-suppress-transient', {bounce: {bounceType: 'Transient'}}));
+      await post(notification('Bounce', 'ses-suppress-simulated', {bounce: {bounceType: 'Permanent'}}));
+      await post(
+        notification('Bounce', 'ses-suppress-custom', {
+          bounce: {bounceType: 'Permanent', bouncedRecipients: [{emailAddress: 'team@else.test'}]},
+        }),
+      );
+
+      expect(await prisma.plunkLiteSuppression.count({where: {projectId}})).toBe(0);
+    });
+  });
+
+  /**
+   * The event goes to the worker in a job named after the SNS message, so the copies SNS
+   * delivers of one notification track it once
+   */
+  describe('event tracking queue', () => {
+    beforeEach(async () => {
+      vi.mocked(QueueService.queueEventTracking).mockRestore();
+      await eventTrackingQueue.obliterate({force: true});
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const postWithId = (event: Record<string, unknown>, messageId: string) =>
+      postSns({Type: 'Notification', TopicArn: OWN_TOPIC, MessageId: messageId, Message: JSON.stringify(event)});
+
+    it('queues the event once for copies of the same SNS message, without tracking it in the request', async () => {
+      const email = await sentEmail('ses-queued-open');
+      const track = vi.spyOn(EventService, 'trackEvent');
+      const open = notification('Open', 'ses-queued-open', {open: {}});
+      // Handled messages are remembered in Redis, which outlives a run of the suite
+      const messageId = `sns-message-${randomUUID()}`;
+
+      const responses = [await postWithId(open, messageId), await postWithId(open, messageId)];
+
+      expect(responses.map(response => response.status)).toEqual([200, 200]);
+      expect(track).not.toHaveBeenCalled();
+      const jobs = await eventTrackingQueue.getJobs(['waiting']);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].id).toBe(`sns-${messageId}`);
+      expect(jobs[0].data).toMatchObject({projectId, eventName: 'email.open', contactId, emailId: email.id});
+    });
+
+    it('tracks the queued event in the worker', async () => {
+      const email = await sentEmail('ses-worker-open');
+      await postWithId(notification('Open', 'ses-worker-open', {open: {}}), `sns-message-${randomUUID()}`);
+      const [job] = await eventTrackingQueue.getJobs(['waiting']);
+
+      await processEventTracking(job);
+
+      expect(await prisma.event.count({where: {emailId: email.id, name: 'email.open'}})).toBe(1);
+    });
+  });
+
+  describe('affectedAddresses', () => {
+    it('reads the addresses SES lists, lowercased, with or without a display name', () => {
+      expect(
+        affectedAddresses(
+          'Bounce',
+          {bounce: {bouncedRecipients: [{emailAddress: 'Ana <ANA@Example.com>'}, {emailAddress: ' bo@example.com '}]}},
+          'sent@example.com',
+        ),
+      ).toEqual(['ana@example.com', 'bo@example.com']);
+    });
+
+    it('falls back to the address the email was sent to when SES lists none', () => {
+      expect(affectedAddresses('Complaint', {complaint: {}}, 'Sent@Example.com')).toEqual(['sent@example.com']);
     });
   });
 });

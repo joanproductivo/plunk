@@ -14,6 +14,7 @@ export interface MockJob<T = any> {
   finishedOn?: number;
   returnvalue?: any;
   failedReason?: string;
+  opts?: {attempts?: number};
 }
 
 /**
@@ -28,8 +29,10 @@ export function createMockJob<T>(data: T, options: Partial<MockJob<T>> = {}): Jo
     finishedOn: options.finishedOn,
     returnvalue: options.returnvalue,
     failedReason: options.failedReason,
+    opts: options.opts ?? {},
     // Mock methods
     updateProgress: vi.fn(),
+    updateData: vi.fn(),
     log: vi.fn(),
     moveToCompleted: vi.fn(),
     moveToFailed: vi.fn(),

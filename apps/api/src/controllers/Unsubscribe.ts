@@ -57,13 +57,15 @@ export class Unsubscribe {
 
     const contact = await prisma.contact.findUnique({
       where: {id: contactId},
-      select: {subscribed: true},
+      select: {subscribed: true, snoozedUntil: true},
     });
 
     // Only act on a contact that is still subscribed. Providers retry, and users
     // can click unsubscribe more than once, so a repeat call must not fire a
-    // second `contact.unsubscribed` event.
-    if (contact?.subscribed) {
+    // second `contact.unsubscribed` event. A snoozed contact is not subscribed
+    // until the snooze ends, and asked now to stop for good: unsubscribing makes
+    // it permanent, so the snooze sweep cannot subscribe them again.
+    if (contact && (contact.subscribed || contact.snoozedUntil)) {
       await ContactService.unsubscribe(contactId, {emailId: readSourceEmailId(req)});
     }
 

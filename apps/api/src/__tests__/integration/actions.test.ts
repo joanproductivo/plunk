@@ -265,6 +265,74 @@ describe('Actions API Integration Tests', () => {
 
       expect(result.success).toBe(false);
     });
+
+    describe('size and depth of data (Plunk Lite)', () => {
+      const track = (data: unknown, event = 'signup') =>
+        ActionSchemas.track.safeParse({event, email: 'user@example.com', data});
+      const send = (data: unknown) =>
+        ActionSchemas.send.safeParse({to: 'user@example.com', subject: 'Hi', body: 'Hi', data});
+      /** An object nested `levels` deep */
+      const nested = (levels: number) => {
+        let value: unknown = 'leaf';
+        for (let i = 0; i < levels; i++) value = {child: value};
+        return value;
+      };
+
+      it('accepts a typical form submission', () => {
+        const form = Object.fromEntries(Array.from({length: 10}, (_, i) => [`field${i}`, `value ${i}`]));
+        expect(track(form).success).toBe(true);
+        expect(send(form).success).toBe(true);
+      });
+
+      it('refuses data over 32 KB', () => {
+        expect(track({notes: 'x'.repeat(33 * 1024)}).success).toBe(false);
+        expect(send({notes: 'x'.repeat(33 * 1024)}).success).toBe(false);
+      });
+
+      it('accepts 6 levels of nesting and refuses 7', () => {
+        expect(track(nested(6)).success).toBe(true);
+        expect(track(nested(7)).success).toBe(false);
+        expect(send(nested(6)).success).toBe(true);
+        expect(send(nested(7)).success).toBe(false);
+      });
+
+      it('refuses 10,000 levels with a validation issue instead of overflowing the stack', () => {
+        const result = track(nested(10_000));
+        expect(result.success).toBe(false);
+        expect(result.error?.issues[0]?.message).toContain('nested deeper');
+      });
+
+      it('refuses an event name over 100 characters or with a line break', () => {
+        expect(track({}, 'x'.repeat(100)).success).toBe(true);
+        expect(track({}, 'x'.repeat(101)).success).toBe(false);
+        expect(track({}, 'sign\nup').success).toBe(false);
+        expect(track({}, 'sign\u0000up').success).toBe(false);
+      });
+
+      it('refuses what Postgres cannot store, \\u0000 and lone surrogates, in values and keys', () => {
+        expect(track({note: 'a\u0000b'}).success).toBe(false);
+        expect(track({['a\u0000b']: 1}).success).toBe(false);
+        expect(send({deep: {note: 'a\u0000b'}}).success).toBe(false);
+        expect(track({name: 'x\ud800'}).success).toBe(false);
+        expect(track({name: '\udc00x'}).success).toBe(false);
+        expect(track({['k\ud800']: 1}).success).toBe(false);
+        // A whole pair is fine: an emoji
+        expect(track({name: 'hola \ud83d\ude00'}).success).toBe(true);
+        // Nor in the event name or a recipient's name, which are stored too
+        expect(track({}, 'sign\ud800up').success).toBe(false);
+        expect(
+          ActionSchemas.send.safeParse({to: [{name: 'Ana\ud800', email: 'a@example.com'}], subject: 'Hi', body: 'Hi'})
+            .success,
+        ).toBe(false);
+      });
+
+      it('takes at most 50 recipients in one send', () => {
+        const to = (count: number) => Array.from({length: count}, (_, i) => `user${i}@example.com`);
+        expect(ActionSchemas.send.safeParse({to: to(50), subject: 'Hi', body: 'Hi'}).success).toBe(true);
+        expect(ActionSchemas.send.safeParse({to: to(51), subject: 'Hi', body: 'Hi'}).success).toBe(false);
+        expect(ActionSchemas.send.safeParse({to: [], subject: 'Hi', body: 'Hi'}).success).toBe(false);
+      });
+    });
   });
 
   // ========================================

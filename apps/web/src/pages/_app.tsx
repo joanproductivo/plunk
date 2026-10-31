@@ -16,7 +16,6 @@ import {addRecentPage, getFallbackLabel} from '../lib/recentPages';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import advancedFormat from 'dayjs/plugin/advancedFormat';
-import Script from 'next/script';
 
 // Configure dayjs plugins globally
 dayjs.extend(relativeTime);
@@ -31,6 +30,8 @@ const PUBLIC_ROUTES = [
   '/unsubscribe',
   '/subscribe',
   '/manage',
+  // Plunk Lite: the double opt-in's confirmation page
+  '/confirm',
 ];
 
 // Routes that don't require a project. /account has to be here: deleting your account is
@@ -116,13 +117,6 @@ export default function WithProviders(props: AppProps) {
         }}
       >
         <DefaultSeo titleTemplate="%s | Plunk" defaultTitle="Plunk | Email Platform Dashboard" />
-
-        <Script
-          defer
-          src="https://analytics.driaug.com/script.js"
-          data-website-id="5880df93-9025-41ae-8e33-7c3da865f764"
-          data-domains="next-app.useplunk.com"
-        />
 
         <ActiveProjectProvider>
           <Root {...props} />

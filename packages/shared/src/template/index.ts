@@ -4,6 +4,22 @@ import {renderEngine, SCOPE_ALIAS, validationEngine} from './engine.js';
 import {renderLegacyTemplate} from './legacy.js';
 import {preprocessTemplate} from './preprocess.js';
 
+export * from './brand.js';
+export * from './color.js';
+export * from './emailBlocks.js';
+export * from './emailBox.js';
+export * from './emailButton.js';
+export * from './emailDocument.js';
+export * from './emailFonts.js';
+export * from './emailProseCss.js';
+export * from './emailVideo.js';
+export * from './emailVideoSize.js';
+export {escapeHtml} from './html.js';
+export {declarations, readPixels, withDeclaration} from './inlineStyle.js';
+export * from './optInEmail.js';
+export {type EmailMarkers, joinEmailMarkers, preheaderToText, splitEmailMarkers, textToPreheader} from './markers.js';
+export * from './unsubscribeFooter.js';
+
 /** A template parsed once and ready to be rendered against many recipients. */
 export interface CompiledTemplate {
   /** The original, unpreprocessed template string. */

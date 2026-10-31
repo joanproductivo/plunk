@@ -140,133 +140,142 @@ export default function TemplateEditorPage() {
         </div>
 
         <form onSubmit={handleSave} className="space-y-6">
-          {/* Row 1: Basic Info + Template Type */}
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Basic information</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">Template name <span className="text-red-500">*</span></Label>
-                  <Input
-                    id="name"
-                    type="text"
-                    value={editedTemplate.name || ''}
-                    onChange={e => setEditedTemplate({...editedTemplate, name: e.target.value})}
-                    required
-                    placeholder="e.g., Welcome email"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="description">Description</Label>
-                  <Input
-                    id="description"
-                    type="text"
-                    value={editedTemplate.description || ''}
-                    onChange={e => setEditedTemplate({...editedTemplate, description: e.target.value})}
-                    placeholder="e.g., Sent to new subscribers"
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Template type</CardTitle>
-                <CardDescription>Transactional templates skip the subscription check and the footer.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-col gap-2">
-                  {([
-                    {value: 'MARKETING', label: 'Marketing', description: 'Subscribed contacts, includes unsubscribe link'},
-                    {value: 'TRANSACTIONAL', label: 'Transactional', description: 'All contacts, no subscription check or footer'},
-                    {value: 'HEADLESS', label: 'Headless', description: 'Subscribed contacts, no Plunk footer'},
-                  ] as const).map(({value, label, description}) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setEditedTemplate({...editedTemplate, type: value})}
-                      className={`flex items-center justify-between w-full min-h-[44px] px-4 py-3 rounded-lg border-2 text-left transition-colors ${
-                        editedTemplate.type === value
-                          ? 'border-neutral-900 bg-neutral-50'
-                          : 'border-neutral-200 hover:border-neutral-300'
-                      }`}
-                    >
-                      <span className="font-medium text-sm text-neutral-900 shrink-0">{label}</span>
-                      <span className="text-xs text-neutral-500 ml-4 text-right">{description}</span>
-                    </button>
-                  ))}
-                </div>
-                {editedTemplate.type === 'HEADLESS' && !detectUnsubscribeSignal(editedTemplate.body ?? '') && (
-                  <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
-                    <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-100/60 px-3 py-2">
-                      <TriangleAlert className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                      <p className="text-xs font-semibold text-amber-900">No unsubscribe link detected</p>
+          {/* Wide screens: the editor on the left, the settings on the right. Below that, settings first */}
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
+            <div className="space-y-6 xl:col-start-2 xl:row-start-1">
+              {/* Row 1: Basic Info + Template Type */}
+              <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-1">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Basic information</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="name">Template name <span className="text-red-500">*</span></Label>
+                      <Input
+                        id="name"
+                        type="text"
+                        value={editedTemplate.name || ''}
+                        onChange={e => setEditedTemplate({...editedTemplate, name: e.target.value})}
+                        required
+                        placeholder="e.g., Welcome email"
+                      />
                     </div>
-                    <div className="px-3 py-2.5 space-y-2">
-                      <p className="text-xs text-amber-800 leading-relaxed">
-                        You are responsible for providing recipients a way to opt out. Use the Plunk variables below to build your own footer.
-                      </p>
-                      <div className="flex flex-wrap gap-1.5">
-                        <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
-                          {'{{unsubscribeUrl}}'}
-                        </code>
-                        <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
-                          {'{{manageUrl}}'}
-                        </code>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="description">Description</Label>
+                      <Input
+                        id="description"
+                        type="text"
+                        value={editedTemplate.description || ''}
+                        onChange={e => setEditedTemplate({...editedTemplate, description: e.target.value})}
+                        placeholder="e.g., Sent to new subscribers"
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Template type</CardTitle>
+                    <CardDescription>Transactional templates skip the subscription check and the footer.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex flex-col gap-2">
+                      {([
+                        {value: 'MARKETING', label: 'Marketing', description: 'Subscribed contacts, includes unsubscribe link'},
+                        {value: 'TRANSACTIONAL', label: 'Transactional', description: 'All contacts, no subscription check or footer'},
+                        {value: 'HEADLESS', label: 'Headless', description: 'Subscribed contacts, no Plunk footer'},
+                      ] as const).map(({value, label, description}) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setEditedTemplate({...editedTemplate, type: value})}
+                          className={`flex items-center justify-between w-full min-h-[44px] px-4 py-3 rounded-lg border-2 text-left transition-colors ${
+                            editedTemplate.type === value
+                              ? 'border-neutral-900 bg-neutral-50'
+                              : 'border-neutral-200 hover:border-neutral-300'
+                          }`}
+                        >
+                          <span className="font-medium text-sm text-neutral-900 shrink-0">{label}</span>
+                          <span className="text-xs text-neutral-500 ml-4 text-right">{description}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {editedTemplate.type === 'HEADLESS' && !detectUnsubscribeSignal(editedTemplate.body ?? '') && (
+                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 overflow-hidden">
+                        <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-100/60 px-3 py-2">
+                          <TriangleAlert className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                          <p className="text-xs font-semibold text-amber-900">No unsubscribe link detected</p>
+                        </div>
+                        <div className="px-3 py-2.5 space-y-2">
+                          <p className="text-xs text-amber-800 leading-relaxed">
+                            You are responsible for providing recipients a way to opt out. Use the Plunk variables below to build your own footer.
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
+                              {'{{unsubscribeUrl}}'}
+                            </code>
+                            <code className="inline-flex items-center rounded bg-amber-100 border border-amber-200 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">
+                              {'{{manageUrl}}'}
+                            </code>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Email Settings */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Email settings</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="subject">Subject line <span className="text-red-500">*</span></Label>
+                    <Input
+                      id="subject"
+                      type="text"
+                      value={editedTemplate.subject || ''}
+                      onChange={e => setEditedTemplate({...editedTemplate, subject: e.target.value})}
+                      required
+                      placeholder="e.g., Welcome to Acme"
+                    />
+                    <p className="text-xs text-neutral-500">Use {'{{variableName}}'} for dynamic content</p>
                   </div>
-                )}
+
+                  <EmailSettings
+                    from={editedTemplate.from || ''}
+                    fromName={editedTemplate.fromName || ''}
+                    replyTo={editedTemplate.replyTo || ''}
+                    onFromChange={value => setEditedTemplate({...editedTemplate, from: value})}
+                    onFromNameChange={value => setEditedTemplate({...editedTemplate, fromName: value})}
+                    onReplyToChange={value => setEditedTemplate({...editedTemplate, replyTo: value})}
+                    fromNamePlaceholder={activeProject?.name || 'Your Company'}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Email Body */}
+            <Card className="overflow-visible xl:sticky xl:top-6 xl:col-start-1 xl:row-start-1 xl:flex xl:h-[calc(100dvh-3rem)] xl:flex-col xl:self-start">
+              <CardHeader>
+                <CardTitle>Email body</CardTitle>
+              </CardHeader>
+              <CardContent className="xl:min-h-0 xl:flex-1">
+                <EmailEditor
+                  value={editedTemplate.body || ''}
+                  onChange={body => setEditedTemplate({...editedTemplate, body})}
+                  subject={editedTemplate.subject || ''}
+                  from={editedTemplate.from || ''}
+                  replyTo={editedTemplate.replyTo || ''}
+                  fillHeight
+                />
               </CardContent>
             </Card>
           </div>
-
-          {/* Email Settings */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Email settings</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="subject">Subject line <span className="text-red-500">*</span></Label>
-                <Input
-                  id="subject"
-                  type="text"
-                  value={editedTemplate.subject || ''}
-                  onChange={e => setEditedTemplate({...editedTemplate, subject: e.target.value})}
-                  required
-                  placeholder="e.g., Welcome to Acme"
-                />
-                <p className="text-xs text-neutral-500">Use {'{{variableName}}'} for dynamic content</p>
-              </div>
-
-              <EmailSettings
-                from={editedTemplate.from || ''}
-                fromName={editedTemplate.fromName || ''}
-                replyTo={editedTemplate.replyTo || ''}
-                onFromChange={value => setEditedTemplate({...editedTemplate, from: value})}
-                onFromNameChange={value => setEditedTemplate({...editedTemplate, fromName: value})}
-                onReplyToChange={value => setEditedTemplate({...editedTemplate, replyTo: value})}
-                fromNamePlaceholder={activeProject?.name || 'Your Company'}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Email Body */}
-          <Card className="overflow-visible">
-            <CardHeader>
-              <CardTitle>Email body</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <EmailEditor
-                value={editedTemplate.body || ''}
-                onChange={body => setEditedTemplate({...editedTemplate, body})}
-              />
-            </CardContent>
-          </Card>
 
           {/* Actions */}
           <div className="flex justify-between gap-3">

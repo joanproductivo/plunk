@@ -158,6 +158,37 @@ describe('EventService', () => {
       expect([WorkflowExecutionStatus.WAITING, WorkflowExecutionStatus.COMPLETED]).toContain(executions[0].status);
     });
 
+    it('does not meet the wait of the run the event starts with that same event (Plunk Lite)', async () => {
+      const contact = await factories.createContact({projectId});
+      // order -> wait for the next order (no timeout) -> exit
+      const workflow = await factories.createWorkflow({
+        projectId,
+        enabled: true,
+        triggerType: WorkflowTriggerType.EVENT,
+        triggerConfig: {eventName: 'order'},
+      });
+      const trigger = await prisma.workflowStep.findFirstOrThrow({where: {workflowId: workflow.id, type: 'TRIGGER'}});
+      const wait = await prisma.workflowStep.create({
+        data: {
+          workflowId: workflow.id,
+          type: 'WAIT_FOR_EVENT',
+          name: 'Next order',
+          position: {x: 0, y: 0},
+          config: {eventName: 'order'},
+        },
+      });
+      await prisma.workflowTransition.create({data: {fromStepId: trigger.id, toStepId: wait.id}});
+
+      await EventService.trackEvent(projectId, 'order', contact.id);
+      const [first] = await prisma.workflowExecution.findMany({where: {workflowId: workflow.id}});
+      expect(first!.status).toBe(WorkflowExecutionStatus.WAITING);
+
+      // The next order meets the wait
+      await EventService.trackEvent(projectId, 'order', contact.id);
+      const resumed = await prisma.workflowExecution.findUniqueOrThrow({where: {id: first!.id}});
+      expect(resumed.status).toBe(WorkflowExecutionStatus.COMPLETED);
+    });
+
     it('should NOT start a workflow for a contact from another project', async () => {
       const {project: otherProject} = await factories.createUserWithProject();
       const foreignContact = await factories.createContact({projectId: otherProject.id});
@@ -249,6 +280,31 @@ describe('EventService', () => {
       });
 
       expect(executions).toHaveLength(1); // Still only 1
+    });
+
+    it('does not start a workflow disabled while its cached listing still has it', async () => {
+      const contact = await factories.createContact({projectId});
+
+      const workflow = await factories.createWorkflow({
+        projectId,
+        enabled: true,
+        allowReentry: true,
+        triggerType: WorkflowTriggerType.EVENT,
+        triggerConfig: {eventName: 'cached.event'},
+      });
+
+      // Caches the enabled workflows for five minutes
+      await EventService.trackEvent(projectId, 'cached.event', contact.id);
+      // Disabled behind the cache's back, as a disable whose invalidation failed leaves it
+      await prisma.workflow.update({where: {id: workflow.id}, data: {enabled: false}});
+
+      await EventService.trackEvent(projectId, 'cached.event', contact.id);
+
+      const executions = await prisma.workflowExecution.findMany({
+        where: {workflowId: workflow.id, contactId: contact.id},
+      });
+
+      expect(executions).toHaveLength(1);
     });
 
     it('should allow re-entry when enabled', async () => {
