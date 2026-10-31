@@ -563,7 +563,8 @@ Plunk's webhook step has a few characteristics worth knowing when you build the 
 - **Redirects**: up to 5 redirects are followed. Each hop is re-validated against the SSRF rules below.
 - **Public URL required**: your webhook endpoint must be reachable on the public internet. Webhooks pointed at private or internal addresses (loopback, RFC 1918 ranges, etc.) won't be delivered.
 - **Schemes**: only `http://` and `https://` are accepted. Prefer HTTPS.
-- **No automatic retries**: a non-2xx response or timeout fails the workflow step. Build idempotency into your handler and use workflow logic (a `WAIT_FOR_EVENT` step, a fallback branch) if you need retry semantics.
+- **Automatic retries (Plunk Lite)**: a network error, a timeout or a `408`, `425`, `429` or `5xx` response is tried again after 3 s, 30 s, 5 min, 30 min, 2 h and 6 h. Meanwhile the execution is `WAITING`, and it blocks changes to the workflow like any other active execution. If every attempt fails, the step and its execution fail and the project is alerted. Any other response, a host that does not exist or an invalid certificate fails at once. A failed execution can be retried from the Executions tab, with a single attempt.
+- **Deliver at least once (Plunk Lite)**: a request that timed out may have reached you, so the same delivery can arrive twice. Every attempt carries the same `X-Plunk-Delivery-Id`: make your handler idempotent, or drop what you have already seen. The header is not part of the signature; if a repeat could be harmful, use `execution.id` from the signed body.
 - **Verify authenticity with a shared secret**: configure a secret header on the webhook step and check it on your endpoint:
 
   ```json

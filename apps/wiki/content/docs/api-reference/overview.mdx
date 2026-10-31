@@ -302,6 +302,7 @@ Each workflow consists of a **workflow** record, a graph of **steps**, **transit
 | GET    | `/workflows/:id/executions`                       | List executions, filterable by `status`.                                                 |
 | GET    | `/workflows/:id/executions/:executionId`          | Get a single execution.                                                                  |
 | DELETE | `/workflows/:id/executions/:executionId`          | Cancel a running or waiting execution.                                                   |
+| POST   | `/workflows/:id/executions/:executionId/retry`    | Retry a failed execution from the step it stopped on, with one attempt. Answers `202`; refused (`409`) on a delay, a wait or an update of the contact, or with the workflow off. |
 | POST   | `/workflows/:id/executions/cancel-all`            | Cancel every active execution at once.                                                   |
 
 ### Events
