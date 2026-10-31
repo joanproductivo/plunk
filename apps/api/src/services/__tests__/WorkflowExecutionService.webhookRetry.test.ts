@@ -6,6 +6,7 @@ import {prisma as servicePrisma} from '../../database/prisma';
 import {QueueService} from '../QueueService';
 import {WEBHOOK_DELIVERY_HEADER, WEBHOOK_RETRY_DELAYS_MS} from '../WebhookDelivery';
 import {WorkflowExecutionService} from '../WorkflowExecutionService';
+import {WorkflowRecoveryService} from '../WorkflowRecoveryService';
 import {WorkflowService} from '../WorkflowService';
 
 vi.mock('node:dns/promises', () => ({default: {lookup: vi.fn(async () => ({address: '1.2.3.4', family: 4}))}}));
@@ -345,17 +346,27 @@ describe('WorkflowExecutionService - webhook retries', () => {
       expect((await stepOf(executionId, webhook.id)).status).toBe(StepExecutionStatus.SCHEDULED);
     });
 
-    it('does nothing once the step was deleted: the sweep fails the run', async () => {
+    it('does nothing once the step was deleted, with the workflow off, and the sweep fails the run', async () => {
       fetchMock.mockImplementation(answer(503));
-      const {trigger, webhook, executionId} = await setup();
+      const {workflow, trigger, webhook, executionId} = await setup();
       await WorkflowExecutionService.processStepExecution(executionId, trigger.id);
       const {id} = await stepOf(executionId, webhook.id);
-      await prisma.workflowStep.delete({where: {id: webhook.id}});
+      await prisma.workflow.update({where: {id: workflow.id}, data: {enabled: false}});
+      await WorkflowService.deleteStep(projectId, workflow.id, webhook.id);
 
       await WorkflowExecutionService.processWebhookRetry(executionId, webhook.id, id);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(await runOf(executionId)).toMatchObject({status: WorkflowExecutionStatus.WAITING, currentStepId: null});
+
+      // Raw, so Prisma does not stamp updatedAt with now
+      await prisma.$executeRaw`UPDATE "workflow_executions" SET "updatedAt" = ${new Date(Date.now() - 31 * 60_000)} WHERE "id" = ${executionId}`;
+      await WorkflowRecoveryService.recoverWaits();
+
+      expect(await runOf(executionId)).toMatchObject({
+        status: WorkflowExecutionStatus.FAILED,
+        exitReason: 'Step deleted',
+      });
     });
 
     it('runs an attempt only once for two copies of the job', async () => {

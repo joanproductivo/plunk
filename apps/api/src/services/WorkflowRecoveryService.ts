@@ -146,9 +146,10 @@ export class WorkflowRecoveryService {
 
   /**
    * Waiting runs whose wait should have ended over 30 minutes ago. A delay's end, a wait's timeout or
-   * a webhook's next attempt is queued again (to run now); a run waiting on a deleted step, on a wait that never ended after
-   * a week of that, or on nothing that can end it, is failed with an alert. Safe against a job that
-   * is merely late: a queued job is left alone, and the jobs claim the run before moving it.
+   * a webhook's next attempt is queued again (to run now); a run waiting on a deleted step, on a wait
+   * that never ended after a week of that, or on nothing that can end it, is failed with an alert.
+   * Safe against a job that is merely late: a queued job is left alone, and the jobs claim the run
+   * before moving it.
    */
   public static async recoverWaits({overdueMs = STALE_MS, limit = LIMIT} = {}): Promise<number> {
     const now = Date.now();

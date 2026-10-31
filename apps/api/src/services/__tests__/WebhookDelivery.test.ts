@@ -42,12 +42,22 @@ describe('WebhookDelivery', () => {
   });
 
   describe('isTransientNetworkError', () => {
-    it.each(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'EAI_AGAIN', 'UND_ERR_SOCKET'])(
-      'repeats %s',
-      code => {
-        expect(isTransientNetworkError(fetchFailed(Object.assign(new Error('x'), {code})))).toBe(true);
-      },
-    );
+    it.each([
+      'ECONNREFUSED',
+      'ECONNRESET',
+      'ECONNABORTED',
+      'ETIMEDOUT',
+      'EPIPE',
+      'ENOTCONN',
+      'ENETDOWN',
+      'ENETUNREACH',
+      'EHOSTUNREACH',
+      'EADDRNOTAVAIL',
+      'EAI_AGAIN',
+      'UND_ERR_SOCKET',
+    ])('repeats %s', code => {
+      expect(isTransientNetworkError(fetchFailed(Object.assign(new Error('x'), {code})))).toBe(true);
+    });
 
     it('repeats a timeout and a DNS lookup that could not answer', () => {
       expect(isTransientNetworkError(timeout())).toBe(true);
@@ -88,7 +98,7 @@ describe('WebhookDelivery', () => {
     ])('never repeats the message of fetch for %s', (_name, message) => {
       const description = describeNetworkError(new TypeError(message), HOST);
 
-      expect(description).toBe(`Request to ${HOST} could not be sent (TypeError)`);
+      expect(description).toBe(`Request to ${HOST} failed (TypeError)`);
       expect(description).not.toMatch(/TOKEN|SECRET|s3cret/);
     });
   });

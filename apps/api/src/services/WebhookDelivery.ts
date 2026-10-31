@@ -16,10 +16,14 @@ export class WebhookTransientError extends Error {}
 const TRANSIENT_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
+  'ECONNABORTED',
   'ETIMEDOUT',
   'EPIPE',
+  'ENOTCONN',
+  'ENETDOWN',
   'ENETUNREACH',
   'EHOSTUNREACH',
+  'EADDRNOTAVAIL',
   'EAI_AGAIN',
   'UND_ERR_SOCKET',
   'UND_ERR_CONNECT_TIMEOUT',
@@ -100,7 +104,7 @@ export function describeNetworkError(error: unknown, hostname: string): string {
   }
   const failures = failuresOf(error);
   if (failures.length === 0) {
-    return `Request to ${hostname} could not be sent (${error instanceof Error ? error.name : 'unknown error'})`;
+    return `Request to ${hostname} failed (${error instanceof Error ? error.name : 'unknown error'})`;
   }
   const first = failures[0]!.code;
   const detail = failures.map(describeFailure).join(', ');
